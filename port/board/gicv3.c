@@ -464,7 +464,16 @@ int32_t IRQ_Enable(IRQn_ID_t irqn)
 	}
 
 	if (irqn >= IRQ_INTID_LPI_FIRST) {
-		/* LPIs are enabled through the ITS, in gicv3_its.c. */
+		/* An LPI has no enable bit in a GICR_ISENABLER register: its
+		 * enabled state lives in the ITS property table, which the ITS
+		 * module owns. Report success only for a range this build can
+		 * actually configure, so a caller cannot believe an
+		 * out-of-window LPI was enabled. The property table itself is
+		 * programmed by the caller through the ITS API, so there is
+		 * nothing to do here beyond validating the number. */
+		if (irqn < (IRQn_ID_t)(IRQ_INTID_LPI_FIRST + IRQ_LPI_TABLE_SIZE)) {
+			return 0;
+		}
 		return -1;
 	}
 	if (irqn > (IRQn_ID_t)IRQ_INTID_SPI_MAX) {
@@ -514,6 +523,14 @@ int32_t IRQ_Disable(IRQn_ID_t irqn)
 	uint32_t word;
 	uint32_t bit;
 
+	if (irqn >= IRQ_INTID_LPI_FIRST) {
+		/* Mirror of IRQ_Enable: an LPI's enabled state is the ITS
+		 * property table's, not a GICR_ICENABLER bit. */
+		if (irqn < (IRQn_ID_t)(IRQ_INTID_LPI_FIRST + IRQ_LPI_TABLE_SIZE)) {
+			return 0;
+		}
+		return -1;
+	}
 	if (irqn < 0 || irqn > (IRQn_ID_t)IRQ_INTID_SPI_MAX) {
 		return -1;
 	}
@@ -638,6 +655,13 @@ int32_t IRQ_ClearPending(IRQn_ID_t irqn)
 
 int32_t IRQ_SetPriority(IRQn_ID_t irqn, uint32_t priority)
 {
+	if (irqn >= IRQ_INTID_LPI_FIRST) {
+		/* An LPI's priority lives in the ITS property table, not in a
+		 * per-INTID GICR register. It is set through the ITS module when
+		 * the LPI is enabled; accepting a value here and dropping it
+		 * would be worse than refusing. */
+		return -1;
+	}
 	if (irqn < 0 || irqn > (IRQn_ID_t)IRQ_INTID_SPI_MAX) {
 		return -1;
 	}

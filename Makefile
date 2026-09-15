@@ -68,6 +68,7 @@ BOARD_SRCS := \
 	port/board/cache.c \
 	port/board/board_early.c \
 	port/board/gicv3.c \
+	port/board/gicv3_its.c \
 	port/board/tick.c
 
 ADAPTER_SRCS := \
@@ -158,6 +159,7 @@ deploy: $(TARGET).bin
 STUB_SRCS := \
 	port/adapters/stub/cmsis_os2_stub.c \
 	port/board/gicv3.c \
+	port/board/gicv3_its.c \
 	port/board/board_early.c \
 	port/board/memops.c \
 	port/board/cache.c \

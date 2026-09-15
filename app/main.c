@@ -23,6 +23,7 @@
 
 #include "Driver_USART.h"
 #include "board.h"
+#include "gicv3_its.h"
 #include "cmsis_os2.h"
 #include "irq_ctrl.h"
 
@@ -47,6 +48,7 @@ static uint32_t rtos_check_failures;
 
 /* Defined below, called from the report thread. */
 static void rtos_primitives_check(void);
+static void its_check(void);
 
 /* --- console -------------------------------------------------------------- */
 
@@ -121,6 +123,8 @@ static void task_report(void *argument)
 			if (rtos_check_failures == 0U) {
 				console_print("CMSIS RTOS2 OK\n");
 			}
+
+			its_check();
 
 			console_print("M0 ANCHORS DONE\n");
 
@@ -318,6 +322,38 @@ static void rtos_primitives_check(void)
 	}
 
 	console_print("CMSIS RTOS2 DONE\n");
+}
+
+/* --- ITS / LPI ------------------------------------------------------------
+ *
+ * The ITS is the one M0 gate item that the pre-existing carrier also failed at
+ * (its own log ends with "its lpi silent"), so this reports which rung of the
+ * ladder failed rather than a bare pass/fail. The ladder itself lives in
+ * port/board/gicv3_its.c, next to the register facts it depends on.
+ */
+static void its_check(void)
+{
+	uint32_t delivered = 0U;
+
+	if (its_selftest(&delivered) != 0) {
+		console_print("ITS LPI FAIL\n");
+		return;
+	}
+	console_print("ITS LPI OK (n=");
+	{
+		char buf[4];
+		int i = 0;
+		uint32_t v = delivered;
+
+		if (v >= 10U) {
+			buf[i++] = (char)('0' + (v / 10U));
+		}
+		buf[i++] = (char)('0' + (v % 10U));
+		buf[i++] = ')';
+		buf[i] = '\0';
+		console_print(buf);
+	}
+	console_print("\n");
 }
 
 /* --- boot ----------------------------------------------------------------- */

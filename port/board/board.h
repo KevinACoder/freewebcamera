@@ -45,6 +45,15 @@ void board_mmu_enable(void);
  * intermittent corruption rather than a clean failure. */
 void board_cache_init(void);
 
+/* Data cache maintenance. CMSIS has no AArch64 cache API, so these are board
+ * primitives, not an interface. They matter wherever CPU-written memory is read
+ * by a device over a non-coherent port (the ITS property/pending and command
+ * tables are the live example): a `dsb` orders a write, it does not write it
+ * back, so ordering alone leaves the device looking at stale memory. */
+void board_dcache_flush(uintptr_t addr, unsigned long size);
+void board_dcache_invalidate(uintptr_t addr, unsigned long size);
+void board_dcache_flush_invalidate(uintptr_t addr, unsigned long size);
+
 /* C entry point of the image. */
 void board_main(void);
 
