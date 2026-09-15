@@ -80,11 +80,28 @@
 #define GICD_CTLR_ENABLEGRP1NS	(1u << 1)
 #define GICD_CTLR_ARE_NS	(1u << 4)
 
-/* --- redistributor (this core's frame; SGI/PPI frame at +0x10000) --------- */
+/* --- redistributor (this core's frame) ------------------------------------
+ *
+ * A redistributor is two 64KiB frames: the RD_base frame at offset 0 (CTLR,
+ * TYPER, WAKER, ...) and the SGI_base frame at +0x10000 (the per-INTID
+ * Group/Enable/Pending/Priority/Config registers for INTID 0..31).
+ *
+ * ALL offsets below are relative to `gicr_base`, which is the RD_base frame -
+ * including the ones that carry GICR_SGI_OFFSET. That is the whole convention:
+ * every access is `gicr_base + OFFSET`, with no second addition anywhere.
+ *
+ * An earlier revision kept a second pointer that already had GICR_SGI_OFFSET
+ * folded in and then added these offsets to it, so every SGI/PPI register
+ * access landed one frame too high (RD + 0x20100 instead of RD + 0x10100).
+ * The consequence was invisible in exactly the way that matters: the timer
+ * raised its interrupt and set ISPENDR0, but the enable bit was written to
+ * unused space, so INTID 27 was never enabled and no interrupt ever reached
+ * the CPU. The scheduler started, ran the first task, and then every delay
+ * blocked forever. */
 #define GICR_CTLR		0x0000
 #define GICR_TYPER		0x0008
 #define GICR_WAKER		0x0014
-#define GICR_SGI_OFFSET		0x10000
+#define GICR_SGI_OFFSET		0x10000	/* start of the SGI_base frame */
 #define GICR_IGROUPR0		(GICR_SGI_OFFSET + 0x0080)
 #define GICR_ISENABLER0		(GICR_SGI_OFFSET + 0x0100)
 #define GICR_ICENABLER0		(GICR_SGI_OFFSET + 0x0180)
@@ -116,42 +133,9 @@
 #define GIC_WAIT_LIMIT		50000000u
 
 static volatile uint32_t *gicd;
-static volatile uint32_t *gicr_sgi;
+static volatile uint32_t *gicr_base;
 static uint32_t spi_line_count;
 static bool gic_ready;
-
-/* --- bring-up probes ------------------------------------------------------
- *
- * This board resets partway through GIC bring-up, and a reset cuts the console
- * mid-string, so "where the output stopped" and "where the code died" are not
- * the same place. These probes are deliberately tiny (a few bytes each) so the
- * last complete one identifies the exact register access that killed it, and
- * the value print covers the registers this board is known to read back
- * unreliably (GICD_CTLR, GICD_TYPER, IGROUPR0 have all been observed reading 0
- * here, so "the register disagrees with the spec" is a live hypothesis, not a
- * theoretical one). */
-static void gic_probe(const char *tag, uint32_t value)
-{
-	static const char digits[] = "0123456789abcdef";
-	char buf[20];
-	int i;
-
-	/* "[tag]=xxxxxxxx\n" - three tag characters, then the value in hex. */
-	buf[0] = '[';
-	for (i = 0; i < 3; i++) {
-		buf[1 + i] = tag[i];
-	}
-	buf[4] = ']';
-	buf[5] = '=';
-
-	for (i = 0; i < 8; i++) {
-		buf[6 + i] = digits[(value >> (28 - 4 * i)) & 0xfu];
-	}
-	buf[14] = '\n';
-	buf[15] = '\0';
-
-	board_early_print(buf);
-}
 
 static IRQHandler_t irq_handlers[IRQ_TABLE_SIZE];
 static IRQHandler_t lpi_handlers[IRQ_LPI_TABLE_SIZE];
@@ -175,11 +159,10 @@ static void gicr_wait_rwp(void)
 {
 	uint32_t i;
 
-	/* The redistributor's own CTLR carries its RWP bit; the frame base sits
-	 * one SGI-frame offset below gicr_sgi. */
+	/* The redistributor's own CTLR carries its RWP bit; it lives in the
+	 * RD_base frame, so it is reached as gicr_base + GICR_CTLR. */
 	for (i = 0; i < GIC_WAIT_LIMIT; i++) {
-		if ((reg_rd32((uintptr_t)gicr_sgi -
-				      GICR_SGI_OFFSET + GICR_CTLR) &
+		if ((reg_rd32((uintptr_t)gicr_base + GICR_CTLR) &
 		     GICR_CTLR_RWP) == 0u) {
 			return;
 		}
@@ -220,13 +203,11 @@ static void gic_distributor_init(void)
 	gicd_wait_rwp();
 
 	typer = reg_rd32((uintptr_t)gicd + GICD_TYPER);
-	gic_probe("typ", typer);
 	lines = ((typer & 0x1fu) + 1u) * 32u;
 	if (lines > (IRQ_INTID_SPI_MAX + 1u)) {
 		lines = IRQ_INTID_SPI_MAX + 1u;
 	}
 	spi_line_count = lines;
-	gic_probe("lin", lines);
 
 	/* Every SPI: Group 1 non-secure, masked, level-triggered, and routed
 	 * to this core. Routing must be explicit - with ARE set, an SPI whose
@@ -304,21 +285,12 @@ static void gic_redistributor_init(void)
 	 * IRQ_SetHandler / IRQ_SetPriority / IRQ_Enable, and those paths touch
 	 * one line at a time. That is the CMSIS model this file implements, and
 	 * it keeps us off firmware's lines by construction. */
-	gic_probe("rty", (uint32_t)(reg_rd64((uintptr_t)gicr_sgi -
-					     GICR_SGI_OFFSET + GICR_TYPER) &
-				   0xffffffffu));
-	gic_probe("sfc", (uint32_t)(reg_rd64((uintptr_t)gicr_sgi -
-					     GICR_SGI_OFFSET + GICR_TYPER) >> 32));
-
-	waker = reg_rd32((uintptr_t)gicr_sgi - GICR_SGI_OFFSET + GICR_WAKER);
-	gic_probe("wak", waker);
-	reg_wr32((uintptr_t)gicr_sgi - GICR_SGI_OFFSET + GICR_WAKER,
+	waker = reg_rd32((uintptr_t)gicr_base + GICR_WAKER);
+	reg_wr32((uintptr_t)gicr_base + GICR_WAKER,
 			  waker & ~GICR_WAKER_PROCESSORSLEEP);
-	gic_probe("clr", reg_rd32((uintptr_t)gicr_sgi - GICR_SGI_OFFSET +
-				  GICR_WAKER));
 
 	for (i = 0; i < GIC_WAIT_LIMIT; i++) {
-		if ((reg_rd32((uintptr_t)gicr_sgi - GICR_SGI_OFFSET +
+		if ((reg_rd32((uintptr_t)gicr_base +
 				      GICR_WAKER) & GICR_WAKER_CHILDRENASLEEP) == 0u) {
 			break;
 		}
@@ -326,10 +298,8 @@ static void gic_redistributor_init(void)
 	if (i == GIC_WAIT_LIMIT) {
 		board_early_print("[gicv3] redistributor never woke\n");
 	}
-	gic_probe("wok", i);
 
 	gicr_wait_rwp();
-	gic_probe("rwp", 0u);
 }
 
 static void gic_cpu_interface_sre_enable(void)
@@ -364,12 +334,28 @@ static void gic_cpu_interface_init(void)
 	 * silently masked. */
 	__asm__ __volatile__("msr s3_0_c4_c6_0, %0" ::"r"(0xffu));
 
-	/* ICC_IGRPEN1_EL1 is not written. Firmware (ATF, which reports
-	 * "ARM GICv3 driver initialized in EL3") has already enabled Group 1
-	 * signalling, and leaving it alone keeps us out of a register whose
-	 * security view we cannot verify. This is a choice, not a constraint:
-	 * the board-proven GICv3 code for this SoC does write it, so if Group 1
-	 * turns out not to be enabled this is the first thing to revisit. */
+	/* Enable Group 1 signalling at the CPU interface: ICC_IGRPEN1_EL1,
+	 * S3_0_C12_C12_7.
+	 *
+	 * An earlier revision deliberately skipped this on the belief that a
+	 * non-secure write to it resets the board. That belief was wrong - the
+	 * board-proven GICv3 driver for this SoC writes it - and skipping it
+	 * was the reason no Group 1 interrupt was ever delivered: the
+	 * scheduler started, the first task ran, and then every osDelay()
+	 * blocked forever because the tick never arrived. Distributor and
+	 * redistributor configuration all read back correct, which is exactly
+	 * what makes this failure mode quiet. */
+	{
+		uint32_t grpen = 0;
+
+		__asm__ __volatile__("mrs %0, s3_0_c12_c12_7" : "=r"(grpen));
+		if ((grpen & 0x1u) == 0u) {
+			grpen |= 0x1u;
+			__asm__ __volatile__("msr s3_0_c12_c12_7, %0"
+					     ::"r"(grpen));
+			__asm__ __volatile__("isb" ::: "memory");
+		}
+	}
 }
 
 void board_gicv3_init(void)
@@ -381,8 +367,7 @@ void board_gicv3_init(void)
 	}
 
 	gicd = (volatile uint32_t *)(uintptr_t)BOARD_GICD_BASE;
-	gicr_sgi = (volatile uint32_t *)(uintptr_t)(BOARD_GICR_BASE +
-						    GICR_SGI_OFFSET);
+	gicr_base = (volatile uint32_t *)(uintptr_t)BOARD_GICR_BASE;
 
 	for (i = 0; i < IRQ_TABLE_SIZE; i++) {
 		irq_handlers[i] = NULL;
@@ -404,21 +389,10 @@ void board_gicv3_init(void)
 	 * did it last, after GICD/GICR had already been written, which is a
 	 * hazardous order on hardware where the security state of the two views
 	 * differs. */
-	gic_probe("sre", 0u);
 	gic_cpu_interface_sre_enable();
-
-	gic_probe("dty", reg_rd32((uintptr_t)gicd + GICD_TYPER));
-	gic_probe("dct", reg_rd32((uintptr_t)gicd + GICD_CTLR));
-	gic_probe("dst", 0u);
 	gic_distributor_init();
-
-	gic_probe("rst", 0u);
 	gic_redistributor_init();
-
-	gic_probe("cif", 0u);
 	gic_cpu_interface_init();
-
-	gic_probe("rdy", 0u);
 	gic_ready = true;
 }
 
@@ -510,12 +484,21 @@ int32_t IRQ_Enable(IRQn_ID_t irqn)
 		 * bank is a non-secure write to secure state that resets this
 		 * board. Touching only the requested line means a caller can
 		 * only ever disturb an interrupt it explicitly asked to
-		 * enable. */
-		reg_wr32((uintptr_t)gicr_sgi + GICR_IGROUPR0,
-				  reg_rd32((uintptr_t)gicr_sgi + GICR_IGROUPR0) |
+		 * enable.
+		 *
+		 * IGRPMODR0 must be cleared as well, not just IGROUPR0 set. The
+		 * two bits together select the group: IGROUPR0=1 with
+		 * IGRPMODR0=1 is Group 1 *Secure*, which a non-secure handler
+		 * never receives. Setting only IGROUPR0 therefore looks correct
+		 * in every readback and still delivers nothing. */
+		reg_wr32((uintptr_t)gicr_base + GICR_IGROUPR0,
+				  reg_rd32((uintptr_t)gicr_base + GICR_IGROUPR0) |
 				  (1u << bit));
+		reg_wr32((uintptr_t)gicr_base + GICR_IGRPMODR0,
+				  reg_rd32((uintptr_t)gicr_base + GICR_IGRPMODR0) &
+				  ~(1u << bit));
 
-		reg_wr32((uintptr_t)gicr_sgi + GICR_ISENABLER0,
+		reg_wr32((uintptr_t)gicr_base + GICR_ISENABLER0,
 				  1u << bit);
 	} else {
 		reg_wr32((uintptr_t)gicd + GICD_ISENABLER(word),
@@ -539,7 +522,7 @@ int32_t IRQ_Disable(IRQn_ID_t irqn)
 	bit = (uint32_t)irqn % 32u;
 
 	if (irqn <= IRQ_INTID_SGI_PPI_MAX) {
-		reg_wr32((uintptr_t)gicr_sgi + GICR_ICENABLER0,
+		reg_wr32((uintptr_t)gicr_base + GICR_ICENABLER0,
 				  1u << bit);
 	} else {
 		reg_wr32((uintptr_t)gicd + GICD_ICENABLER(word),
@@ -613,7 +596,7 @@ int32_t IRQ_SetPending(IRQn_ID_t irqn)
 		return -1;
 	}
 	if (irqn <= IRQ_INTID_SGI_PPI_MAX) {
-		reg_wr32((uintptr_t)gicr_sgi + GICR_ISPENDR0,
+		reg_wr32((uintptr_t)gicr_base + GICR_ISPENDR0,
 				  1u << ((uint32_t)irqn % 32u));
 	} else {
 		reg_wr32((uintptr_t)gicd + GICD_ISPENDR((uint32_t)irqn / 32u),
@@ -629,7 +612,7 @@ uint32_t IRQ_GetPending(IRQn_ID_t irqn)
 		return 0u;
 	}
 	if (irqn <= IRQ_INTID_SGI_PPI_MAX) {
-		return (reg_rd32((uintptr_t)gicr_sgi + GICR_ISPENDR0) &
+		return (reg_rd32((uintptr_t)gicr_base + GICR_ISPENDR0) &
 			(1u << ((uint32_t)irqn % 32u))) ? 1u : 0u;
 	}
 	return (reg_rd32((uintptr_t)gicd +
@@ -643,7 +626,7 @@ int32_t IRQ_ClearPending(IRQn_ID_t irqn)
 		return -1;
 	}
 	if (irqn <= IRQ_INTID_SGI_PPI_MAX) {
-		reg_wr32((uintptr_t)gicr_sgi + GICR_ICPENDR0,
+		reg_wr32((uintptr_t)gicr_base + GICR_ICPENDR0,
 				  1u << ((uint32_t)irqn % 32u));
 	} else {
 		reg_wr32((uintptr_t)gicd + GICD_ICPENDR((uint32_t)irqn / 32u),
@@ -659,7 +642,7 @@ int32_t IRQ_SetPriority(IRQn_ID_t irqn, uint32_t priority)
 		return -1;
 	}
 	if (irqn <= IRQ_INTID_SGI_PPI_MAX) {
-		reg_wr8((uintptr_t)gicr_sgi + GICR_IPRIORITYR0 +
+		reg_wr8((uintptr_t)gicr_base + GICR_IPRIORITYR0 +
 				 (uint32_t)irqn, (uint8_t)(priority & 0xffu));
 	} else {
 		reg_wr8((uintptr_t)gicd + GICD_IPRIORITYR((uint32_t)irqn),
@@ -675,7 +658,7 @@ uint32_t IRQ_GetPriority(IRQn_ID_t irqn)
 		return IRQ_PRIORITY_ERROR;
 	}
 	if (irqn <= IRQ_INTID_SGI_PPI_MAX) {
-		return reg_rd8((uintptr_t)gicr_sgi + GICR_IPRIORITYR0 +
+		return reg_rd8((uintptr_t)gicr_base + GICR_IPRIORITYR0 +
 				       (uint32_t)irqn);
 	}
 	return reg_rd8((uintptr_t)gicd + GICD_IPRIORITYR((uint32_t)irqn));

@@ -78,13 +78,19 @@ void board_early_print(const char *message);
  *    enable bits clears ARE, and once ARE is clear the system-register CPU
  *    interface stops working - every ICC_IAR1_EL1 read returns spurious INTID
  *    1023 while the lines keep asserting.
+ *  - GICD_IPRIORITYR is one byte per INTID at 0x400 + id (no stride), and the
+ *    redistributor's per-INTID registers live in the SGI_base frame at
+ *    RD_base + 0x10000. Getting either of those addresses wrong does not fault
+ *    - it resets the SoC or silently fails to enable the interrupt.
  *  - The redistributor needs the WAKER handshake (clear ProcessorSleep, wait
  *    for ChildrenAsleep) or SPIs and PPIs are never delivered.
- *  - GICR_CTLR is NOT written here: EnableLPIs belongs to the LPI/ITS setup,
- *    and an earlier version that wrote it from a GICD-derived mask wrongly
- *    set EnableLPIs and CES together.
- *  - ICC_IGRPEN1_EL1 is not written at EL1 - a non-secure write resets the
- *    board. Firmware has already enabled Group 1. */
+ *  - A PPI needs both IGROUPR0 bit set and IGRPMODR0 bit clear to be Group 1
+ *    non-secure; setting IGROUPR0 alone selects Group 1 *Secure*, which a
+ *    non-secure handler never receives.
+ *  - ICC_IGRPEN1_EL1 is enabled here if it is not already on. The board-proven
+ *    GICv3 path for this SoC writes it; skipping it leaves every Group 1
+ *    interrupt undelivered while all distributor state reads back correct.
+ *  - GICR_CTLR is NOT written: EnableLPIs belongs to the LPI/ITS setup. */
 void board_gicv3_init(void);
 
 /* Dispatch entry called by the kernel port's vApplicationIRQHandler with the

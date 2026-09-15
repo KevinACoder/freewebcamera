@@ -75,14 +75,30 @@
 
 /* --- register access ------------------------------------------------------ */
 
+/* The constants above are already BYTE offsets, not register indices: the part
+ * has reg-shift=2 / reg-io-width=4, so 16550 register index N sits at byte
+ * offset 4*N (LSR, index 5, is at 0x14). No further shift belongs here.
+ *
+ * An earlier revision shifted again (base + (offset << 2)), which pointed
+ * every access 4x too high. THR is at offset 0 - the one value where shifting
+ * changes nothing - and that is the *only* reason the console appeared to
+ * work: it could transmit, because the part had already been programmed to
+ * 115200 8N1 by U-Boot and we never noticed that our own LCR/IER/MCR writes
+ * were landing on the wrong registers.
+ *
+ * The visible symptom was a console that printed and then stopped dead. The
+ * UART FIFO is 64 bytes deep, so short bursts (a banner, a dozen characters)
+ * went out without ever needing to poll; the first write that had to wait for
+ * room read LSR from the wrong address, never saw THR_EMPTY, and spun forever.
+ * It looked exactly like a hang in whatever code printed the *next* message. */
 static inline uint32_t reg_read(uint32_t offset)
 {
-	return reg_rd32(UART_CONSOLE_BASE + (offset << 2));
+	return reg_rd32(UART_CONSOLE_BASE + offset);
 }
 
 static inline void reg_write(uint32_t offset, uint32_t value)
 {
-	reg_wr32(UART_CONSOLE_BASE + (offset << 2), value);
+	reg_wr32(UART_CONSOLE_BASE + offset, value);
 }
 
 /* --- early path state ----------------------------------------------------- */
