@@ -124,6 +124,20 @@ void board_gicv3_dispatch(uint32_t intid);
 /* True once the virtual timer is armed and running. */
 bool board_tick_is_running(void);
 
+/* --- console -------------------------------------------------------------- */
+
+/* The GIC INTID of the console UART's interrupt.
+ *
+ * Three independent device trees agree (uart2's node carries GIC_SPI 118, and
+ * uart1..uart9 map to SPI 117..125, so the sequence is self-consistent), and the
+ * vendor SoC header matches. SPI N is INTID N+32, hence 150.
+ *
+ * NOTE: the lab's FreeBSD logs report `irq 66` for this same base address. That
+ * discrepancy is unresolved. If console RX never fires, the other number is the
+ * first thing to try - a wrong INTID produces a console that receives nothing
+ * and reports nothing, which is indistinguishable from dead hardware. */
+#define BOARD_CONSOLE_INTID	150U
+
 /* --- interrupt priorities ------------------------------------------------- */
 /* The board owns this policy, not the kernel: FreeRTOSConfig.h derives its
  * configMAX_API_CALL_INTERRUPT_PRIORITY from BOARD_IRQ_PRIORITY_API_CALL, so

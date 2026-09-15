@@ -398,6 +398,27 @@ void board_gicv3_init(void)
 
 /* --- CMSIS irq_ctrl.h API ------------------------------------------------- */
 
+/* Bring the controller up on first use.
+ *
+ * Why this is here and not left to the caller: the IRQ_* API is used by device
+ * drivers, and a driver's own bring-up order is not something the interrupt
+ * controller should dictate. Concretely, the console driver enables its RX
+ * interrupt from PowerControl(ARM_POWER_FULL), which the boot path calls before
+ * IRQ_Initialize() - with a NULL redistributor base, the enable write went to
+ * address 0x10100 and the system stopped before printing anything. Nothing
+ * about "the GIC must be initialised first" is discoverable from the driver's
+ * point of view.
+ *
+ * Making IRQ_* total removes that ordering trap for every future driver, and
+ * costs an already-true branch on the paths that run per interrupt.
+ * IRQ_Initialize() remains as the explicit entry point and stays idempotent. */
+static void irq_ensure_ready(void)
+{
+	if (!gic_ready) {
+		board_gicv3_init();
+	}
+}
+
 /* The framework's interrupt entry point (same name and role as IRQ_Handler in
  * CMSIS's own irq_ctrl_gic.c): acknowledge, dispatch, end. Drivers that own
  * their own vector entry can call this.
@@ -423,6 +444,7 @@ int32_t IRQ_Initialize(void)
 
 int32_t IRQ_SetHandler(IRQn_ID_t irqn, IRQHandler_t handler)
 {
+	irq_ensure_ready();
 	if (irqn < 0) {
 		return -1;
 	}
@@ -456,6 +478,7 @@ IRQHandler_t IRQ_GetHandler(IRQn_ID_t irqn)
 
 int32_t IRQ_Enable(IRQn_ID_t irqn)
 {
+	irq_ensure_ready();
 	uint32_t word;
 	uint32_t bit;
 
@@ -520,6 +543,7 @@ int32_t IRQ_Enable(IRQn_ID_t irqn)
 
 int32_t IRQ_Disable(IRQn_ID_t irqn)
 {
+	irq_ensure_ready();
 	uint32_t word;
 	uint32_t bit;
 
@@ -609,6 +633,7 @@ int32_t IRQ_EndOfInterrupt(IRQn_ID_t irqn)
 
 int32_t IRQ_SetPending(IRQn_ID_t irqn)
 {
+	irq_ensure_ready();
 	if (irqn < 0 || irqn > (IRQn_ID_t)IRQ_INTID_SPI_MAX) {
 		return -1;
 	}
@@ -639,6 +664,7 @@ uint32_t IRQ_GetPending(IRQn_ID_t irqn)
 
 int32_t IRQ_ClearPending(IRQn_ID_t irqn)
 {
+	irq_ensure_ready();
 	if (irqn < 0 || irqn > (IRQn_ID_t)IRQ_INTID_SPI_MAX) {
 		return -1;
 	}
@@ -655,6 +681,7 @@ int32_t IRQ_ClearPending(IRQn_ID_t irqn)
 
 int32_t IRQ_SetPriority(IRQn_ID_t irqn, uint32_t priority)
 {
+	irq_ensure_ready();
 	if (irqn >= IRQ_INTID_LPI_FIRST) {
 		/* An LPI's priority lives in the ITS property table, not in a
 		 * per-INTID GICR register. It is set through the ITS module when

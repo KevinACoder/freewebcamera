@@ -49,7 +49,12 @@ INC_COMMON := -Iinclude -Iport/board
 # vendored code and kernel internals).
 INC_ADAPTER := -Ithird-party/FreeRTOS-Kernel/include \
 	-Ithird-party/FreeRTOS-Kernel/portable/GCC/ARM_AARCH64_SRE \
-	-Iport/adapters/freertos
+	-Iport/adapters/freertos \
+	-Iport/adapters/cmsis_rtos2 \
+	-Iport/adapters/cherrysh \
+	-Ithird-party/cherrysh \
+	-Ithird-party/cherrysh/cherryrl \
+	-Ithird-party/cherryrb
 
 # --- sources --------------------------------------------------------------
 
@@ -65,6 +70,7 @@ KERNEL_SRCS := \
 BOARD_SRCS := \
 	port/board/mmu.c \
 	port/board/memops.c \
+	port/board/minilibc.c \
 	port/board/cache.c \
 	port/board/board_early.c \
 	port/board/gicv3.c \
@@ -74,7 +80,14 @@ BOARD_SRCS := \
 ADAPTER_SRCS := \
 	port/adapters/freertos/port_glue.c \
 	port/adapters/freertos/heap.c \
-	port/adapters/cmsis_rtos2/cmsis_os2_impl.c
+	port/adapters/cmsis_rtos2/cmsis_os2_impl.c \
+	port/adapters/cherrysh/cherrysh_adapter.c \
+	third-party/cherrysh/chry_shell.c \
+	third-party/cherrysh/builtin/help.c \
+	third-party/cherrysh/builtin/clear.c \
+	third-party/cherrysh/builtin/shsize.c \
+	third-party/cherrysh/cherryrl/chry_readline.c \
+	third-party/cherryrb/chry_ringbuffer.c
 
 DRIVER_SRCS := \
 	drivers/uart_ns16550.c
@@ -158,6 +171,7 @@ deploy: $(TARGET).bin
 # linking while the normal build keeps working.
 STUB_SRCS := \
 	port/adapters/stub/cmsis_os2_stub.c \
+	port/adapters/stub/shell_stub.c \
 	port/board/gicv3.c \
 	port/board/gicv3_its.c \
 	port/board/board_early.c \
@@ -189,7 +203,8 @@ $(BUILD)/freertos-stub.elf: $(STUB_OBJS) $(STUB_ASM)
 	$(CC) $(CFLAGS) $(STUB_OBJS) $(STUB_ASM) \
 		-nostdlib -static -T port/board/rk3568.ld \
 		-Wl,--build-id=none -Wl,--no-warn-rwx-segments -o $@
-	@printf 'K4 OK: app/ and drivers/ link with no kernel (CMSIS-RTOS2 is the only RTOS interface they see)\n'
+	@printf 'K4 OK: app/ and drivers/ link with no kernel and no shell\n'
+	@printf '        (CMSIS-RTOS2 and include/shell.h are the only interfaces they see)\n'
 
 $(BUILD)/stub/port/board/startup.o: port/board/startup.S
 	@mkdir -p $(dir $@)

@@ -33,6 +33,8 @@
 #include <stdint.h>
 
 #include "Driver_USART.h"
+#include "board.h"
+#include "irq_ctrl.h"
 #include "regs.h"
 #include "uart_ns16550.h"
 
@@ -56,6 +58,14 @@
 #define LSR_FRAMING_ERR	(1u << 3)
 #define LSR_BREAK	(1u << 4)
 #define LSR_THR_EMPTY	(1u << 5)
+#define LSR_RX_ERRORS	(LSR_OVERRUN | LSR_PARITY_ERR | LSR_FRAMING_ERR | LSR_BREAK)
+
+/* Interrupt enable bits (IER) and identification codes (IIR). */
+#define IER_RX_AVAILABLE	(1u << 0)
+#define IIR_ID_MASK		0x0fu
+#define IIR_ID_RX_AVAILABLE	0x04u
+#define IIR_ID_RX_TIMEOUT	0x0cu
+#define IIR_FIFO_ENABLED	(0xc0u)
 
 #define LCR_8N1		0x03	/* WLS = 8 data bits, no parity, 1 stop bit */
 #define LCR_DLAB	(1u << 7)
@@ -308,6 +318,16 @@ static ARM_USART_CAPABILITIES usart_get_capabilities(void)
 	return caps;
 }
 
+/* The console interrupt is registered here rather than by an upper layer.
+ *
+ * The alternative - having the shell or the app call IRQ_SetHandler with this
+ * driver's ISR - would require every consumer of the console to know the
+ * driver's internals, and would put the driver's interrupt priority in someone
+ * else's hands. The driver knows both; nothing else needs to.
+ *
+ * Priority is the API-call level because the event path this raises ends up
+ * calling a FromISR RTOS API in the shell. The port asserts that any interrupt
+ * calling one runs at or below configMAX_API_CALL_INTERRUPT_PRIORITY. */
 static int32_t usart_initialize(ARM_USART_SignalEvent_t cb_event)
 {
 	usart_callback = cb_event;
@@ -339,6 +359,10 @@ static int32_t usart_power_control(ARM_POWER_STATE state)
 
 	case ARM_POWER_OFF:
 	case ARM_POWER_LOW:
+		/* Mask the source before dropping power, so a byte arriving
+		 * afterwards cannot raise an interrupt at a driver that is no
+		 * longer expecting one. */
+		reg_write(REG_IER, 0x00u);
 		usart_power = state;
 		return ARM_DRIVER_OK;
 
@@ -370,14 +394,166 @@ static int32_t usart_send(const void *data, uint32_t num)
 	return ARM_DRIVER_OK;
 }
 
+/* Non-interrupt-context state for the RX path: the destination the caller
+ * handed to Receive() and how much of it is still to come. Written by the ISR,
+ * read by the ISR and by Receive/Control, so it is volatile. */
+#define SHELL_RX_ARM_COUNT	1U
+static uint8_t rx_first_byte[SHELL_RX_ARM_COUNT];
+
+static volatile uint8_t *rx_buf;
+static volatile uint32_t rx_remaining;
+static volatile uint32_t rx_completed;
+static volatile uint8_t  rx_active;
+
+static void usart_rx_drain(void);
+
 static int32_t usart_receive(void *data, uint32_t num)
 {
-	/* No RX interrupt path at M0. The shell reads through its own ring
-	 * buffer; reporting unsupported is honest, whereas a fake-success
-	 * implementation would look like dropped bytes. */
-	(void)data;
-	(void)num;
-	return ARM_DRIVER_ERROR_UNSUPPORTED;
+	/* Start an interrupt-driven reception of `num` bytes.
+	 *
+	 * This is the CMSIS shape: Receive() starts the transfer and the driver
+	 * raises ARM_USART_EVENT_RECEIVE_COMPLETE when the count is satisfied.
+	 * An earlier revision returned UNSUPPORTED because there was no RX
+	 * interrupt path at M0 - which was honest then, and wrong now that the
+	 * shell depends on reception.
+	 *
+	 * The shell needs a stream, not fixed-size blocks, so it re-arms with
+	 * num=1 from the completion callback. That keeps per-byte latency low
+	 * without inventing a "stream to callback" API CMSIS does not have. */
+	if (usart_power != ARM_POWER_FULL) {
+		return ARM_DRIVER_ERROR;
+	}
+	if (data == 0 || num == 0u) {
+		return ARM_DRIVER_ERROR_PARAMETER;
+	}
+	if (rx_active) {
+		return ARM_DRIVER_ERROR_BUSY;
+	}
+
+	rx_buf = (volatile uint8_t *)data;
+	rx_remaining = num;
+	rx_completed = 0u;
+	rx_active = 1u;
+
+	/* Drain anything already sitting in the FIFO before unmasking, so a
+	 * byte that arrived while RX was off is not stranded until the next
+	 * one arrives. */
+	usart_rx_drain();
+
+	/* Unmask receive-data-available. Line-status (error) interrupts stay
+	 * masked: the errors are visible in GetStatus(), and an error
+	 * interrupt would need its own handling path for no benefit here. */
+	reg_write(REG_IER, IER_RX_AVAILABLE);
+
+	return ARM_DRIVER_OK;
+}
+
+/* Called from the RX interrupt (through the board's IRQ dispatch). Reads every
+ * byte the FIFO has to offer into the caller's buffer and fires
+ * RECEIVE_COMPLETE when the requested count is met. */
+void usart_rx_irq_handler(void)
+{
+	uint32_t guard = 0u;
+
+	while ((reg_read(REG_LSR) & LSR_DATA_READY) != 0u) {
+		uint8_t byte = (uint8_t)(reg_read(REG_RBR) & 0xffu);
+
+		if (rx_active && rx_remaining > 0u) {
+			rx_buf[rx_completed] = byte;
+			rx_completed++;
+			rx_remaining--;
+		}
+		/* If nobody asked for the byte it is still consumed: leaving it in
+		 * the FIFO would keep the interrupt asserted forever. */
+
+		if (++guard > 64u) {
+			/* The FIFO cannot hold more than this; a larger count here
+			 * would mean the data-ready bit is stuck, and looping on it
+			 * would wedge the interrupt. */
+			break;
+		}
+	}
+
+	if (rx_active && rx_remaining == 0u) {
+		reg_write(REG_IER, 0x00u);
+		rx_active = 0u;
+		if (usart_callback != 0) {
+			usart_callback(ARM_USART_EVENT_RECEIVE_COMPLETE);
+		}
+	}
+}
+
+/* Pull whatever is in the FIFO. Used at the start of Receive(): a byte that
+ * arrived before RX was armed would otherwise sit there until the *next* byte
+ * arrived to raise the interrupt. */
+static void usart_rx_drain(void)
+{
+	uint32_t guard = 0u;
+
+	while ((reg_read(REG_LSR) & LSR_DATA_READY) != 0u && guard++ < 64u) {
+		uint8_t byte = (uint8_t)(reg_read(REG_RBR) & 0xffu);
+
+		if (rx_active && rx_remaining > 0u) {
+			rx_buf[rx_completed] = byte;
+			rx_completed++;
+			rx_remaining--;
+		}
+	}
+}
+
+/* Begin receiving: install the console interrupt and arm the first byte.
+ *
+ * Reachable two ways, both standard: through the CMSIS control code
+ * ARM_USART_CONTROL_RX (the portable way, and what an adapter should use), or
+ * via the USART's own Receive() once the interrupt is up.
+ *
+ * Deliberately NOT part of PowerControl(ARM_POWER_FULL). Powering a console up
+ * and taking interrupts on it are different intentions: the boot path powers the
+ * console up before the scheduler exists, and an interrupt enabled at that
+ * moment has no task to wake. Separating them lets the integrator start
+ * receiving once there is somewhere for the bytes to go.
+ *
+ * Idempotent. Returns ARM_DRIVER_OK. */
+static int32_t usart_rx_start(void)
+{
+	if (usart_power != ARM_POWER_FULL) {
+		return ARM_DRIVER_ERROR;
+	}
+
+
+	/* Everything that the handler depends on goes FIRST, and the interrupt
+	 * line is enabled LAST.
+	 *
+	 * This ordering is the whole point of the function. An interrupt can
+	 * arrive the instant the line is enabled - a byte already sitting in the
+	 * FIFO is enough, and there may be one from before the console was ours.
+	 * If the handler runs before the receive state exists it finds
+	 * rx_active=0, consumes nothing, reports nothing, and the level-triggered
+	 * line stays asserted: the handler re-enters forever and the system
+	 * wedges in an interrupt storm with no output at all. That is exactly
+	 * what an earlier revision did, and it is indistinguishable from a wrong
+	 * INTID - both look like "the console interrupt is not working".
+	 *
+	 * So: handler, priority, state, FIFO drain, IER - then enable. */
+	(void)IRQ_SetHandler((IRQn_ID_t)BOARD_CONSOLE_INTID,
+			     (IRQHandler_t)usart_rx_irq_handler);
+	(void)IRQ_SetPriority((IRQn_ID_t)BOARD_CONSOLE_INTID,
+			      BOARD_IRQ_PRIORITY_API_CALL_RAW);
+
+	rx_active = 1u;
+	rx_completed = 0u;
+	rx_buf = rx_first_byte;
+	rx_remaining = SHELL_RX_ARM_COUNT;
+
+	/* Unmask the source, then clear anything that was pending from before
+	 * the line was ours. Draining the FIFO is what actually drops a
+	 * level-triggered RX condition; leaving a pre-existing byte in it would
+	 * re-assert the moment the line is enabled. */
+	reg_write(REG_IER, IER_RX_AVAILABLE);
+	usart_rx_drain();
+
+	(void)IRQ_Enable((IRQn_ID_t)BOARD_CONSOLE_INTID);
+	return ARM_DRIVER_OK;
 }
 
 static int32_t usart_transfer(const void *data_out, void *data_in, uint32_t num)
@@ -426,10 +602,20 @@ static int32_t usart_control(uint32_t control, uint32_t arg)
 		return ARM_DRIVER_OK;
 
 	case ARM_USART_CONTROL_TX:
-	case ARM_USART_CONTROL_RX:
-		/* Enabling/disabling a polled UART is a no-op that succeeds:
-		 * there is no gating to perform. */
+		/* Nothing to gate: Send() is synchronous and the transmitter is
+		 * always available once powered. */
 		return ARM_DRIVER_OK;
+
+	case ARM_USART_CONTROL_RX:
+		/* arg=0 disables reception (mask the source, keep the driver
+		 * state consistent); non-zero starts it. This is where the
+		 * console interrupt is installed - see usart_rx_start(). */
+		if (arg == 0u) {
+			reg_write(REG_IER, 0x00u);
+			rx_active = 0u;
+			return ARM_DRIVER_OK;
+		}
+		return usart_rx_start();
 
 	case ARM_USART_ABORT_SEND:
 	case ARM_USART_ABORT_RECEIVE:

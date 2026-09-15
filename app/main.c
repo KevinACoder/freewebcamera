@@ -26,6 +26,7 @@
 #include "gicv3_its.h"
 #include "cmsis_os2.h"
 #include "irq_ctrl.h"
+#include "shell.h"
 
 /* Console handle. Taken from the interface, never from the driver's header. */
 extern ARM_DRIVER_USART Driver_USART_Console;
@@ -356,6 +357,30 @@ static void its_check(void)
 	console_print("\n");
 }
 
+/* Start the interactive shell.
+ *
+ * A task, not a call from board_main: shell_start() arms the console receive
+ * interrupt, whose path ends in osThreadFlagsSetFromISR - which needs a running
+ * scheduler. Called from board_main before osKernelStart() it would arm that
+ * interrupt with nothing behind it.
+ *
+ * Running at high priority just gets the shell up promptly; it blocks on a
+ * thread flag immediately afterwards and costs nothing. */
+static void task_shell_start(void *argument)
+{
+	(void)argument;
+
+	if (shell_start() != 0) {
+		console_print("SHELL FAIL\n");
+		return;
+	}
+	console_print("SHELL READY\n");
+
+	/* Nothing left to do: the shell owns its own task from here. Terminating
+	 * rather than idling keeps the stack and the slot free. */
+	osThreadTerminate(osThreadGetId());
+}
+
 /* --- boot ----------------------------------------------------------------- */
 
 void board_main(void)
@@ -418,6 +443,11 @@ void board_main(void)
 	if (osThreadNew(task_report, 0, &(osThreadAttr_t){ .name = "report",
 			.stack_size = 1024, .priority = osPriorityAboveNormal }) == 0) {
 		console_print("[fatal] thread report\n");
+		return;
+	}
+	if (osThreadNew(task_shell_start, 0, &(osThreadAttr_t){ .name = "shstart",
+			.stack_size = 1024, .priority = osPriorityHigh }) == 0) {
+		console_print("[fatal] thread shell\n");
 		return;
 	}
 

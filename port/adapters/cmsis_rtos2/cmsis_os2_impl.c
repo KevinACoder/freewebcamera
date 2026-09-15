@@ -44,6 +44,7 @@
 #include "timers.h"
 
 #include "cmsis_os2.h"
+#include "cmsis_os2_ext.h"
 
 /* --- priority and timeout translation ------------------------------------ */
 
@@ -520,6 +521,30 @@ uint32_t osThreadFlagsSet(osThreadId_t thread_id, uint32_t flags)
 				&previous) != pdPASS) {
 		return (uint32_t)osError;
 	}
+	return previous | flags;
+}
+
+uint32_t osThreadFlagsSetFromISR(osThreadId_t thread_id, uint32_t flags)
+{
+	BaseType_t woken = pdFALSE;
+	uint32_t previous = 0U;
+
+	/* Projects of this extension: see cmsis_os2_ext.h. The port must be
+	 * told when a woken task is more urgent than the one interrupted, or the
+	 * wake-up is deferred until the next tick. xTaskNotifyFromISR handles
+	 * that through the woken flag, and portYIELD_FROM_ISR applies it.
+	 *
+	 * xTaskGenericNotifyFromISR reports the previous value the same way as
+	 * the non-ISR form, so the post-set value is previous | flags and the
+	 * caller sees the same contract as osThreadFlagsSet. */
+	if (xTaskGenericNotifyFromISR((TaskHandle_t)thread_id,
+				      tskDEFAULT_INDEX_TO_NOTIFY,
+				      flags, eSetBits,
+				      &previous, &woken) != pdPASS) {
+		return (uint32_t)osError;
+	}
+
+	portYIELD_FROM_ISR(woken);
 	return previous | flags;
 }
 
