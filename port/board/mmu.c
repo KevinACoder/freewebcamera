@@ -41,6 +41,7 @@
 #define DESC_AF			(1ULL << 10)	/* Access Flag: set, else first
 						 * access faults */
 #define DESC_SH_INNER		(3ULL << 8)	/* inner shareable */
+#define DESC_SH_NONE		(0ULL << 8)	/* non-shareable: Device only */
 #define DESC_ATTR_NORMAL	((uint64_t)ATTR_IDX_NORMAL << 2)
 #define DESC_ATTR_DEVICE	((uint64_t)ATTR_IDX_DEVICE << 2)
 #define DESC_XN			(1ULL << 54)	/* execute-never */
@@ -92,9 +93,25 @@ static uint64_t l1_table[512] __attribute__((aligned(PAGE_GRANULE)));
 static uint64_t l2_low[512]  __attribute__((aligned(PAGE_GRANULE)));
 static uint64_t l2_top[512]  __attribute__((aligned(PAGE_GRANULE)));
 
+/* Normal memory: inner-shareable, cacheable (MAIR byte 0). */
 static uint64_t block_desc(uint64_t base, uint64_t attrs)
 {
 	return base | DESC_BLOCK | DESC_AF | DESC_SH_INNER | attrs;
+}
+
+/* Device memory: NON-shareable (MAIR byte 1), execute-never.
+ *
+ * The shareability field is not decoration. The ARM ARM states that Device
+ * memory is Non-shareable, and that a shareable Device mapping is
+ * UNPREDICTABLE. Cortex-A55 tolerates it often enough to boot, which is what
+ * makes it dangerous: a peripheral register whose status read comes back stale
+ * is indistinguishable from a peripheral that has stopped responding, and a
+ * polled console that never sees its "transmit room" bit hangs the whole
+ * system silently. Every peripheral frame below is mapped through here. */
+static uint64_t device_block_desc(uint64_t base)
+{
+	return base | DESC_BLOCK | DESC_AF | DESC_SH_NONE |
+	       DESC_ATTR_DEVICE | DESC_XN;
 }
 
 void board_mmu_enable(void)
@@ -109,8 +126,7 @@ void board_mmu_enable(void)
 		if (base >= IMAGE_RAM_BASE) {
 			l2_low[i] = block_desc(base, DESC_ATTR_NORMAL);
 		} else {
-			l2_low[i] = block_desc(base,
-					       DESC_ATTR_DEVICE | DESC_XN);
+			l2_low[i] = device_block_desc(base);
 		}
 	}
 
@@ -122,8 +138,7 @@ void board_mmu_enable(void)
 		if (base >= LPI_TABLE_BASE && base < LPI_TABLE_END) {
 			l2_top[i] = block_desc(base, DESC_ATTR_NORMAL);
 		} else {
-			l2_top[i] = block_desc(base,
-					       DESC_ATTR_DEVICE | DESC_XN);
+			l2_top[i] = device_block_desc(base);
 		}
 	}
 
@@ -163,6 +178,13 @@ void board_mmu_enable(void)
 	/* TTBR0 bits[2:0] must be zero for a 4KiB granule; the table is
 	 * aligned, so this holds. A mismatch here faults on the first
 	 * instruction fetch after enabling the MMU. */
+
+	/* Last chance to drop the loader's dirty lines over our own memory:
+	 * this runs with caching off, so nothing here is cached yet, and any
+	 * line the loader left behind would otherwise be written back over the
+	 * tables we just built (and the code, and the stack) once the caches
+	 * come on. */
+	board_cache_init();
 
 	__asm__ __volatile__("dsb sy" ::: "memory");
 	__asm__ __volatile__("isb" ::: "memory");

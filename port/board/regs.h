@@ -49,6 +49,11 @@ static inline void reg_wr64(uintptr_t addr, uint64_t value)
 	*(volatile uint64_t *)addr = value;
 }
 
+static inline uint64_t reg_rd64(uintptr_t addr)
+{
+	return *(volatile uint64_t *)addr;
+}
+
 /* Read-modify-write. Required for registers where a plain store clears
  * unrelated live bits: GICD_CTLR on this board is the canonical case (a plain
  * store drops ARE, after which every IAR1 read returns spurious INTID 1023). */

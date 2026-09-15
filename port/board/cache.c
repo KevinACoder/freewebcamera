@@ -70,3 +70,42 @@ void board_dcache_flush_invalidate(uintptr_t addr, unsigned long size)
 		dcache_op(addr, size, 'b');
 	}
 }
+
+/* --- boot-time cache hygiene --------------------------------------------- */
+
+/* Linker-provided extent of everything this image owns. */
+extern char _start[];
+extern char __heap_end[];
+
+/* Drain whatever the loader left dirty over our own memory, then invalidate
+ * the instruction cache.
+ *
+ * The loader (U-Boot here) runs with its MMU and caches on, and it is what
+ * wrote our image into RAM. Some of those writes can still be sitting dirty in
+ * its data cache when it jumps to us. Those lines are a trap: our boot code
+ * clears .bss and writes page tables straight to memory with caching off, and
+ * later - once we turn our own caches on - the stale dirty lines get evicted
+ * and land on top of the code, the tables and the stack.
+ *
+ * The symptom is the worst kind: an image that boots, prints, and then dies
+ * somewhere arbitrary, differently each time, so it looks like a peripheral
+ * problem rather than a memory problem. Draining up front costs a few
+ * microseconds and removes the whole class.
+ *
+ * Called from board_mmu_enable() before caches are enabled, so this is the
+ * last moment at which the range is guaranteed to be plain memory. */
+void board_cache_init(void)
+{
+	uintptr_t start = (uintptr_t)_start;
+	uintptr_t end = (uintptr_t)__heap_end;
+
+	if (end > start) {
+		board_dcache_flush_invalidate(start, (unsigned long)(end - start));
+	}
+
+	/* Anything the loader left in the instruction cache is stale for the
+	 * same reason, and unlike the data cache it does not write back. */
+	__asm__ __volatile__("ic iallu" ::: "memory");
+	__asm__ __volatile__("dsb sy" ::: "memory");
+	__asm__ __volatile__("isb" ::: "memory");
+}

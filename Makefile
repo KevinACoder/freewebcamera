@@ -127,6 +127,12 @@ $(TARGET).bin: $(TARGET).elf
 	@printf 'image: %s (%s bytes)\n' $@ "$$(stat -c%s $@)"
 	@sha256sum $@
 
+# Without this the first explicit target (the ELF rule) is the default, so a
+# bare `make` builds no image at all - which silently leaves a stale
+# freertos.bin on the TFTP root and makes a failed rebuild look like a boot
+# failure on the board.
+.DEFAULT_GOAL := all
+
 .PHONY: all clean deploy gates
 
 all: $(TARGET).bin

@@ -20,9 +20,18 @@ say_fail() { printf '  FAIL  %s\n' "$1"; fail=1; }
 printf 'check-deps\n'
 
 # Anything that reveals a concrete component behind the interface layer.
-leaky='#include.*"(FreeRTOS\.h|task\.h|queue\.h|semphr\.h|event_groups\.h|timers\.h|stream_buffer\.h|list\.h|portmacro\.h)"|#include.*"chry_ringbuffer\.h"|#include.*"chry_shell\.h"|#include.*third-party|#include.*"csh\.h"'
+#
+# Matches both quote styles: a kernel header reached as <task.h> leaks the
+# kernel just as surely as "task.h" does, and the include path is where that
+# would come from. FreeRTOSConfig.h is included deliberately by name, so it is
+# in the list too - a layer that has to know the kernel's configuration is no
+# longer kernel-independent.
+leaky='#include[[:space:]]*[<"](FreeRTOS\.h|FreeRTOSConfig\.h|task\.h|queue\.h|semphr\.h|event_groups\.h|timers\.h|stream_buffer\.h|list\.h|portmacro\.h|chry_ringbuffer\.h|chry_shell\.h|csh\.h)[>"]|#include[[:space:]]*[<"].*third-party'
 
-for dir in app drivers; do
+# port/board/ is board-level bring-up: it must stay kernel-independent too,
+# because the whole point of doing the tick through the CMSIS OS_Tick_* shape
+# is that swapping the kernel does not require editing it.
+for dir in app drivers port/board; do
     [ -d "$root/$dir" ] || continue
     hits=$(grep -rnIE "$leaky" "$root/$dir" 2>/dev/null)
     if [ -z "$hits" ]; then

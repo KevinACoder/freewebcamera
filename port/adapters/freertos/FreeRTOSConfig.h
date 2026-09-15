@@ -106,8 +106,12 @@
  * Derived from the board's policy so the two cannot disagree. */
 #define configMAX_API_CALL_INTERRUPT_PRIORITY	BOARD_IRQ_PRIORITY_API_CALL
 
-/* The tick runs at the lowest usable priority; the port asserts this. */
-#define configKERNEL_INTERRUPT_PRIORITY		BOARD_IRQ_PRIORITY_TICK
+/* configKERNEL_INTERRUPT_PRIORITY is deliberately NOT defined. It is a
+ * Cortex-M/R-style setting that this AArch64 SRE port never reads (grep the
+ * port directory: zero uses) - the tick's priority reaches the hardware
+ * through configSETUP_TICK_INTERRUPT below and the board's own
+ * BOARD_IRQ_PRIORITY_TICK_RAW. Defining it here would look authoritative while
+ * having no effect, which is exactly the kind of setting worth not having. */
 
 /* --- the port's required hooks -------------------------------------------- */
 

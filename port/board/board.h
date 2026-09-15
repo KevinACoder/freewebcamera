@@ -39,6 +39,12 @@ extern "C" {
  * on unaligned Normal access or performs cache maintenance. */
 void board_mmu_enable(void);
 
+/* Drop the loader's leftover dirty cache lines over our own image, then
+ * invalidate the instruction cache. Called by board_mmu_enable() while caches
+ * are still off; see port/board/cache.c for why skipping it produces
+ * intermittent corruption rather than a clean failure. */
+void board_cache_init(void);
+
 /* C entry point of the image. */
 void board_main(void);
 
@@ -103,7 +109,7 @@ void board_gicv3_dispatch(uint32_t intid);
 /* True once the virtual timer is armed and running. */
 bool board_tick_is_running(void);
 
-/* --- interrupt priorities (raw hardware values, 4 priority bits) ---------- */
+/* --- interrupt priorities ------------------------------------------------- */
 /* The board owns this policy, not the kernel: FreeRTOSConfig.h derives its
  * configMAX_API_CALL_INTERRUPT_PRIORITY from BOARD_IRQ_PRIORITY_API_CALL, so
  * the direction is config -> board rather than app -> config. An application
@@ -111,14 +117,36 @@ bool board_tick_is_running(void);
  *
  * Smaller numeric value = more urgent (GIC convention).
  *
+ * Two levels of value are in play and mixing them up is silent:
+ *
+ *   - The constants below are LOGICAL levels, 0..15, the same numbering the
+ *     kernel port uses (configUNIQUE_INTERRUPT_PRIORITIES == 16).
+ *   - The GIC register holds them left-justified in the top 4 bits of a byte,
+ *     so a logical level N is written as N << BOARD_IRQ_PRIORITY_SHIFT. The
+ *     *_RAW constants below do that shift, and IRQ_SetPriority (CMSIS
+ *     irq_ctrl.h) takes the raw byte.
+ *
+ * Writing a raw level as if it were logical (0xf0 for level 15) produces a
+ * different hardware level and trips the port's assertions. Always pass the
+ * *_RAW form to IRQ_SetPriority.
+ *
  * Any interrupt that calls a FromISR API must be at API_CALL: the port asserts
- * this in vPortValidateInterruptPriority. The tick must be at TICK, the lowest
- * usable level: FreeRTOS_Tick_Handler asserts that too. Getting either wrong
- * trips an assertion at run time, which is why they are named here rather than
- * written as literals at call sites. */
-#define BOARD_IRQ_PRIORITY_TICK		15U	/* lowest usable */
+ * this in vPortValidateInterruptPriority. The tick must be at TICK: the port's
+ * FreeRTOS_Tick_Handler asserts the *lowest usable* level, which is one above
+ * the absolute lowest, because the port reserves that for itself. Getting
+ * either wrong trips an assertion at run time, which is why they are named
+ * here rather than written as literals at call sites. */
+#define BOARD_IRQ_PRIORITY_SHIFT	4U
+#define BOARD_IRQ_PRIORITY_TICK		14U	/* lowest usable, not 15 */
 #define BOARD_IRQ_PRIORITY_API_CALL	11U
 #define BOARD_IRQ_PRIORITY_DEFAULT	10U
+
+#define BOARD_IRQ_PRIORITY_TICK_RAW \
+	(BOARD_IRQ_PRIORITY_TICK << BOARD_IRQ_PRIORITY_SHIFT)
+#define BOARD_IRQ_PRIORITY_API_CALL_RAW \
+	(BOARD_IRQ_PRIORITY_API_CALL << BOARD_IRQ_PRIORITY_SHIFT)
+#define BOARD_IRQ_PRIORITY_DEFAULT_RAW \
+	(BOARD_IRQ_PRIORITY_DEFAULT << BOARD_IRQ_PRIORITY_SHIFT)
 
 #ifdef __cplusplus
 }

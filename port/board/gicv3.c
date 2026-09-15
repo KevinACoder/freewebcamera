@@ -61,7 +61,17 @@
 #define GICD_ISPENDR(n)		(0x0200 + 4 * (n))
 #define GICD_ICPENDR(n)		(0x0280 + 4 * (n))
 #define GICD_ISACTIVER(n)	(0x0300 + 4 * (n))
-#define GICD_IPRIORITYR(n)	(0x0400 + 4 * (n))
+/* Per-interrupt priority is ONE BYTE per INTID, at offset 0x400 + id - there
+ * is no 4-byte stride here. The register is byte-granular so that a 32-bit
+ * access would cover four interrupts; every accessor below uses reg_wr8 /
+ * reg_rd8 accordingly.
+ *
+ * Getting this wrong is not a cosmetic error. With a 4x stride, the loop that
+ * seeds default priorities for the SPI range lands on 0x480 upwards instead of
+ * 0x420 upwards, and by INTID ~256 it is writing into the reserved region at
+ * 0x800 and beyond. On this SoC a write to that hole does not fault cleanly -
+ * the system resets, which is what made bring-up look like a GIC hang. */
+#define GICD_IPRIORITYR(id)	(0x0400 + (id))
 #define GICD_ICFGR(n)		(0x0c00 + 4 * (n))
 #define GICD_IGRPMODR(n)	(0x0d00 + 4 * (n))
 #define GICD_IROUTER(n)		(0x6000 + 8 * (n))
@@ -109,6 +119,39 @@ static volatile uint32_t *gicd;
 static volatile uint32_t *gicr_sgi;
 static uint32_t spi_line_count;
 static bool gic_ready;
+
+/* --- bring-up probes ------------------------------------------------------
+ *
+ * This board resets partway through GIC bring-up, and a reset cuts the console
+ * mid-string, so "where the output stopped" and "where the code died" are not
+ * the same place. These probes are deliberately tiny (a few bytes each) so the
+ * last complete one identifies the exact register access that killed it, and
+ * the value print covers the registers this board is known to read back
+ * unreliably (GICD_CTLR, GICD_TYPER, IGROUPR0 have all been observed reading 0
+ * here, so "the register disagrees with the spec" is a live hypothesis, not a
+ * theoretical one). */
+static void gic_probe(const char *tag, uint32_t value)
+{
+	static const char digits[] = "0123456789abcdef";
+	char buf[20];
+	int i;
+
+	/* "[tag]=xxxxxxxx\n" - three tag characters, then the value in hex. */
+	buf[0] = '[';
+	for (i = 0; i < 3; i++) {
+		buf[1 + i] = tag[i];
+	}
+	buf[4] = ']';
+	buf[5] = '=';
+
+	for (i = 0; i < 8; i++) {
+		buf[6 + i] = digits[(value >> (28 - 4 * i)) & 0xfu];
+	}
+	buf[14] = '\n';
+	buf[15] = '\0';
+
+	board_early_print(buf);
+}
 
 static IRQHandler_t irq_handlers[IRQ_TABLE_SIZE];
 static IRQHandler_t lpi_handlers[IRQ_LPI_TABLE_SIZE];
@@ -177,11 +220,13 @@ static void gic_distributor_init(void)
 	gicd_wait_rwp();
 
 	typer = reg_rd32((uintptr_t)gicd + GICD_TYPER);
+	gic_probe("typ", typer);
 	lines = ((typer & 0x1fu) + 1u) * 32u;
 	if (lines > (IRQ_INTID_SPI_MAX + 1u)) {
 		lines = IRQ_INTID_SPI_MAX + 1u;
 	}
 	spi_line_count = lines;
+	gic_probe("lin", lines);
 
 	/* Every SPI: Group 1 non-secure, masked, level-triggered, and routed
 	 * to this core. Routing must be explicit - with ARE set, an SPI whose
@@ -230,13 +275,47 @@ static void gic_distributor_init(void)
 static void gic_redistributor_init(void)
 {
 	uint32_t i;
+	uint32_t waker;
 
-	/* Wake the redistributor: clear ProcessorSleep, wait for
-	 * ChildrenAsleep to clear. Without this SPIs and PPIs never arrive. */
+	/* Wake the redistributor: clear ProcessorSleep, wait for ChildrenAsleep
+	 * to clear. Without this SPIs and PPIs never arrive.
+	 *
+	 * NOTHING ELSE IS DONE HERE, and that is deliberate. An earlier version
+	 * continued with blanket writes over this core's SGI/PPI frame:
+	 *
+	 *     GICR_ICENABLER0  = 0xffffffff
+	 *     GICR_ICPENDR0    = 0xffffffff
+	 *     GICR_IGROUPR0    = 0xffffffff
+	 *     GICR_IGRPMODR0   = 0x00000000
+	 *     GICR_IPRIORITYR0[0..31] = 0xa0
+	 *
+	 * Those registers are not ours alone. They cover all 32 SGIs and PPIs,
+	 * and firmware owns some of them: the EL1 *physical* timer (PPI 29) is
+	 * routed as a Group 0 interrupt by OP-TEE, which is exactly why the
+	 * physical timer is unusable from non-secure code here. Reassigning the
+	 * whole bank to Group 1 non-secure, and clearing pend/enable for every
+	 * line including the secure ones, is a non-secure write to secure state.
+	 * On this board that does not fault politely - the system resets,
+	 * reproducibly, partway through bring-up, with the console going silent
+	 * immediately after the redistributor marker.
+	 *
+	 * Per-interrupt configuration belongs to the IRQ_* API anyway: callers
+	 * set the handler, priority and enable for the lines they own through
+	 * IRQ_SetHandler / IRQ_SetPriority / IRQ_Enable, and those paths touch
+	 * one line at a time. That is the CMSIS model this file implements, and
+	 * it keeps us off firmware's lines by construction. */
+	gic_probe("rty", (uint32_t)(reg_rd64((uintptr_t)gicr_sgi -
+					     GICR_SGI_OFFSET + GICR_TYPER) &
+				   0xffffffffu));
+	gic_probe("sfc", (uint32_t)(reg_rd64((uintptr_t)gicr_sgi -
+					     GICR_SGI_OFFSET + GICR_TYPER) >> 32));
+
+	waker = reg_rd32((uintptr_t)gicr_sgi - GICR_SGI_OFFSET + GICR_WAKER);
+	gic_probe("wak", waker);
 	reg_wr32((uintptr_t)gicr_sgi - GICR_SGI_OFFSET + GICR_WAKER,
-			  reg_rd32((uintptr_t)gicr_sgi - GICR_SGI_OFFSET +
-					   GICR_WAKER) &
-			  ~GICR_WAKER_PROCESSORSLEEP);
+			  waker & ~GICR_WAKER_PROCESSORSLEEP);
+	gic_probe("clr", reg_rd32((uintptr_t)gicr_sgi - GICR_SGI_OFFSET +
+				  GICR_WAKER));
 
 	for (i = 0; i < GIC_WAIT_LIMIT; i++) {
 		if ((reg_rd32((uintptr_t)gicr_sgi - GICR_SGI_OFFSET +
@@ -247,56 +326,50 @@ static void gic_redistributor_init(void)
 	if (i == GIC_WAIT_LIMIT) {
 		board_early_print("[gicv3] redistributor never woke\n");
 	}
+	gic_probe("wok", i);
 
 	gicr_wait_rwp();
-
-	/* SGI and PPI: Group 1, masked, level for PPIs / edge for SGIs.
-	 * GICR_CTLR is deliberately NOT written - EnableLPIs is owned by the
-	 * LPI setup path. */
-	reg_wr32((uintptr_t)gicr_sgi + GICR_ICENABLER0, 0xffffffffu);
-	reg_wr32((uintptr_t)gicr_sgi + GICR_ICPENDR0, 0xffffffffu);
-	reg_wr32((uintptr_t)gicr_sgi + GICR_IGROUPR0, 0xffffffffu);
-	reg_wr32((uintptr_t)gicr_sgi + GICR_IGRPMODR0, 0x00000000u);
-
-	for (i = 0; i < 32u; i++) {
-		reg_wr8((uintptr_t)gicr_sgi + GICR_IPRIORITYR0 + i, 0xa0u);
-	}
-
-	/* SGIs edge-triggered, PPIs level-triggered. */
-	reg_wr32((uintptr_t)gicr_sgi + GICR_ICFGR0, 0xaaaaaaaa);
-	reg_wr32((uintptr_t)gicr_sgi + GICR_ICFGR1, 0x00000000);
-
-	gicr_wait_rwp();
+	gic_probe("rwp", 0u);
 }
 
-static void gic_cpu_interface_init(void)
+static void gic_cpu_interface_sre_enable(void)
 {
 	uint32_t sre;
 
 	/* System register access must be enabled or the ICC_* registers are
-	 * inaccessible (and with a GICv3 that is fatal, not a fallback). */
+	 * inaccessible (and with a GICv3 that is fatal, not a fallback).
+	 * Runs before anything else touches the GIC. */
+	sre = 0;
+	__asm__ __volatile__("mrs %0, s3_0_c12_c12_5" : "=r"(sre));
+	if ((sre & 0x1u) != 0u) {
+		return;
+	}
+
+	sre |= 0x7u;	/* SRE | DFB | DIB */
+	__asm__ __volatile__("msr s3_0_c12_c12_5, %0" ::"r"(sre));
+	__asm__ __volatile__("isb" ::: "memory");
+
 	sre = 0;
 	__asm__ __volatile__("mrs %0, s3_0_c12_c12_5" : "=r"(sre));
 	if ((sre & 0x1u) == 0u) {
-		sre |= 0x7u;	/* SRE | DFB | DIB */
-		__asm__ __volatile__("msr s3_0_c12_c12_5, %0" ::"r"(sre));
-		__asm__ __volatile__("isb" ::: "memory");
-		sre = 0;
-		__asm__ __volatile__("mrs %0, s3_0_c12_c12_5" : "=r"(sre));
-		if ((sre & 0x1u) == 0u) {
-			board_early_print("[gicv3] ICC_SRE will not set\n");
-			return;
-		}
+		board_early_print("[gicv3] ICC_SRE will not set\n");
 	}
+}
 
+static void gic_cpu_interface_init(void)
+{
 	/* Accept every priority. The FreeRTOS port narrows this with
 	 * ICC_PMR_EL1 for its own critical sections; leaving it wide open here
 	 * means an interrupt raised during boot is delivered rather than
 	 * silently masked. */
 	__asm__ __volatile__("msr s3_0_c4_c6_0, %0" ::"r"(0xffu));
 
-	/* ICC_IGRPEN1_EL1 is deliberately not written: a non-secure write
-	 * resets this board. Firmware has already enabled Group 1. */
+	/* ICC_IGRPEN1_EL1 is not written. Firmware (ATF, which reports
+	 * "ARM GICv3 driver initialized in EL3") has already enabled Group 1
+	 * signalling, and leaving it alone keeps us out of a register whose
+	 * security view we cannot verify. This is a choice, not a constraint:
+	 * the board-proven GICv3 code for this SoC does write it, so if Group 1
+	 * turns out not to be enabled this is the first thing to revisit. */
 }
 
 void board_gicv3_init(void)
@@ -322,23 +395,30 @@ void board_gicv3_init(void)
 		irq_enabled_bits[i] = 0u;
 	}
 
-	/* Order matters: distributor, then redistributor, then CPU
-	 * interface. Bringing the CPU interface up before the redistributor
-	 * is awake leaves PPIs undeliverable. */
-	/* Order matters: distributor, then redistributor, then CPU interface.
-	 * Bringing the CPU interface up before the redistributor is awake
-	 * leaves PPIs undeliverable. The markers exist because a hang inside
-	 * any of these is otherwise indistinguishable from dead hardware. */
-	board_early_print("[gicv3] dist\n");
+	/* Order matters: SRE first, then distributor, then redistributor/CPU
+	 * interface.
+	 *
+	 * System register access has to be enabled before any ICC_* access, and
+	 * before the CPU interface is programmed at all. The reference sequence
+	 * proven on this board does it first; an earlier revision of this file
+	 * did it last, after GICD/GICR had already been written, which is a
+	 * hazardous order on hardware where the security state of the two views
+	 * differs. */
+	gic_probe("sre", 0u);
+	gic_cpu_interface_sre_enable();
+
+	gic_probe("dty", reg_rd32((uintptr_t)gicd + GICD_TYPER));
+	gic_probe("dct", reg_rd32((uintptr_t)gicd + GICD_CTLR));
+	gic_probe("dst", 0u);
 	gic_distributor_init();
 
-	board_early_print("[gicv3] redist\n");
+	gic_probe("rst", 0u);
 	gic_redistributor_init();
 
-	board_early_print("[gicv3] cpuiface\n");
+	gic_probe("cif", 0u);
 	gic_cpu_interface_init();
 
-	board_early_print("[gicv3] ready\n");
+	gic_probe("rdy", 0u);
 	gic_ready = true;
 }
 
@@ -421,6 +501,20 @@ int32_t IRQ_Enable(IRQn_ID_t irqn)
 	bit = (uint32_t)irqn % 32u;
 
 	if (irqn <= IRQ_INTID_SGI_PPI_MAX) {
+		/* Route this one line to Group 1 non-secure so a non-secure
+		 * handler can receive it.
+		 *
+		 * Read-modify-write of a SINGLE bit, never a bank write. This
+		 * bank also holds firmware's lines (the EL1 physical timer is
+		 * PPI 29, claimed as Group 0 by OP-TEE), and rewriting the whole
+		 * bank is a non-secure write to secure state that resets this
+		 * board. Touching only the requested line means a caller can
+		 * only ever disturb an interrupt it explicitly asked to
+		 * enable. */
+		reg_wr32((uintptr_t)gicr_sgi + GICR_IGROUPR0,
+				  reg_rd32((uintptr_t)gicr_sgi + GICR_IGROUPR0) |
+				  (1u << bit));
+
 		reg_wr32((uintptr_t)gicr_sgi + GICR_ISENABLER0,
 				  1u << bit);
 	} else {

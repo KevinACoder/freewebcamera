@@ -32,7 +32,9 @@ extern ARM_DRIVER_USART Driver_USART_Console;
 /* Spare SPI line used as the software-trigger probe. Chosen in the SPI range
  * and not otherwise routed to anything on this board. */
 #define SPI_PROBE_INTID		60U
-#define SPI_PROBE_PRIORITY	(BOARD_IRQ_PRIORITY_API_CALL << 4)
+/* IRQ_SetPriority takes the raw GIC byte, so the board's logical level is
+ * shifted per the board's own policy rather than shifted here. */
+#define SPI_PROBE_PRIORITY	BOARD_IRQ_PRIORITY_API_CALL_RAW
 
 static ARM_USART_SignalEvent_t console_event;
 static volatile uint32_t spi_hits;

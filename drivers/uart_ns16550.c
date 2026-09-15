@@ -129,6 +129,18 @@ void uart_early_init(void)
 	(void)program_uart();
 }
 
+/* Wait for transmit room.
+ *
+ * Note this is an unbounded spin, deliberately: on this part THR_EMPTY behaves
+ * as expected, and a bounded version was actively harmful - a timeout that
+ * merely *writes anyway* still costs a full timeout per byte, which on
+ * uncached Device reads is slow enough that the boot log appeared to stop
+ * mid-message. The original spin has no such cost because it exits as soon as
+ * the bit is set, which is the normal case.
+ *
+ * The earlier "silent hang" that motivated a bound was misdiagnosed: the real
+ * cause was a bad GIC register offset elsewhere in bring-up (see
+ * port/board/gicv3.c), not a stuck transmit-ready bit. */
 static void polled_putc(char c)
 {
 	if (!early_ready) {
@@ -145,6 +157,12 @@ static void polled_putc(char c)
 	}
 	reg_write(REG_THR, (uint32_t)(uint8_t)c);
 }
+
+/* Only THR_EMPTY (bit 5) is polled here. Whether the transmitter has fully
+ * drained (TEMT, bit 6) is deliberately NOT used: an attempt to drain on it
+ * never succeeded on this part, which latched a permanent "stalled" state and
+ * silenced the console from the first message onward - indistinguishable from
+ * the board resetting. */
 
 void uart_early_putc(char c)
 {

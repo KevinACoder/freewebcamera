@@ -27,12 +27,14 @@
  * So the tick is CNTV on INTID 27. Note this is deliberately NOT the
  * architectural PPI 14 / INTID 30 that a generic Cortex-A port would assume.
  *
- * The kernel port requires the tick to run at the LOWEST usable interrupt
- * priority: FreeRTOS_Tick_Handler asserts that the running priority equals
- * portLOWEST_USABLE_INTERRUPT_PRIORITY. Anything that calls a FromISR API
- * from an interrupt must instead be configured at
+ * The kernel port requires the tick to run at the LOWEST USABLE interrupt
+ * priority, which is one level above the absolute lowest (the port reserves
+ * that for itself): FreeRTOS_Tick_Handler asserts that the running priority
+ * equals portLOWEST_USABLE_INTERRUPT_PRIORITY. Anything that calls a FromISR
+ * API from an interrupt must instead be configured at
  * configMAX_API_CALL_INTERRUPT_PRIORITY, or the port's
- * vPortValidateInterruptPriority assertion fires.
+ * vPortValidateInterruptPriority assertion fires. Both raw values come from
+ * board.h so there is one place to get them wrong.
  * ---------------------------------------------------------------------------
  */
 
@@ -50,11 +52,17 @@ static uint32_t tick_irq = BOARD_TICK_INTID;
 static volatile uint32_t tick_overflow_count;
 static volatile bool tick_enabled;
 
-/* Priority assigned to the tick: the lowest the kernel tolerates. Kept in one
- * place so the kernel port and this driver cannot disagree. */
-#ifndef BOARD_TICK_PRIORITY
-#define BOARD_TICK_PRIORITY	0xf0u
-#endif
+/* Priority assigned to the tick: the lowest the kernel tolerates, taken from
+ * the board's single priority policy (board.h) so this driver and the kernel
+ * port cannot disagree.
+ *
+ * IRQ_SetPriority (CMSIS irq_ctrl.h) takes the raw 8-bit GIC value, not the
+ * logical level, so the *_RAW form is what goes to the register. The port's
+ * FreeRTOS_Tick_Handler asserts ICC_RPR_EL1 equals
+ * portLOWEST_USABLE_INTERRUPT_PRIORITY << portPRIORITY_SHIFT; with 16 unique
+ * priorities that is 14 << 4 = 0xe0. A raw 0xf0 (logical 15) is a different
+ * hardware level and trips the assertion. */
+#define BOARD_TICK_PRIORITY	BOARD_IRQ_PRIORITY_TICK_RAW
 
 static inline uint64_t read_cntfrq(void)
 {
@@ -128,10 +136,14 @@ int32_t OS_Tick_Setup(uint32_t freq, IRQHandler_t handler)
 	IRQ_Disable((IRQn_ID_t)tick_irq);
 	IRQ_ClearPending((IRQn_ID_t)tick_irq);
 	IRQ_SetHandler((IRQn_ID_t)tick_irq, handler);
-	IRQ_SetMode((IRQn_ID_t)tick_irq, IRQ_MODE_TRIG_EDGE_RISING |
+	/* The timer's line is level-sensitive: it stays asserted while the
+	 * condition holds and drops when CNTV_TVAL is reloaded. Requesting edge
+	 * semantics here would be wrong even though the level/edge selection
+	 * for PPIs is not written to ICFGR yet. */
+	IRQ_SetMode((IRQn_ID_t)tick_irq, IRQ_MODE_TRIG_LEVEL |
 					   IRQ_MODE_TYPE_IRQ |
 					   IRQ_MODE_DOMAIN_NONSECURE);
-	/* Lowest usable priority: FreeRTOS_Tick_Handler asserts this. */
+	/* Raw hardware value, not the logical level: see the note above. */
 	IRQ_SetPriority((IRQn_ID_t)tick_irq, BOARD_TICK_PRIORITY);
 	IRQ_Enable((IRQn_ID_t)tick_irq);
 
