@@ -145,7 +145,59 @@ deploy: $(TARGET).bin
 	@printf 'after : '; sha256sum /mnt/d/tftpboot/freertos.bin
 	@printf 'local : '; sha256sum $(TARGET).bin
 
-gates:
+# --- kernel-replacement stub build (K4) ------------------------------------
+#
+# M0 claims CMSIS-RTOS2 is a real boundary, not a label. The way to test that
+# claim is to delete the kernel and see whether the layers above still build:
+# this links app/ and drivers/ against a null CMSIS-RTOS2 implementation, with
+# no FreeRTOS sources, no kernel include paths and no port glue.
+#
+# It does not run and is never deployed - linking at all is the result. If a
+# file in app/ or drivers/ ever reaches for a kernel symbol, this target stops
+# linking while the normal build keeps working.
+STUB_SRCS := \
+	port/adapters/stub/cmsis_os2_stub.c \
+	port/board/gicv3.c \
+	port/board/board_early.c \
+	port/board/memops.c \
+	port/board/cache.c \
+	port/board/mmu.c
+
+STUB_OBJS := $(addprefix $(BUILD)/stub/,$(STUB_SRCS:.c=.o)) \
+	     $(addprefix $(BUILD)/stub/,$(DRIVER_SRCS:.c=.o)) \
+	     $(addprefix $(BUILD)/stub/,$(APP_SRCS:.c=.o))
+
+$(BUILD)/stub/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Iinclude -Iport/board -Iport/adapters/stub \
+		-MMD -MP -c $< -o $@
+
+.PHONY: k4
+k4: $(BUILD)/freertos-stub.elf
+
+# Only startup.S is included: it is the board entry point every build needs.
+# vectors.S is deliberately NOT here - it branches to the FreeRTOS port's
+# handlers, so it belongs to the kernel side of the seam, not to the layers
+# this target is testing. What is under test is that app/ and drivers/ link
+# with no kernel; the kernel's own glue is allowed to be absent.
+STUB_ASM := $(BUILD)/stub/port/board/startup.o
+
+$(BUILD)/freertos-stub.elf: $(STUB_OBJS) $(STUB_ASM)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(STUB_OBJS) $(STUB_ASM) \
+		-nostdlib -static -T port/board/rk3568.ld \
+		-Wl,--build-id=none -Wl,--no-warn-rwx-segments -o $@
+	@printf 'K4 OK: app/ and drivers/ link with no kernel (CMSIS-RTOS2 is the only RTOS interface they see)\n'
+
+$(BUILD)/stub/port/board/startup.o: port/board/startup.S
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Iinclude -Iport/board -c $< -o $@
+
+# The gates are the things M0 is allowed to be judged on. k4 is included
+# because "the kernel interface is real" is a claim this build has to keep
+# making, not a one-off check: if app/ or drivers/ ever picks up a kernel
+# dependency, this fails here rather than at some later kernel swap.
+gates: k4
 	./tools/cleanroom-scan.sh
 	./tools/check-deps.sh
 

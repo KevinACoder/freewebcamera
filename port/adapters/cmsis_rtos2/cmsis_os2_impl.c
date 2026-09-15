@@ -231,6 +231,7 @@ void osKernelResume(uint32_t sleep_ticks)
 typedef struct {
 	TaskHandle_t      handle;
 	SemaphoreHandle_t join_sem;
+	uint32_t          stack_size;	/* bytes, as the caller requested */
 	uint8_t           detached;
 } thread_slot_t;
 
@@ -251,7 +252,7 @@ static thread_slot_t *slot_find(TaskHandle_t handle)
 	return NULL;
 }
 
-static thread_slot_t *slot_add(TaskHandle_t handle)
+static thread_slot_t *slot_add(TaskHandle_t handle, uint32_t stack_size)
 {
 	uint32_t i;
 
@@ -259,6 +260,7 @@ static thread_slot_t *slot_add(TaskHandle_t handle)
 		if (thread_slots[i].handle == NULL) {
 			thread_slots[i].handle = handle;
 			thread_slots[i].join_sem = NULL;
+			thread_slots[i].stack_size = stack_size;
 			thread_slots[i].detached = 0U;
 			return &thread_slots[i];
 		}
@@ -320,7 +322,7 @@ osThreadId_t osThreadNew(osThreadFunc_t func, void *argument,
 		return NULL;
 	}
 
-	slot = slot_add(handle);
+	slot = slot_add(handle, (uint32_t)stack_words * (uint32_t)sizeof(StackType_t));
 	if (slot == NULL) {
 		vTaskDelete(handle);
 		return NULL;
@@ -385,11 +387,13 @@ uint32_t osThreadEnumerate(osThreadId_t *thread_array, uint32_t array_items)
 
 uint32_t osThreadGetStackSize(osThreadId_t thread_id)
 {
-	(void)thread_id;
-	/* FreeRTOS reports remaining, not total. Returning the configured
-	 * minimum would be wrong for any thread that asked for more, so this
-	 * reports 0 (unknown) rather than a misleading number. */
-	return 0U;
+	thread_slot_t *slot = slot_find((TaskHandle_t)thread_id);
+
+	/* FreeRTOS reports how much stack is *left*, never how much was asked
+	 * for, so the answer comes from the size recorded at creation. 0 means
+	 * "not one of ours" (e.g. the idle task), which is the CMSIS-sanctioned
+	 * "cannot determine" answer - not a claim that the stack is empty. */
+	return (slot != NULL) ? slot->stack_size : 0U;
 }
 
 uint32_t osThreadGetStackSpace(osThreadId_t thread_id)
@@ -502,30 +506,44 @@ osStatus_t osThreadTerminate(osThreadId_t thread_id)
 
 uint32_t osThreadFlagsSet(osThreadId_t thread_id, uint32_t flags)
 {
+	uint32_t previous = 0U;
+
 	/* A FreeRTOS task notification is one 32-bit value per task, which is
-	 * the same width as CMSIS thread flags. */
-	if (xTaskNotify((TaskHandle_t)thread_id, flags, eSetBits) != pdPASS) {
+	 * the same width as CMSIS thread flags.
+	 *
+	 * CMSIS wants the flags value *after* setting, and callers do check it.
+	 * xTaskNotify() cannot report that, and returning 0 - as an earlier
+	 * revision did - silently violates the contract for every caller that
+	 * tests the result. xTaskNotifyAndQuery() hands back the previous value,
+	 * so the post-set value is previous | flags. */
+	if (xTaskNotifyAndQuery((TaskHandle_t)thread_id, flags, eSetBits,
+				&previous) != pdPASS) {
 		return (uint32_t)osError;
 	}
-	return 0U;
+	return previous | flags;
 }
 
 uint32_t osThreadFlagsClear(uint32_t flags)
 {
-	/* FreeRTOS clears the whole notification value, not selected bits, so
-	 * a selective clear cannot be honoured. Returning an error is better
-	 * than clearing flags the caller did not name. */
-	(void)flags;
-	return (uint32_t)osError;
+	TaskHandle_t self = xTaskGetCurrentTaskHandle();
+	uint32_t before;
+
+	/* FreeRTOS clears all-or-nothing only through the direct to-task
+	 * notification path. ulTaskNotifyValueClear() clears selected bits and
+	 * returns the value as it was *before* the clear - exactly the CMSIS
+	 * contract, which wants the prior flags back. Clearing the notification
+	 * from a task's own context is valid here because a task owns its own
+	 * notification value; the ISR path would need the FromISR variant. */
+	before = ulTaskNotifyValueClear(self, flags);
+	return before;
 }
 
 uint32_t osThreadFlagsGet(void)
 {
-	/* FreeRTOS has no read-without-modify for the notification value.
-	 * ulTaskNotifyValueClear would consume it, so a second call would
-	 * report something different from the first - worse than reporting
-	 * "unknown". */
-	return 0U;
+	/* There is no read-without-clearing primitive on the notification
+	 * value, so ask to clear nothing: ulTaskNotifyValueClear() with a zero
+	 * mask returns the current value and changes nothing. */
+	return ulTaskNotifyValueClear(xTaskGetCurrentTaskHandle(), 0U);
 }
 
 uint32_t osThreadFlagsWait(uint32_t flags, uint32_t options, uint32_t timeout)
@@ -562,9 +580,22 @@ osStatus_t osDelay(uint32_t ticks)
 
 osStatus_t osDelayUntil(uint32_t ticks)
 {
-	TickType_t previous = (TickType_t)ticks;
+	uint32_t now = osKernelGetTickCount();
+	uint32_t delta = ticks - now;	/* unsigned: correct across a wrap */
 
-	(void)xTaskDelayUntil(&previous, 1U);
+	/* CMSIS passes an ABSOLUTE wake-up tick, so the wait is the distance
+	 * from now, not the value itself. xTaskDelayUntil() is the wrong
+	 * primitive for this: it wants a caller-owned previous-wake variable and
+	 * a fixed per-iteration period, and it advances that variable itself. A
+	 * previous revision called it with a freshly initialised local, so every
+	 * call waited one tick regardless of the argument.
+	 *
+	 * An already-passed deadline must return without blocking, so compare
+	 * signed: an unsigned comparison would read a past tick as a nearly
+	 * full wrap and sleep for days. */
+	if ((int32_t)delta > 0) {
+		vTaskDelay((TickType_t)delta);
+	}
 	return osOK;
 }
 
@@ -801,9 +832,45 @@ osStatus_t osSemaphoreDelete(osSemaphoreId_t semaphore_id)
 
 /* --- message queues ------------------------------------------------------- */
 
+/* FreeRTOS keeps a queue's item size private, so remember it here. The table
+ * is advisory only: a queue created outside this adapter simply reports 0. */
+#define MAX_QUEUE_SLOTS	8
+
+static struct {
+	QueueHandle_t handle;
+	uint32_t      msg_size;
+} queue_slots[MAX_QUEUE_SLOTS];
+
+static void queue_note_size(QueueHandle_t handle, uint32_t msg_size)
+{
+	uint32_t i;
+
+	for (i = 0U; i < MAX_QUEUE_SLOTS; i++) {
+		if (queue_slots[i].handle == NULL || queue_slots[i].handle == handle) {
+			queue_slots[i].handle = handle;
+			queue_slots[i].msg_size = msg_size;
+			return;
+		}
+	}
+}
+
+static uint32_t queue_msg_size(QueueHandle_t handle)
+{
+	uint32_t i;
+
+	for (i = 0U; i < MAX_QUEUE_SLOTS; i++) {
+		if (queue_slots[i].handle == handle) {
+			return queue_slots[i].msg_size;
+		}
+	}
+	return 0U;
+}
+
 osMessageQueueId_t osMessageQueueNew(uint32_t msg_count, uint32_t msg_size,
 				     const osMessageQueueAttr_t *attr)
 {
+	QueueHandle_t q;
+
 	if (msg_count == 0U || msg_size == 0U) {
 		return NULL;
 	}
@@ -811,8 +878,11 @@ osMessageQueueId_t osMessageQueueNew(uint32_t msg_count, uint32_t msg_size,
 		return NULL;
 	}
 	/* FreeRTOS queues copy by value, so any element size works. */
-	return (osMessageQueueId_t)xQueueCreate((UBaseType_t)msg_count,
-						(UBaseType_t)msg_size);
+	q = xQueueCreate((UBaseType_t)msg_count, (UBaseType_t)msg_size);
+	if (q != NULL) {
+		queue_note_size(q, msg_size);
+	}
+	return (osMessageQueueId_t)q;
 }
 
 const char *osMessageQueueGetName(osMessageQueueId_t mq_id)
@@ -851,10 +921,9 @@ uint32_t osMessageQueueGetCapacity(osMessageQueueId_t mq_id)
 
 uint32_t osMessageQueueGetMsgSize(osMessageQueueId_t mq_id)
 {
-	(void)mq_id;
-	/* FreeRTOS does not expose a queue's item size. Reporting 0 would
-	 * look like a zero-sized message; there is no honest number here. */
-	return 0U;
+	/* Answered from the size noted at creation: FreeRTOS does not expose a
+	 * queue's item size, and reporting 0 would claim a zero-byte message. */
+	return queue_msg_size((QueueHandle_t)mq_id);
 }
 
 uint32_t osMessageQueueGetCount(osMessageQueueId_t mq_id)
@@ -895,6 +964,7 @@ typedef struct {
 	uint32_t      used;
 	pool_block_t *free_list;
 	void         *storage;
+	const char   *name;
 	uint8_t       storage_is_ours;
 } mem_pool_t;
 
@@ -939,6 +1009,7 @@ osMemoryPoolId_t osMemoryPoolNew(uint32_t block_count, uint32_t block_size,
 	pools[i].used = 0U;
 	pools[i].storage = p;
 	pools[i].free_list = NULL;
+	pools[i].name = (attr != NULL) ? attr->name : NULL;
 
 	/* Build the free list in reverse so allocation hands out ascending
 	 * addresses, which makes a pool easy to read in a debugger. */
@@ -990,6 +1061,16 @@ uint32_t osMemoryPoolGetCapacity(osMemoryPoolId_t mp_id)
 	mem_pool_t *pool = (mem_pool_t *)mp_id;
 
 	return (pool == NULL) ? 0U : pool->block_count;
+}
+
+const char *osMemoryPoolGetName(osMemoryPoolId_t mp_id)
+{
+	mem_pool_t *pool = (mem_pool_t *)mp_id;
+
+	/* Declared in cmsis_os2.h but previously left undefined, which is a
+	 * link error waiting for the first caller. The name is whatever the
+	 * caller supplied at creation. */
+	return (pool == NULL) ? NULL : pool->name;
 }
 
 uint32_t osMemoryPoolGetBlockSize(osMemoryPoolId_t mp_id)
