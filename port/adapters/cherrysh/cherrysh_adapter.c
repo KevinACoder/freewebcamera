@@ -85,6 +85,18 @@
 /* Console handle from the interface, never from the driver's header. */
 extern ARM_DRIVER_USART Driver_USART_Console;
 
+/* Post-mortem and debug entry points. its_dump_cmd lives next to the ITS
+ * driver (port/board/itsdump.c); the console rebind lives in the UART
+ * driver and is how a wrong-INTID hypothesis gets tested at runtime
+ * instead of with a rebuild. Both are declared here, like the console
+ * handle above, rather than reaching into driver headers. */
+extern int its_dump_cmd(int argc, char **argv);
+extern int uart_console_irq_rebind(unsigned int intid);
+extern unsigned int uart_console_irq_id(void);
+
+/* Freestanding: minilibc.c provides the definition. */
+extern int atoi(const char *s);
+
 /* --- console wiring ------------------------------------------------------- */
 
 /* RX ring: 512 bytes, which is well past the UART's own FIFO and gives a
@@ -103,10 +115,14 @@ static osThreadId_t shell_task_id;
  * real buffer, this only says "come and look". */
 #define SHELL_INPUT_FLAG	0x1U
 
-/* Number of bytes the driver should hand us per reception. 1 byte keeps echo
- * latency at one character; the cost is an interrupt per character, which at
- * 115200 baud is at most ~11.5 kHz and well within what this core handles. */
-#define SHELL_RX_CHUNK		1U
+/* Number of bytes the driver should hand us per reception. Arming the FIFO's
+ * full depth (64) means a burst that arrives as one FIFO fill is handed over
+ * in one completion - arming 1 and re-arming per byte made the driver's
+ * re-arm drain discard every byte queued behind the first, which is how a
+ * pasted line once reached the shell as "p". Echo latency stays fine: the
+ * driver completes the reception as soon as the FIFO goes idle, i.e. within
+ * a couple of character times of the last byte. */
+#define SHELL_RX_CHUNK		64U
 
 static uint8_t rx_chunk[SHELL_RX_CHUNK];
 
@@ -342,11 +358,70 @@ static int cmd_its(int argc, char **argv)
 	return 0;
 }
 
-CSH_CMD_EXPORT_FULL(cmd_version, "version", "print build and target info");
-CSH_CMD_EXPORT_FULL(cmd_uptime, "uptime", "show time since boot");
-CSH_CMD_EXPORT_FULL(cmd_tick, "tick", "check the RTOS tick is advancing");
-CSH_CMD_EXPORT_FULL(cmd_rtos, "rtos", "round-trip CMSIS-RTOS2 primitives");
-CSH_CMD_EXPORT_FULL(cmd_its, "its", "run the ITS/LPI self-test ladder");
+/* Post-mortem dump of the ITS delivery state: registers, DTE/ITE of every
+ * attached device, prop/pend of the LPI window. Extra arguments are
+ * arbitrary device ids to look up anyway. This is the tool that turns
+ * "LPIs are silently dropped" into which table is wrong. */
+static int cmd_itsdump(int argc, char **argv)
+{
+	chry_shell_t *csh = CSH_FROM_ARGV(argc, argv);
+
+	csh_printf(csh, "itsdump:\r\n");
+	(void)its_dump_cmd(argc, argv);
+	return 0;
+}
+
+/* Move the console RX interrupt to another INTID without a rebuild: the
+ * one board fact this driver cannot establish by itself. */
+static int cmd_uartint(int argc, char **argv)
+{
+	chry_shell_t *csh = CSH_FROM_ARGV(argc, argv);
+
+	if (argc < 2) {
+		csh_printf(csh, "uartint: console RX on INTID %u"
+			   " (usage: uartint <intid>)\r\n",
+			   uart_console_irq_id());
+		return 0;
+	}
+
+	{
+		int intid = atoi(argv[1]);
+
+		if ((intid <= 0) || (uart_console_irq_rebind((unsigned int)intid) != 0)) {
+			csh_printf(csh, "uartint: rebind to %d failed\r\n",
+				   intid);
+			return -1;
+		}
+	}
+	csh_printf(csh, "uartint: console RX moved to INTID %u - type"
+		   " to test\r\n",
+		   uart_console_irq_id());
+	return 0;
+}
+
+CSH_CMD_EXPORT_ALIAS_FULL(cmd_version, version, "version",
+			  "print build and target info");
+CSH_CMD_EXPORT_ALIAS_FULL(cmd_uptime, uptime, "uptime",
+			  "show time since boot");
+CSH_CMD_EXPORT_ALIAS_FULL(cmd_tick, tick, "tick",
+			  "check the RTOS tick is advancing");
+CSH_CMD_EXPORT_ALIAS_FULL(cmd_rtos, rtos, "rtos",
+			  "round-trip CMSIS-RTOS2 primitives");
+CSH_CMD_EXPORT_ALIAS_FULL(cmd_its, its, "its",
+			  "run the ITS/LPI self-test ladder");
+CSH_CMD_EXPORT_ALIAS_FULL(cmd_itsdump, itsdump, "itsdump",
+			  "dump ITS/LPI delivery state");
+CSH_CMD_EXPORT_ALIAS_FULL(cmd_uartint, uartint, "uartint",
+			  "show/move console RX INTID");
+
+/* cherrysh resolves every command name against a PATH variable from the
+ * variable table; with an empty variable table PATH is NULL and every
+ * command reports "not found" no matter how correctly it was exported.
+ * Register "/bin" - the section all the exports above land in - as a
+ * read-only variable, through the macro so it lands in VSymTab where the
+ * linker script's __vsymtab bounds expect it. */
+static const char csh_path_value[] = "/bin";
+CSH_RVAR_EXPORT(csh_path_value, PATH, sizeof(csh_path_value));
 
 /* --- bring-up ------------------------------------------------------------- */
 
