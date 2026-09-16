@@ -92,7 +92,11 @@ ADAPTER_SRCS := \
 	third-party/cherryrb/chry_ringbuffer.c
 
 DRIVER_SRCS := \
-	drivers/uart_ns16550.c
+	drivers/uart_ns16550.c \
+	drivers/dwc_eqos.c \
+	drivers/dwc_eqos_rk3568.c \
+	drivers/rtl8211f.c \
+	drivers/rk3568_gmac.c
 
 APP_SRCS := \
 	app/main.c

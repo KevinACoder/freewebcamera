@@ -75,6 +75,11 @@ extern void (*board_early_print_hook)(const char *message);
 
 void board_early_print(const char *message);
 
+/* Same sink, formatted. Drivers that report what they found (register
+ * versions, PHY ids, negotiated link speed) use this instead of each carrying
+ * its own formatter. One line per call; not for per-packet output. */
+void board_log(const char *fmt, ...);
+
 /* --- GICv3 (implementation of CMSIS irq_ctrl.h) -------------------------- */
 
 /* Bring up distributor, redistributor and CPU interface, in that order.

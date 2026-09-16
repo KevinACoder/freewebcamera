@@ -14,7 +14,9 @@
  * and would look like a working console quietly eating output.
  */
 
+#include <stdarg.h>
 #include <stddef.h>
+#include <stdio.h>
 
 #include "board.h"
 
@@ -25,4 +27,23 @@ void board_early_print(const char *message)
 	if (board_early_print_hook != NULL) {
 		board_early_print_hook(message);
 	}
+}
+
+/* Same sink, with numbers: drivers that report what they found (register
+ * versions, PHY ids, negotiated speed) would otherwise each carry their own
+ * formatter. The buffer is deliberately small - this is bring-up output on a
+ * polled 115200 console, not a logging system, and a driver that wants to
+ * print per packet has picked the wrong mechanism. */
+void board_log(const char *fmt, ...)
+{
+	char line[128];
+	va_list ap;
+
+	if (board_early_print_hook == NULL) {
+		return;
+	}
+	va_start(ap, fmt);
+	(void)vsnprintf(line, sizeof(line), fmt, ap);
+	va_end(ap);
+	board_early_print_hook(line);
 }
