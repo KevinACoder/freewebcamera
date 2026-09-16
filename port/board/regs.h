@@ -44,6 +44,19 @@ static inline void reg_wr8(uintptr_t addr, uint8_t value)
 	*(volatile uint8_t *)addr = value;
 }
 
+/* Halfword access. The SDHCI register file mixes 8/16/32-bit widths and its
+ * odd-offset registers fault on a 32-bit store (Device memory forbids
+ * unaligned access), so the width of each access is part of the sequence. */
+static inline uint16_t reg_rd16(uintptr_t addr)
+{
+	return *(volatile uint16_t *)addr;
+}
+
+static inline void reg_wr16(uintptr_t addr, uint16_t value)
+{
+	*(volatile uint16_t *)addr = value;
+}
+
 static inline void reg_wr64(uintptr_t addr, uint64_t value)
 {
 	*(volatile uint64_t *)addr = value;
