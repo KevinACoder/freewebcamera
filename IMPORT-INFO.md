@@ -13,6 +13,7 @@ directory are the same act — a component without an adapter is unfinished.
 | CMSIS_6 | `github.com/ARM-software/CMSIS_6` | `26206e47dcf0abfbdc64eb753a0b6334b24439f6` | v6.3.1-dev-32 | Apache-2.0 | `third-party/cmsis/` | Interface layer: `RTOS2/Include/cmsis_os2.h` + `os_tick.h`, `Driver/Include/Driver_*.h` (18), `Core/Include/a-profile/irq_ctrl.h` |
 | CherrySH | `github.com/cherry-embedded/CherrySH` | `8efe539c6e55b71d2f2cd1116cd00c4d64222a67` | v1.0.1-20 | Apache-2.0 | `third-party/cherrysh/` | Interactive shell |
 | CherryRB | `github.com/cherry-embedded/CherryRB` | `19ea7c6efcf19dc9e805a0a662212533ee5b1edb` | v1.0.0 | Apache-2.0 | `third-party/cherryrb/` | Ring buffer (console input; later UVC/network/storage streams) |
+| lwIP | `github.com/lwip-tcpip/lwip` | `77dcd25a72509eb83f72b033d219b1d40cd8eb95` | `STABLE-2_2_1_RELEASE` (2.2.1) | BSD-2 | `third-party/lwip/` | Networking: IPv4/ARP/ICMP/UDP/TCP core plus the FreeRTOS OSAL from upstream `contrib/ports/freertos/`. Vendored byte-identical (the whole `src/` tree, `contrib/ports/freertos/`, `COPYING`, `CHANGELOG`, `README`, `FILES`; verified with `diff -r` against the staging clone). The *compiled* subset is the Makefile's `LWIP_SRCS`; IPv6, PPP, altcp, sockets, DNS and the apps directories are not compiled (switched off in `port/adapters/lwip/include/lwipopts.h`). The httpd lands with M1-B. |
 
 Notes on what was deliberately **not** vendored:
 
@@ -24,10 +25,15 @@ Notes on what was deliberately **not** vendored:
   architectural reference for the `OS_Tick_*` shape only.
 - **CherrySH `builtin/lsusb.c`**: depends on CherryUSB headers, not yet in tree.
 - **FreeRTOS-Kernel `portable/ThirdParty/`, CMake/SPDX extras**: unused.
+- **lwIP `contrib/ports/{unix,win32}`**: not our OS. Only the FreeRTOS port is
+  vendored. The vendor standalone SDK's own lwIP port tree was never a
+  candidate either (vendor naming throughout it; the GMAC netif glue here is
+  written against this project's CMSIS drivers — gap G2). The excluded tree is
+  named in `docs/imports.md`, which is allowed to carry vendor names.
 
 ## Clean-room status
 
-All four vendored components are permissively licensed and carry **no vendor
+All vendored components are permissively licensed and carry **no vendor
 traces**. Verify with `tools/cleanroom-scan.sh` (which excludes
 `third-party/` from the trace scan, since vendored trees are byte-identical
 upstream content).
