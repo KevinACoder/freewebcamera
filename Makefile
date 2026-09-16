@@ -75,6 +75,8 @@ BOARD_SRCS := \
 	port/board/board_early.c \
 	port/board/gicv3.c \
 	port/board/gicv3_its.c \
+	port/board/its_test.c \
+	port/board/itsdump.c \
 	port/board/tick.c
 
 ADAPTER_SRCS := \
@@ -174,8 +176,11 @@ STUB_SRCS := \
 	port/adapters/stub/shell_stub.c \
 	port/board/gicv3.c \
 	port/board/gicv3_its.c \
+	port/board/its_test.c \
+	port/board/itsdump.c \
 	port/board/board_early.c \
 	port/board/memops.c \
+	port/board/minilibc.c \
 	port/board/cache.c \
 	port/board/mmu.c
 
