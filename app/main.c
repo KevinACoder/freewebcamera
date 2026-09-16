@@ -26,6 +26,7 @@
 #include "gicv3_its.h"
 #include "cmsis_os2.h"
 #include "irq_ctrl.h"
+#include "net.h"
 #include "shell.h"
 
 /* Console handle. Taken from the interface, never from the driver's header. */
@@ -393,6 +394,30 @@ static void task_shell_start(void *argument)
 	osThreadTerminate(osThreadGetId());
 }
 
+/* Bring the network up.
+ *
+ * A task for the same reason the shell is one - it creates threads and delays,
+ * so it needs a running scheduler - plus its own reason: autonegotiation waits
+ * for the PHY and the MAC bring-up pulses the PHY reset, which together take
+ * hundreds of milliseconds. On the boot path that would sit between the banner
+ * and the shell prompt.
+ *
+ * Running it last also means the console works throughout: if the network
+ * never comes up, the board is still a working shell, and `net` says what the
+ * ports look like. */
+static void task_net_start(void *argument)
+{
+	(void)argument;
+
+	if (net_start() != 0) {
+		console_print("NET FAIL\n");
+		return;
+	}
+	console_print("NET READY\n");
+
+	osThreadTerminate(osThreadGetId());
+}
+
 /* --- boot ----------------------------------------------------------------- */
 
 void board_main(void)
@@ -460,6 +485,11 @@ void board_main(void)
 	if (osThreadNew(task_shell_start, 0, &(osThreadAttr_t){ .name = "shstart",
 			.stack_size = 1024, .priority = osPriorityHigh }) == 0) {
 		console_print("[fatal] thread shell\n");
+		return;
+	}
+	if (osThreadNew(task_net_start, 0, &(osThreadAttr_t){ .name = "netstart",
+			.stack_size = 1536, .priority = osPriorityNormal }) == 0) {
+		console_print("[fatal] thread net\n");
 		return;
 	}
 

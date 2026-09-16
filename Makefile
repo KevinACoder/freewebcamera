@@ -54,7 +54,10 @@ INC_ADAPTER := -Ithird-party/FreeRTOS-Kernel/include \
 	-Iport/adapters/cherrysh \
 	-Ithird-party/cherrysh \
 	-Ithird-party/cherrysh/cherryrl \
-	-Ithird-party/cherryrb
+	-Ithird-party/cherryrb \
+	-Iport/adapters/lwip/include \
+	-Ithird-party/lwip/src/include \
+	-Ithird-party/lwip/contrib/ports/freertos/include
 
 # --- sources --------------------------------------------------------------
 
@@ -66,6 +69,46 @@ KERNEL_SRCS := \
 	third-party/FreeRTOS-Kernel/event_groups.c \
 	third-party/FreeRTOS-Kernel/portable/MemMang/heap_4.c \
 	third-party/FreeRTOS-Kernel/portable/GCC/ARM_AARCH64_SRE/port.c
+
+# lwIP 2.2.1, vendored. The set follows upstream src/Filelists.mk for the core,
+# IPv4 and sequential-API groups, plus the FreeRTOS sys_arch from contrib.
+# Files whose feature is switched off in lwipopts.h (sockets, DNS, autoip)
+# compile to nothing, which upstream's own makefiles rely on too. IPv6, PPP,
+# bridged/lowpan netifs and the apps directories are not vendored at all.
+LWIP_SRCS := \
+	third-party/lwip/src/core/def.c \
+	third-party/lwip/src/core/inet_chksum.c \
+	third-party/lwip/src/core/init.c \
+	third-party/lwip/src/core/ip.c \
+	third-party/lwip/src/core/mem.c \
+	third-party/lwip/src/core/memp.c \
+	third-party/lwip/src/core/netif.c \
+	third-party/lwip/src/core/pbuf.c \
+	third-party/lwip/src/core/raw.c \
+	third-party/lwip/src/core/stats.c \
+	third-party/lwip/src/core/sys.c \
+	third-party/lwip/src/core/tcp.c \
+	third-party/lwip/src/core/tcp_in.c \
+	third-party/lwip/src/core/tcp_out.c \
+	third-party/lwip/src/core/timeouts.c \
+	third-party/lwip/src/core/udp.c \
+	third-party/lwip/src/core/ipv4/acd.c \
+	third-party/lwip/src/core/ipv4/dhcp.c \
+	third-party/lwip/src/core/ipv4/etharp.c \
+	third-party/lwip/src/core/ipv4/icmp.c \
+	third-party/lwip/src/core/ipv4/ip4.c \
+	third-party/lwip/src/core/ipv4/ip4_addr.c \
+	third-party/lwip/src/core/ipv4/ip4_frag.c \
+	third-party/lwip/src/api/api_lib.c \
+	third-party/lwip/src/api/api_msg.c \
+	third-party/lwip/src/api/err.c \
+	third-party/lwip/src/api/netbuf.c \
+	third-party/lwip/src/api/netdb.c \
+	third-party/lwip/src/api/netifapi.c \
+	third-party/lwip/src/api/sockets.c \
+	third-party/lwip/src/api/tcpip.c \
+	third-party/lwip/src/netif/ethernet.c \
+	third-party/lwip/contrib/ports/freertos/sys_arch.c
 
 BOARD_SRCS := \
 	port/board/mmu.c \
@@ -89,7 +132,11 @@ ADAPTER_SRCS := \
 	third-party/cherrysh/builtin/clear.c \
 	third-party/cherrysh/builtin/shsize.c \
 	third-party/cherrysh/cherryrl/chry_readline.c \
-	third-party/cherryrb/chry_ringbuffer.c
+	third-party/cherryrb/chry_ringbuffer.c \
+	port/adapters/lwip/lwip_diag.c \
+	port/adapters/lwip/ethernetif.c \
+	port/adapters/lwip/lwip_adapter.c \
+	port/adapters/lwip/net_cmds.c
 
 DRIVER_SRCS := \
 	drivers/uart_ns16550.c \
@@ -108,7 +155,7 @@ ASM_SRCS := \
 
 # --- rules ----------------------------------------------------------------
 
-C_SRCS := $(KERNEL_SRCS) $(BOARD_SRCS) $(ADAPTER_SRCS) $(DRIVER_SRCS) $(APP_SRCS)
+C_SRCS := $(KERNEL_SRCS) $(LWIP_SRCS) $(BOARD_SRCS) $(ADAPTER_SRCS) $(DRIVER_SRCS) $(APP_SRCS)
 OBJS := $(addprefix $(BUILD)/,$(C_SRCS:.c=.o)) $(addprefix $(BUILD)/,$(ASM_SRCS:.S=.o))
 DEPS := $(OBJS:.o=.d)
 
@@ -178,6 +225,7 @@ deploy: $(TARGET).bin
 STUB_SRCS := \
 	port/adapters/stub/cmsis_os2_stub.c \
 	port/adapters/stub/shell_stub.c \
+	port/adapters/stub/net_stub.c \
 	port/board/gicv3.c \
 	port/board/gicv3_its.c \
 	port/board/its_test.c \

@@ -76,6 +76,10 @@
 #include "gicv3_its.h"
 #include "shell.h"
 #include "chry_ringbuffer.h"
+
+/* Its own header: shell_start()'s declaration and the CSH_FROM_ARGV convention
+ * used by every command below. */
+#include "cherrysh_adapter.h"
 /* csh.h, not chry_shell.h: csh.h pulls in csh_config.h (our shadow config) and
  * then the shell itself, and it is what defines the CSH_CMD_EXPORT* macros and
  * the chry_syscall_t/chry_sysvar_t types. Including chry_shell.h directly
@@ -239,9 +243,9 @@ static void shell_task(void *argument)
 
 /* --- commands ------------------------------------------------------------- */
 
-/* CherrySH passes the shell pointer as argv[argc+1] by convention (see
- * builtin/help.c). These two helpers keep that detail in one place. */
-#define CSH_FROM_ARGV(argc, argv) ((chry_shell_t *)(void *)(argv)[(argc) + 1])
+/* CSH_FROM_ARGV (CherrySH hands the shell pointer over as argv[argc+1]) is
+ * defined in cherrysh_adapter.h, because other adapters export commands into
+ * the same table and need the same convention. */
 
 static int cmd_version(int argc, char **argv)
 {

@@ -29,6 +29,15 @@ extern "C" {
 
 int cherrysh_init(void);
 
+/*
+ * CherrySH hands a command its shell handle as argv[argc + 1] instead of a
+ * first argument (see the vendored builtin/help.c). Command implementations
+ * that live outside this file - other adapters export their own commands into
+ * the same FSymTab - need that detail too, so it lives here rather than being
+ * copied into each one.
+ */
+#define CSH_FROM_ARGV(argc, argv) ((chry_shell_t *)(void *)(argv)[(argc) + 1])
+
 #ifdef __cplusplus
 }
 #endif
