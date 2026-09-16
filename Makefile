@@ -57,7 +57,7 @@ INC_ADAPTER := -Ithird-party/FreeRTOS-Kernel/include \
 	-Ithird-party/cherryrb \
 	-Iport/adapters/lwip/include \
 	-Ithird-party/lwip/src/include \
-	-Ithird-party/lwip/contrib/ports/freertos/include
+	-Ithird-party/lwip/contrib/ports/freertos/include \
 
 # --- sources --------------------------------------------------------------
 
@@ -118,6 +118,7 @@ BOARD_SRCS := \
 	port/board/board_early.c \
 	port/board/gicv3.c \
 	port/board/gicv3_its.c \
+	port/board/gicv3_msi.c \
 	port/board/its_test.c \
 	port/board/itsdump.c \
 	port/board/tick.c
@@ -136,14 +137,20 @@ ADAPTER_SRCS := \
 	port/adapters/lwip/lwip_diag.c \
 	port/adapters/lwip/ethernetif.c \
 	port/adapters/lwip/lwip_adapter.c \
-	port/adapters/lwip/net_cmds.c
+	port/adapters/lwip/net_cmds.c \
 
 DRIVER_SRCS := \
 	drivers/uart_ns16550.c \
 	drivers/dwc_eqos.c \
 	drivers/dwc_eqos_rk3568.c \
 	drivers/rtl8211f.c \
-	drivers/rk3568_gmac.c
+	drivers/rk3568_gmac.c \
+	drivers/dwc_pcie.c \
+	drivers/rk3568_pcie.c \
+	drivers/dwc_msix.c \
+	drivers/dwc_ahci.c \
+	drivers/rk3568_sata.c \
+	drivers/dwc_nvme.c
 
 APP_SRCS := \
 	app/main.c
@@ -228,6 +235,7 @@ STUB_SRCS := \
 	port/adapters/stub/net_stub.c \
 	port/board/gicv3.c \
 	port/board/gicv3_its.c \
+	port/board/gicv3_msi.c \
 	port/board/its_test.c \
 	port/board/itsdump.c \
 	port/board/board_early.c \

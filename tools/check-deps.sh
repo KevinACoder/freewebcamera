@@ -25,8 +25,10 @@ printf 'check-deps\n'
 # kernel just as surely as "task.h" does, and the include path is where that
 # would come from. FreeRTOSConfig.h is included deliberately by name, so it is
 # in the list too - a layer that has to know the kernel's configuration is no
-# longer kernel-independent.
-leaky='#include[[:space:]]*[<"](FreeRTOS\.h|FreeRTOSConfig\.h|task\.h|queue\.h|semphr\.h|event_groups\.h|timers\.h|stream_buffer\.h|list\.h|portmacro\.h|chry_ringbuffer\.h|chry_shell\.h|csh\.h)[>"]|#include[[:space:]]*[<"].*third-party'
+# longer kernel-independent. The vendored libraries are named the same way, one
+# entry per component that has an interface of its own: the shell (chry_*) and
+# the file system (ff.h/diskio.h) belong to adapters, not to drivers.
+leaky='#include[[:space:]]*[<"](FreeRTOS\.h|FreeRTOSConfig\.h|task\.h|queue\.h|semphr\.h|event_groups\.h|timers\.h|stream_buffer\.h|list\.h|portmacro\.h|chry_ringbuffer\.h|chry_shell\.h|csh\.h|ff\.h|ffconf\.h|diskio\.h)[>"]|#include[[:space:]]*[<"].*third-party'
 
 # port/board/ is board-level bring-up: it must stay kernel-independent too,
 # because the whole point of doing the tick through the CMSIS OS_Tick_* shape

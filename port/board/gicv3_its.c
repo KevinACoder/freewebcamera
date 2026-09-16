@@ -50,10 +50,13 @@
  *   - IRQ addressing: raw LPI INTIDs (8192 + slot) instead of a kernel IRQ
  *     window, and gic_lpi_set_state takes the INTID directly (the hook is
  *     wired in gicv3.c's IRQ_Enable/IRQ_Disable);
- *   - the LPI priority byte is BOARD_IRQ_PRIORITY_DEFAULT_RAW (0xa0) rather
- *     than embox's 0x00: a FreeRTOS interrupt that may one day call a
- *     FromISR API must not sit above the API-call level. The self-test
- *     handlers call nothing and are safe at this level.
+ *   - the LPI priority byte is BOARD_IRQ_PRIORITY_API_CALL_RAW (0xb0) rather
+ *     than embox's 0x00 or this project's earlier 0xa0. The level is what
+ *     decides whether a delivery handler may call a FromISR API, and 0xa0 sits
+ *     *above* the API-call level (smaller is more urgent in GIC terms), so the
+ *     PCIe MSI handlers - which wake a waiter through an event flag - would
+ *     have tripped the port's own priority assertion. 0xb0 is the level the
+ *     GMAC and console interrupt handlers already run at.
  * ---------------------------------------------------------------------------
  */
 
@@ -129,10 +132,11 @@
 
 /* LPI property table entry */
 #define ITS_LPI_PROP_ENABLE	0x1
-/* Priority byte for delivered LPIs: the board's default driver level
- * (raw, left-justified). See the file header for why this is not
- * embox's 0x00. */
-#define ITS_LPI_PROP_PRIO	((uint8_t)BOARD_IRQ_PRIORITY_DEFAULT_RAW)
+/* Priority byte for delivered LPIs, raw (left-justified). API-call level, not
+ * the default driver level: a PCIe MSI handler runs here and wakes a waiter
+ * through a FromISR API, which the kernel port asserts must not come from an
+ * interrupt above that level. See the file header. */
+#define ITS_LPI_PROP_PRIO	((uint8_t)BOARD_IRQ_PRIORITY_API_CALL_RAW)
 
 /* Command queue entries are 32 bytes, four 64-bit words: word 0 carries
  * the opcode and the device id, word 1 the event id, the ITT size or the
@@ -552,6 +556,10 @@ int gic_its_device_attach(uint32_t devid)
 
 	ret = its_cmd_mapd(dev);
 	if (ret == 0) {
+		/* `used` is what the diagnostic readers (its_attached_devices,
+		 * its_device_itt, and through them itsdump) key on; leaving it
+		 * clear made a mapped device invisible to them. */
+		dev->used = 1U;
 		its.dev_count++;
 	}
 

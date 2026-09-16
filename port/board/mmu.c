@@ -19,13 +19,23 @@
  *   L1[2]  0x80000000-0xbfffffff -> 1GiB Normal block
  *   L1[3]  0xc0000000-0xffffffff -> L2: 2MiB blocks, Device everywhere EXCEPT
  *          0xc0000000-0xc1ffffff, which is Normal
+ *   L1[15] 0x3c0000000-0x3ffffffff -> L2: Device, but only the PCIe DBI
+ *          windows are populated; anything else in that 1GiB faults
  *
- * That last exception matters. The ITS LPI property and pending tables live
+ * That L1[3] exception matters. The ITS LPI property and pending tables live
  * at 0xc0010000 / 0xc0020000 (see carriers/gicv3_its.c). They are ordinary
  * shared memory that the CPU writes and the ITS reads, so they must be
  * Normal cacheable for the flush/invalidate discipline to mean anything. If
  * they were mapped Device, writes would bypass the cache and the
  * flush/invalidate calls would become no-ops that merely look correct.
+ *
+ * The 15GiB entry exists because the DesignWare PCIe register file (DBI, where
+ * the iATU lives and where the root port's own config space is served) is
+ * addressed above 4GiB: 0x3c0000000 for pcie2x1 and 0x3c0800000 for pcie3x2.
+ * Those two frames are the only thing up there, so only they are populated -
+ * an unmapped access faults loudly instead of landing on a Device mapping that
+ * happens to read as zero. The PCIe config/MMIO windows the endpoints use
+ * (0xf0xxxxxx/0xf4xxxxxx) are inside L1[3] and need nothing new.
  */
 
 #include <stdint.h>
@@ -58,6 +68,15 @@
  * LPI_PROP_BASE / LPI_PEND_BASE in carriers/gicv3_its.c. */
 #define LPI_TABLE_BASE		0xc0000000ULL
 #define LPI_TABLE_END		0xc2000000ULL
+
+/* DesignWare PCIe register files (DBI), one per controller, both in the same
+ * 1GiB at 15GiB. The RK3568 numbers, matching the board table in
+ * drivers/rk3568_pcie.c and the vendor tree's reg-names = "dbi". */
+#define PCIE_DBI0_BASE		0x3c0000000ULL
+#define PCIE_DBI0_END		(PCIE_DBI0_BASE + 0x400000ULL)
+#define PCIE_DBI1_BASE		0x3c0800000ULL
+#define PCIE_DBI1_END		(PCIE_DBI1_BASE + 0x400000ULL)
+#define L1_IDX_PCIE_DBI		((uint32_t)((PCIE_DBI0_BASE >> 30) & 0x1ffULL))
 
 /* TCR_EL1 geometry. T0SZ=16 gives 48-bit VA. IRGN0/ORGN0 = write-back
  * write-allocate, SH0 = inner shareable. PS=0b010 selects 40-bit PA, which is
@@ -92,6 +111,7 @@ static uint64_t l0_table[512] __attribute__((aligned(PAGE_GRANULE)));
 static uint64_t l1_table[512] __attribute__((aligned(PAGE_GRANULE)));
 static uint64_t l2_low[512]  __attribute__((aligned(PAGE_GRANULE)));
 static uint64_t l2_top[512]  __attribute__((aligned(PAGE_GRANULE)));
+static uint64_t l2_pcie[512] __attribute__((aligned(PAGE_GRANULE)));
 
 /* Normal memory: inner-shareable, cacheable (MAIR byte 0). */
 static uint64_t block_desc(uint64_t base, uint64_t attrs)
@@ -142,6 +162,21 @@ void board_mmu_enable(void)
 		}
 	}
 
+	/* L2 covering the 1GiB that holds the two PCIe DBI register files.
+	 * Only those two frames get a descriptor; the rest of the 1GiB stays
+	 * invalid on purpose. */
+	for (i = 0; i < 512U; i++) {
+		uint64_t base = (uint64_t)L1_IDX_PCIE_DBI * L1_BLOCK_SIZE +
+				(uint64_t)i * L2_BLOCK_SIZE;
+
+		if ((base >= PCIE_DBI0_BASE && base < PCIE_DBI0_END) ||
+		    (base >= PCIE_DBI1_BASE && base < PCIE_DBI1_END)) {
+			l2_pcie[i] = device_block_desc(base);
+		} else {
+			l2_pcie[i] = 0;
+		}
+	}
+
 	/* L1 covering the low 4GiB. */
 	for (i = 0; i < 512U; i++) {
 		l1_table[i] = 0;
@@ -152,6 +187,7 @@ void board_mmu_enable(void)
 	l1_table[2] = block_desc(L1_BLOCK_SIZE * 2ULL,
 				 DESC_ATTR_NORMAL);
 	l1_table[3] = DESC_TABLE | (uint64_t)(uintptr_t)l2_top;
+	l1_table[L1_IDX_PCIE_DBI] = DESC_TABLE | (uint64_t)(uintptr_t)l2_pcie;
 
 	/* L0: where the walk actually starts for a 48-bit VA. Only table
 	 * descriptors are valid at this level. */
