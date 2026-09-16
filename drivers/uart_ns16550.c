@@ -448,12 +448,30 @@ static int32_t usart_receive(void *data, uint32_t num)
 	return ARM_DRIVER_OK;
 }
 
-/* Called from the RX interrupt (through the board's IRQ dispatch). Reads every
- * byte the FIFO has to offer into the caller's buffer and fires
- * RECEIVE_COMPLETE when the requested count is met. */
+/* Called from the RX interrupt (through the board's IRQ dispatch).
+ *
+ * The handler asks the part WHY it is asserting before touching anything:
+ * IIR 0x4 is "FIFO reached the trigger level" and IIR 0xC is the character
+ * timeout. Any other identification means this interrupt is not receive
+ * data - reporting it, bounded, is the difference between "console RX is
+ * dead for an unknown reason" and a one-line answer in the boot log. */
 void usart_rx_irq_handler(void)
 {
+	static uint8_t unexpected_reports;
 	uint32_t guard = 0u;
+	uint32_t iir = reg_read(REG_IIR) & IIR_ID_MASK;
+
+	if (iir != IIR_ID_RX_AVAILABLE && iir != IIR_ID_RX_TIMEOUT) {
+		if (unexpected_reports < 3U) {
+			unexpected_reports++;
+			uart_early_puts("[uart] interrupt without RX data: iir=");
+			uart_early_put_hex32(iir);
+			uart_early_puts(" lsr=");
+			uart_early_put_hex32(reg_read(REG_LSR));
+			uart_early_puts("\n");
+		}
+		return;
+	}
 
 	while ((reg_read(REG_LSR) & LSR_DATA_READY) != 0u) {
 		uint8_t byte = (uint8_t)(reg_read(REG_RBR) & 0xffu);

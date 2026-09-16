@@ -1,19 +1,31 @@
 /*
  * @file   gicv3_its.h
- * @brief  Board-side ITS/LPI interface.
+ * @brief  GIC-600 ITS / LPI driver: interface and table geometry.
  *
- * This is not an interface layer: nothing above the board layer should include
- * it. Interrupt handlers are registered through CMSIS irq_ctrl.h's IRQ_SetHandler
- * using the LPI's INTID, exactly as for SPIs and PPIs, so an LPI is not a
- * special case for callers. What is board-specific, and what this header
- * carries, is the addressing and the bring-up entry points.
+ * PROVENANCE AND PORTING POLICY. The register sequences, table geometry and
+ * cache discipline in the driver are ported from the author's own embox
+ * contribution (embox/embox, BSD-2, src/drivers/interrupt/gic/gicv3_its.c,
+ * commit e93fe1ec0e, board-verified on this SoC 2026-09-06). That driver is
+ * the reference: where it makes a choice - a field encoding, an ordering
+ * step, an unconditional cache flush - the choice is kept, not re-derived.
+ * Re-deriving any of it is how rung 2 of the self-test went silent (see
+ * docs/evidence/20260915-m0-bringup.md and the KI-025 note in
+ * docs/DESIGN.md).
  *
- * The two table addresses are fixed physical addresses on purpose: the ITS and
- * the redistributor reach them over non-coherent ports, so they must live in
- * the Normal-cacheable window that port/board/mmu.c maps at 0xc0000000, and
- * the cache maintenance in gicv3_its.c is only meaningful if both sides agree
- * on where they are. A macro here and a macro there that drifted apart would
- * fail with total silence.
+ * Mechanical differences from the embox original, all noted at their site:
+ *   - register/cache primitives are this project's (regs.h, board.h);
+ *   - tables live in .bss (identity-mapped Normal RAM) instead of a mmap'd
+ *     fixed window - equivalent for the hardware, which reads physical DRAM
+ *     over its non-coherent port either way, and one less mapping to keep
+ *     in agreement;
+ *   - callers address LPIs by raw INTID (IRQ_LPI_INTID_FIRST + slot) rather
+ *     than through a kernel IRQ window, matching the CMSIS irq_ctrl.h model
+ *     this project uses for SPIs and PPIs;
+ *   - the LPI priority byte is a FreeRTOS-safe level, not embox's 0x00.
+ *
+ * This is not an interface layer: nothing above the board layer should
+ * include it. Handlers are registered through CMSIS irq_ctrl.h's
+ * IRQ_SetHandler on the LPI's INTID, exactly as for SPIs and PPIs.
  */
 
 #ifndef FREEWEBCAMERA_GICV3_ITS_H
@@ -25,58 +37,103 @@
 extern "C" {
 #endif
 
-/* LPI configuration (property) and pending tables, inside the Normal window
- * mapped by mmu.c. Must stay within LPI_TABLE_BASE..LPI_TABLE_END there. */
-#define LPI_PROP_BASE		0xc0010000UL
-#define LPI_PEND_BASE		0xc0020000UL
-#define LPI_TABLE_BYTES		0x10000UL	/* 64KiB: 2^16 one-byte entries */
+/* --- geometry (the embox values, which this board's GIC-600 demands) ------ */
 
-/* The first LPI INTID. LPIs are numbered from here, not from 0: INTID 8192 is
- * LPI 0. Handlers are registered as (IRQ_LPI_INTID_FIRST + lpi). */
+/* First LPI INTID. LPIs are numbered from here, not from 0: INTID 8192 is
+ * LPI slot 0. Handlers are registered as (IRQ_LPI_INTID_FIRST + slot). */
 #define IRQ_LPI_INTID_FIRST	8192U
 
-/* Bring up the ITS: command queue, device and collection tables, the
- * redistributor's LPI tables, and the collection for this CPU. Idempotent.
- * Returns 0 on success. */
+/* LPI slots the driver hands out. embox derived this from its kernel IRQ
+ * window (256 - 208); the number itself is what its self-test grid and the
+ * PCIe MSI allocator were sized against. */
+#define ITS_LPI_QUANTITY	48U
+
+/* Command queue: 512 entries of four 64-bit words (32-byte slots, 16 KiB). */
+#define ITS_CMDQ_ENTRIES	512U
+
+/* Device table: GITS_TYPER.DEVBITS=15 on this part, so the direct table
+ * must span the full 16-bit DeviceID space (65536 x 8B = 512 KiB). A
+ * shorter table makes the ITS reject every MAPD and the device comes back
+ * invalid - silently. */
+#define ITS_DEV_TABLE_ENTRIES	65536U
+
+/* Collection table: one 4 KiB page of 8-byte entries. This ITS binds the
+ * collection type to BASER1 on reset; a collection table offered in any
+ * other slot is silently discarded (which wedges the command queue). */
+#define ITS_COLL_TABLE_ENTRIES	512U
+
+/* Per-device interrupt translation table: 64 entries x 8B = 512B,
+ * 256-byte aligned. 64 is what MAPD's size field encodes (log2 - 1 = 5). */
+#define ITS_ITT_ENTRIES		64U
+
+/* Simultaneously mapped devices: PCIe endpoints plus the its_test grid. */
+#define ITS_MAX_DEVICES		8U
+
+/* LPI property/pending tables cover 2^16 LPI INTIDs: GICR_PROPBASER.IDbits
+ * is programmed 15 and the tables must span what the redistributor will
+ * index, whatever fraction of the slots is ever handed out (64 KiB each,
+ * the pending table 64K-aligned for PENDBASER's [51:16] address field). */
+#define ITS_PROP_SIZE		65536U
+#define ITS_PEND_SIZE		65536U
+#define ITS_LPI_IDBITS_FIELD	15U
+
+/* --- init and mapping API -------------------------------------------------- */
+
+/* Bring up the ITS: redistributor LPI tables, device/collection tables,
+ * command queue, then the collection for this PE. Idempotent.
+ * Returns 0 on success; on failure LPI delivery stays disabled. */
 int its_init(void);
 
-/* Map a device's interrupt translation table. `events` is how many event IDs
- * the device may use. Returns 0 on success. */
-int its_device_map(uint32_t devid, uint32_t events);
+/* The address an endpoint writes to raise an MSI (GITS_TRANSLATER). */
+uint64_t gic_its_trans_addr(void);
 
-/* Bind one (device, event) pair to an LPI INTID, then make the change visible
- * with INV + SYNC. Returns 0 on success. */
-int its_event_map(uint32_t devid, uint32_t eventid, uint32_t lpi);
+/* Map a device into the ITS (MAPD + SYNC): allocates and binds its ITT.
+ * Idempotent per devid. Returns 0 on success. */
+int gic_its_device_attach(uint32_t devid);
 
-/* Remove a binding. */
-void its_event_unmap(uint32_t devid, uint32_t eventid);
+/* Bind the next free LPI slot to (devid, eventid): MAPTI + SYNC. Returns
+ * the LPI's INTID (IRQ_LPI_INTID_FIRST + slot), or -1. The caller arms the
+ * LPI through IRQ_SetHandler + IRQ_Enable on that INTID, exactly as for a
+ * SPI - the enable reaches the property table through the gicv3.c hook. */
+int gic_its_event_map(uint32_t devid, uint32_t eventid);
 
-/* LPI configuration. `priority` is the raw 8-bit GIC value; the low two bits
- * are ignored because only four priority bits are implemented. */
-void its_lpi_enable(uint32_t lpi, uint8_t priority);
-void its_lpi_disable(uint32_t lpi);
-uint8_t its_lpi_get_config(uint32_t lpi);
+/* Withdraw a binding (DISCARD). */
+void gic_its_event_unmap(uint32_t devid, uint32_t eventid);
 
-/* Pending state, read from the redistributor's table (one BIT per LPI). */
-int its_lpi_is_pending(uint32_t lpi);
-void its_clear_pending(uint32_t lpi);
+/* Inject a message for a mapped (devid, eventid) pair the way an endpoint
+ * would - via the ITS's INT command. A CPU store to the doorbell address
+ * carries no Requester ID and is dropped, so there is deliberately no
+ * "ring doorbell" API: INT is the only injection path that works. */
+int gic_its_send_int(uint32_t devid, uint32_t eventid);
 
-/* The address an endpoint writes to raise an MSI. The value written is the
- * EVENT id; the device is identified by the Requester ID of the write, not by
- * anything in the data. */
-uint32_t its_doorbell_addr(void);
+/* Drop pending state the ITS may still hold for (devid, eventid). */
+int gic_its_send_clear(uint32_t devid, uint32_t eventid);
 
-/* Make event `eventid` of device `devid` fire.
- *
- * Implemented with the ITS's INT command, NOT a store to the doorbell address.
- * A CPU store has no Requester ID, so the ITS cannot attribute it to a device
- * and drops it - which makes a doorbell-based self-test fail even when every
- * mapping is correct. */
-void its_ring_doorbell(uint32_t devid, uint32_t eventid);
+/* Enable/disable an LPI's delivery: the property table byte + flush + INV.
+ * Called from gicv3.c's IRQ_Enable/IRQ_Disable for the LPI window; not
+ * normally called directly. */
+void gic_lpi_set_state(uint32_t intid, int enable);
 
-/* Exercise the whole path in a four-rung ladder and report how many
- * deliveries were observed. Returns 0 if every rung passed. */
-int its_selftest(uint32_t *lpiondelivered);
+/* --- self-test and post-mortem plumbing ------------------------------------ */
+
+/* The four-rung ladder (see its_test.c): single INT, disable/re-enable,
+ * silent-while-disabled grid, interleaved re-fire. Returns 0 when every
+ * rung passed and stores the number of deliveries observed. */
+int its_selftest(uint32_t *delivered);
+
+/* itsdump support: addresses of the driver-owned tables (VA == PA under
+ * this project's identity map) and per-device ITT lookup. */
+uint64_t its_prop_table(void);
+uint64_t its_pend_table(void);
+uint64_t its_dev_table(void);
+uint64_t its_device_itt(uint32_t devid);
+
+/* Devices currently attached, into out[] (up to max). Returns the count. */
+uint32_t its_attached_devices(uint32_t *out, uint32_t max);
+
+/* Diagnostic output (vsnprintf + board_early_print; '\n' becomes CRLF in
+ * the console driver). Shared by its_test.c and itsdump.c. */
+void its_log(const char *fmt, ...);
 
 #ifdef __cplusplus
 }

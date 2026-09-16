@@ -128,14 +128,17 @@ bool board_tick_is_running(void);
 
 /* The GIC INTID of the console UART's interrupt.
  *
- * Three independent device trees agree (uart2's node carries GIC_SPI 118, and
- * uart1..uart9 map to SPI 117..125, so the sequence is self-consistent), and the
- * vendor SoC header matches. SPI N is INTID N+32, hence 150.
+ * 150, from three independent sources that agree: the device trees (uart2's
+ * node carries GIC_SPI 118, and uart1..uart9 map to SPI 117..125, so the
+ * sequence is self-consistent), and the vendor SoC header for this board,
+ * whose FUART2_IRQ_NUM is 150 against the same base address 0xfe660000.
+ * SPI N is INTID N+32, hence 150.
  *
- * NOTE: the lab's FreeBSD logs report `irq 66` for this same base address. That
- * discrepancy is unresolved. If console RX never fires, the other number is the
- * first thing to try - a wrong INTID produces a console that receives nothing
- * and reports nothing, which is indistinguishable from dead hardware. */
+ * The lab's FreeBSD logs report `irq 66` for the same base address; that is
+ * FreeBSD's own interrupt-rack numbering, not the GIC INTID. A brief earlier
+ * attempt at 66 delivered nothing, and an interrupt storm seen with 150 was
+ * traced to the driver's own handler not clearing the source - not to the
+ * number. */
 #define BOARD_CONSOLE_INTID	150U
 
 /* --- interrupt priorities ------------------------------------------------- */

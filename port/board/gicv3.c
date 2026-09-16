@@ -49,6 +49,7 @@
 #include <stdint.h>
 
 #include "board.h"
+#include "gicv3_its.h"
 #include "regs.h"
 #include "irq_ctrl.h"
 
@@ -488,13 +489,15 @@ int32_t IRQ_Enable(IRQn_ID_t irqn)
 
 	if (irqn >= IRQ_INTID_LPI_FIRST) {
 		/* An LPI has no enable bit in a GICR_ISENABLER register: its
-		 * enabled state lives in the ITS property table, which the ITS
-		 * module owns. Report success only for a range this build can
-		 * actually configure, so a caller cannot believe an
-		 * out-of-window LPI was enabled. The property table itself is
-		 * programmed by the caller through the ITS API, so there is
-		 * nothing to do here beyond validating the number. */
+		 * enabled state lives in the ITS property table. Same hook
+		 * shape as the embox kernel: enabling an LPI-bound INTID
+		 * writes the property entry (flushed to memory - the ITS
+		 * reads it over a non-coherent port) and INVALIDATEs the
+		 * ITS's cached copy. Before the ITS is up this is a no-op
+		 * that still reports success for in-window INTIDs, which
+		 * matches when a caller can legitimately arm early. */
 		if (irqn < (IRQn_ID_t)(IRQ_INTID_LPI_FIRST + IRQ_LPI_TABLE_SIZE)) {
+			gic_lpi_set_state((uint32_t)irqn, 1);
 			return 0;
 		}
 		return -1;
@@ -551,6 +554,7 @@ int32_t IRQ_Disable(IRQn_ID_t irqn)
 		/* Mirror of IRQ_Enable: an LPI's enabled state is the ITS
 		 * property table's, not a GICR_ICENABLER bit. */
 		if (irqn < (IRQn_ID_t)(IRQ_INTID_LPI_FIRST + IRQ_LPI_TABLE_SIZE)) {
+			gic_lpi_set_state((uint32_t)irqn, 0);
 			return 0;
 		}
 		return -1;

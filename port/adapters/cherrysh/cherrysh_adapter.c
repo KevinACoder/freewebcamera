@@ -118,7 +118,6 @@ static void shell_rearm_rx(void)
 /* ARM_USART_SignalEvent_t: called from the RX interrupt. */
 static void shell_usart_event(uint32_t event)
 {
-	/* TEMPORARY: proves whether the console interrupt reaches us at all. */
 	if ((event & ARM_USART_EVENT_RECEIVE_COMPLETE) == 0U) {
 		return;
 	}
