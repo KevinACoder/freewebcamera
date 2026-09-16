@@ -182,7 +182,8 @@ ADAPTER_SRCS := \
 	port/adapters/sdmmc/sdmmc_host_dwmshc.c \
 	port/adapters/sdmmc/sdmmc_storage.c \
 	port/adapters/sdmmc/sdmmc_adapter.c \
-	port/adapters/sdmmc/sdmmc_cmds.c
+	port/adapters/sdmmc/sdmmc_cmds.c \
+	port/adapters/periph/periph_cmds.c
 
 DRIVER_SRCS := \
 	drivers/uart_ns16550.c \
@@ -198,7 +199,10 @@ DRIVER_SRCS := \
 	drivers/dwc_nvme.c \
 	drivers/dwc_mmc.c \
 	drivers/dwc_mshc.c \
-	drivers/rk3568_sdmmc.c
+	drivers/rk3568_sdmmc.c \
+	drivers/rk_i2c.c \
+	drivers/rk_tsadc.c \
+	drivers/rk_sfc.c
 
 APP_SRCS := \
 	app/main.c

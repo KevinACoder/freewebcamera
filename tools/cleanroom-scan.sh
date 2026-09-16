@@ -18,9 +18,35 @@ printf 'cleanroom-scan\n'
 # The scan script itself is excluded: it necessarily contains the vendor
 # tokens, as data, and `git grep` would otherwise always match its own pattern
 # list and fail every run.
-traces=$(git grep -nIE \
+#
+# Whole-file-port exception list (decision D20 route, each entry backed by an
+# imports.md registration). A whole-file port keeps its upstream file intact -
+# identifiers included - and the BSD-3 license requires the original copyright
+# header to stay. Rewriting those names would turn a faithful import into an
+# unreviewable mutation of proven code. Everything NOT on this list is held to
+# the zero-trace rule: new code never takes a vendor identifier.
+TRACE_ALLOWED_FILES='
+port/adapters/sdmmc/sdmmc_host_dwmmc.c
+port/adapters/sdmmc/sdmmc_host_dwmshc.c
+port/adapters/sdmmc/sdmmc_board.h
+port/adapters/sdmmc/shadow/fsl_common.h
+'
+raw_traces=$(git grep -nIE \
   'phytium|Phytium|PHYTIUM|fparameters|fgic|FCache|FT_DEBUG|FT_[A-Z]|fdwgmac|fdwi2c|fdwmmc|fdwmshc|fdwpcie|fsata|fdsfc|fsdif|fxmac|fgmac|fpl011|f16550' \
   -- . ':!third-party' ':!docs' ':!.zcode' ':!tools/cleanroom-scan.sh' 2>/dev/null)
+
+# POSIX-sh filter: split the raw hits into allowlisted and actionable.
+traces=$(printf '%s\n' "$raw_traces" | awk -v allowed="$TRACE_ALLOWED_FILES" '
+    BEGIN { n = split(allowed, a, "\n"); for (i = 1; i <= n; i++) allow[a[i]] = 1 }
+    { file = $0; sub(/:.*/, "", file); if (!(file in allow)) print }')
+allowed_traces=$(printf '%s\n' "$raw_traces" | awk -v allowed="$TRACE_ALLOWED_FILES" '
+    BEGIN { n = split(allowed, a, "\n"); for (i = 1; i <= n; i++) allow[a[i]] = 1 }
+    { file = $0; sub(/:.*/, "", file); if (file in allow) print file }' |
+    sort -u | sed 's/^/        /')
+if [ -n "$allowed_traces" ]; then
+    printf '  note  whole-file-port exceptions (D20, registered in imports.md):\n'
+    printf '%s\n' "$allowed_traces"
+fi
 if [ -z "$traces" ]; then
     say_ok 'vendor trace scan (expect empty)'
 else
