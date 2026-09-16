@@ -33,14 +33,49 @@ fi
 # review any hit by hand rather than assuming a false positive.
 # build/ and _baseline/ are generated/archived output, not sources: scanning
 # them reports objects and backup images, not code we wrote.
+#
+# Three names are reviewed and allowed (docs/clean-room.md §5.2):
+#   ffconf.h   - the name FatFs includes by name ("ffconf.h"); the file lives
+#                in the adapter because upstream's own copy would shadow it.
+#   fs.h       - project interface header (include/fs.h): the file system
+#                interface, same vocabulary as shell.h and net.h.
+#   fs_stub.c  - the K4 stub for that interface, named after it.
+#   fatfs_*.{c,h} - the FatFs adapter files, named after the component the way
+#                port/adapters/lwip/* is named after lwIP.
+# Anything else matching the pattern is still a failure.
+ALLOWED_NAMES='ffconf.h fs.h fs_stub.c'
+ALLOWED_PATTERNS='port/adapters/fatfs/fatfs_*.c port/adapters/fatfs/fatfs_*.h'
+
 badnames=$(find . -path ./third-party -prune -o -path ./.git -prune -o \
   -path ./build -prune -o -path ./_baseline -prune -o \
   -type f \( -name 'f[a-z]*.c' -o -name 'f[a-z]*.h' -o -name 'f[a-z]*.S' \) -print 2>/dev/null)
-if [ -z "$badnames" ]; then
+
+hits=''
+allowed=''
+for name in $badnames; do
+    ok=0
+    for allowed_name in $ALLOWED_NAMES; do
+        [ "$(basename "$name")" = "$allowed_name" ] && ok=1
+    done
+    for pattern in $ALLOWED_PATTERNS; do
+        case "$name" in ./$pattern) ok=1 ;; esac
+    done
+    if [ "$ok" -eq 1 ]; then
+        allowed="$allowed $name"
+    else
+        hits="$hits
+$name"
+    fi
+done
+
+if [ -n "$allowed" ]; then
+    printf '  note  filename exceptions (reviewed, allowlisted):%s\n' "$allowed"
+fi
+if [ -z "$hits" ]; then
     say_ok 'filename scan (expect empty)'
 else
     say_fail 'filename scan found (review by hand):'
-    printf '%s\n' "$badnames"
+    printf '%s\n' "$hits"
 fi
 
 # --- 3. Copyleft / license -------------------------------------------------

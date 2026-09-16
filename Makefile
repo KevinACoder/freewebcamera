@@ -58,6 +58,8 @@ INC_ADAPTER := -Ithird-party/FreeRTOS-Kernel/include \
 	-Iport/adapters/lwip/include \
 	-Ithird-party/lwip/src/include \
 	-Ithird-party/lwip/contrib/ports/freertos/include \
+	-Iport/adapters/fatfs \
+	-Ithird-party/fatfs
 
 # --- sources --------------------------------------------------------------
 
@@ -110,6 +112,15 @@ LWIP_SRCS := \
 	third-party/lwip/src/netif/ethernet.c \
 	third-party/lwip/contrib/ports/freertos/sys_arch.c
 
+# FatFs R0.16 (ChaN), vendored from the lab's ff16.zip. Only the module and its
+# Unicode tables are vendored: ffconf.h comes from the adapter (upstream's own
+# copy would shadow it, since ff.c includes "ffconf.h" by relative path first),
+# and diskio.c / ffsystem.c are integrator-supplied sample code that the
+# adapter replaces with its own.
+FATFS_SRCS := \
+	third-party/fatfs/ff.c \
+	third-party/fatfs/ffunicode.c
+
 BOARD_SRCS := \
 	port/board/mmu.c \
 	port/board/memops.c \
@@ -138,6 +149,11 @@ ADAPTER_SRCS := \
 	port/adapters/lwip/ethernetif.c \
 	port/adapters/lwip/lwip_adapter.c \
 	port/adapters/lwip/net_cmds.c \
+	port/adapters/fatfs/blkdev.c \
+	port/adapters/fatfs/diskio.c \
+	port/adapters/fatfs/fatfs_os.c \
+	port/adapters/fatfs/fatfs_adapter.c \
+	port/adapters/fatfs/fatfs_cmds.c
 
 DRIVER_SRCS := \
 	drivers/uart_ns16550.c \
@@ -162,7 +178,7 @@ ASM_SRCS := \
 
 # --- rules ----------------------------------------------------------------
 
-C_SRCS := $(KERNEL_SRCS) $(LWIP_SRCS) $(BOARD_SRCS) $(ADAPTER_SRCS) $(DRIVER_SRCS) $(APP_SRCS)
+C_SRCS := $(KERNEL_SRCS) $(LWIP_SRCS) $(FATFS_SRCS) $(BOARD_SRCS) $(ADAPTER_SRCS) $(DRIVER_SRCS) $(APP_SRCS)
 OBJS := $(addprefix $(BUILD)/,$(C_SRCS:.c=.o)) $(addprefix $(BUILD)/,$(ASM_SRCS:.S=.o))
 DEPS := $(OBJS:.o=.d)
 
@@ -233,6 +249,7 @@ STUB_SRCS := \
 	port/adapters/stub/cmsis_os2_stub.c \
 	port/adapters/stub/shell_stub.c \
 	port/adapters/stub/net_stub.c \
+	port/adapters/stub/fs_stub.c \
 	port/board/gicv3.c \
 	port/board/gicv3_its.c \
 	port/board/gicv3_msi.c \

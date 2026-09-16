@@ -25,6 +25,7 @@
 #include "board.h"
 #include "gicv3_its.h"
 #include "cmsis_os2.h"
+#include "fs.h"
 #include "irq_ctrl.h"
 #include "net.h"
 #include "shell.h"
@@ -418,6 +419,26 @@ static void task_net_start(void *argument)
 	osThreadTerminate(osThreadGetId());
 }
 
+/* Bind the storage devices and mount what has a FAT volume on it.
+ *
+ * A task for the same reason the shell and the network are: probing the SATA
+ * controllers and the PCIe endpoint takes milliseconds and does MMIO the boot
+ * path should not sit through, and mounting reads sectors - which blocks on
+ * real I/O. Running it after the shell means the board is usable while this
+ * runs, and `stor` reports the result either way. */
+static void task_fs_start(void *argument)
+{
+	(void)argument;
+
+	if (fs_start() != 0) {
+		console_print("FS FAIL\n");
+		return;
+	}
+	console_print("FS READY\n");
+
+	osThreadTerminate(osThreadGetId());
+}
+
 /* --- boot ----------------------------------------------------------------- */
 
 void board_main(void)
@@ -490,6 +511,15 @@ void board_main(void)
 	if (osThreadNew(task_net_start, 0, &(osThreadAttr_t){ .name = "netstart",
 			.stack_size = 1536, .priority = osPriorityNormal }) == 0) {
 		console_print("[fatal] thread net\n");
+		return;
+	}
+	/* Stack and priority: mounting descends into FatFs (a few hundred bytes
+	 * of frames) and then into the storage drivers, so it needs more than
+	 * the shell's 1 KiB; priority is below the shell's so a person typing
+	 * during bring-up is not kept waiting. */
+	if (osThreadNew(task_fs_start, 0, &(osThreadAttr_t){ .name = "fsstart",
+			.stack_size = 2048, .priority = osPriorityBelowNormal }) == 0) {
+		console_print("[fatal] thread fs\n");
 		return;
 	}
 
