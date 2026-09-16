@@ -626,12 +626,65 @@ osStatus_t osDelayUntil(uint32_t ticks)
 
 /* --- timers --------------------------------------------------------------- */
 
+/* FreeRTOS hands a timer callback only the timer handle, while CMSIS-RTOS2
+ * requires the callback to receive the argument passed to osTimerNew. The
+ * handle's ID slot therefore carries an index into this table rather than the
+ * function pointer: the callback needs both the function and its argument, and
+ * one word cannot hold two things.
+ *
+ * Leaving the argument out is not a cosmetic difference - a callback that
+ * dereferences it takes a silent fault in the timer task, which on this board
+ * presents as the whole system stopping with no output at all (the timer task
+ * is the highest-priority thread, and the fault vector has no printing path).
+ * That is how this table came to exist. */
+#define MAX_TIMERS	16
+
+typedef struct {
+	osTimerFunc_t func;
+	void         *argument;
+} timer_slot_t;
+
+static timer_slot_t timer_slots[MAX_TIMERS];
+
+/* The timer task reads the slot; osTimerNew/Delete write it. A slot is filled
+ * before the timer exists and cleared only after the timer has been stopped
+ * synchronously, so a reader always sees either nothing or a complete pair. */
+static timer_slot_t *timer_slot_alloc(void)
+{
+	uint32_t i;
+
+	for (i = 0U; i < MAX_TIMERS; i++) {
+		if (timer_slots[i].func == NULL) {
+			timer_slots[i].argument = NULL;
+			return &timer_slots[i];
+		}
+	}
+	return NULL;
+}
+
 static void timer_trampoline(TimerHandle_t handle)
 {
-	osTimerFunc_t func = (osTimerFunc_t)pvTimerGetTimerID(handle);
+	uint32_t index = (uint32_t)(uintptr_t)pvTimerGetTimerID(handle);
+	osTimerFunc_t func;
+	void *argument;
 
+	if (index == 0U || index > MAX_TIMERS) {
+		return;
+	}
+	func = timer_slots[index - 1U].func;
+	argument = timer_slots[index - 1U].argument;
 	if (func != NULL) {
-		func(NULL);
+		func(argument);
+	}
+}
+
+static void timer_slot_release(TimerHandle_t handle)
+{
+	uint32_t index = (uint32_t)(uintptr_t)pvTimerGetTimerID(handle);
+
+	if (index > 0U && index <= MAX_TIMERS) {
+		timer_slots[index - 1U].func = NULL;
+		timer_slots[index - 1U].argument = NULL;
 	}
 }
 
@@ -639,11 +692,9 @@ osTimerId_t osTimerNew(osTimerFunc_t func, osTimerType_t type,
 		       void *argument, const osTimerAttr_t *attr)
 {
 	TimerHandle_t handle;
+	timer_slot_t *slot;
 	const char *name = "tmr";
 
-	(void)argument;	/* CMSIS passes it back to the callback; the
-			 * FreeRTOS timer ID slot carries the function instead,
-			 * and the trampoline supplies NULL. */
 	if (func == NULL) {
 		return NULL;
 	}
@@ -651,9 +702,23 @@ osTimerId_t osTimerNew(osTimerFunc_t func, osTimerType_t type,
 		name = attr->name;
 	}
 
+	slot = timer_slot_alloc();
+	if (slot == NULL) {
+		return NULL;
+	}
+	slot->argument = argument;
+
 	handle = xTimerCreate(name, 1U,
 			      (type == osTimerPeriodic) ? pdTRUE : pdFALSE,
-			      (void *)func, timer_trampoline);
+			      (void *)(uintptr_t)((uint32_t)(slot - timer_slots) + 1U),
+			      timer_trampoline);
+	if (handle == NULL) {
+		slot->argument = NULL;
+		return NULL;
+	}
+	/* Last, so the trampoline cannot see an argument before the function. */
+	slot->func = func;
+
 	return (osTimerId_t)handle;
 }
 
@@ -687,6 +752,13 @@ uint32_t osTimerIsRunning(osTimerId_t timer_id)
 
 osStatus_t osTimerDelete(osTimerId_t timer_id)
 {
+	/* Stop synchronously before releasing the slot: this waits for the
+	 * timer task to act on the command, after which no callback for this
+	 * timer can be in flight and the slot is safe to hand to the next
+	 * osTimerNew. */
+	(void)xTimerStop((TimerHandle_t)timer_id, portMAX_DELAY);
+	timer_slot_release((TimerHandle_t)timer_id);
+
 	if (xTimerDelete((TimerHandle_t)timer_id, 0U) != pdPASS) {
 		return osErrorParameter;
 	}

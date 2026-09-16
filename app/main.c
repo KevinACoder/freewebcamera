@@ -153,10 +153,19 @@ static void task_report(void *argument)
  * which is a different context on purpose.
  */
 static volatile uint32_t timer_fired;
+static uint32_t timer_argument;		/* what the callback must be handed */
+static volatile int timer_argument_ok;
 
 static void timer_cb(void *argument)
 {
-	(void)argument;
+	/* The argument has to come back. CMSIS-RTOS2 passes the argument given
+	 * to osTimerNew through to the callback, and a kernel adapter that
+	 * drops it hands the callback a null pointer: anything that
+	 * dereferences it then faults inside the timer task, which is the
+	 * highest-priority thread and has no printing path - the system simply
+	 * stops. Checking the round trip here is what makes that impossible to
+	 * reintroduce unnoticed. */
+	timer_argument_ok = (argument == &timer_argument);
 	timer_fired++;
 }
 
@@ -264,7 +273,8 @@ static void rtos_primitives_check(void)
 
 	/* --- timer: one-shot, callback in the timer task --- */
 	timer_fired = 0U;
-	tmr = osTimerNew(timer_cb, osTimerOnce, NULL, &(osTimerAttr_t){ .name = "t0" });
+	timer_argument_ok = 0;
+	tmr = osTimerNew(timer_cb, osTimerOnce, &timer_argument, &(osTimerAttr_t){ .name = "t0" });
 	if (tmr == NULL) {
 		fail("osTimerNew");
 	} else {
@@ -277,6 +287,8 @@ static void rtos_primitives_check(void)
 		}
 		if (timer_fired == 0U) {
 			fail("osTimer callback never ran");
+		} else if (!timer_argument_ok) {
+			fail("osTimer callback argument");
 		}
 		(void)osTimerDelete(tmr);
 	}
