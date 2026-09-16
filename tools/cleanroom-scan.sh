@@ -42,8 +42,12 @@ fi
 #   fs_stub.c  - the K4 stub for that interface, named after it.
 #   fatfs_*.{c,h} - the FatFs adapter files, named after the component the way
 #                port/adapters/lwip/* is named after lwIP.
+#   fsl_*.{c,h} (shadow/) - the names the vendored fsl_sdmmc protocol layer
+#                includes by name; they shadow NXP SDK headers, not vendor
+#                traces of ours (fsl_ is NXP's prefix, clean-room.md §3.1
+#                already admits the fsl_sdmmc stack by that name).
 # Anything else matching the pattern is still a failure.
-ALLOWED_NAMES='ffconf.h fs.h fs_stub.c'
+ALLOWED_NAMES='ffconf.h fs.h fs_stub.c fsl_common.h fsl_os_abstraction.h fsl_sdmmc_host.h fsl_sdmmc.h finterrupt.h'
 ALLOWED_PATTERNS='port/adapters/fatfs/fatfs_*.c port/adapters/fatfs/fatfs_*.h'
 
 badnames=$(find . -path ./third-party -prune -o -path ./.git -prune -o \
