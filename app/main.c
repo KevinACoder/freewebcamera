@@ -28,6 +28,7 @@
 #include "fs.h"
 #include "irq_ctrl.h"
 #include "net.h"
+#include "sdio.h"
 #include "shell.h"
 
 /* Console handle. Taken from the interface, never from the driver's header. */
@@ -439,6 +440,23 @@ static void task_fs_start(void *argument)
 	osThreadTerminate(osThreadGetId());
 }
 
+/* SDIO card enumeration on the sdmmc0 slot: CMD5/CMD3/CMD7 plus the CCCR/
+ * FBR/CIS walk over CMD52 - hundreds of milliseconds at the identification
+ * clock. Same reasoning as fsstart: after the shell, below-normal priority,
+ * and its own thread so a wedged slot cannot delay storage mounting. */
+static void task_sdio_start(void *argument)
+{
+	(void)argument;
+
+	if (sdio_start() != 0) {
+		console_print("SDIO FAIL\n");
+		return;
+	}
+	console_print("SDIO READY\n");
+
+	osThreadTerminate(osThreadGetId());
+}
+
 /* --- boot ----------------------------------------------------------------- */
 
 void board_main(void)
@@ -520,6 +538,11 @@ void board_main(void)
 	if (osThreadNew(task_fs_start, 0, &(osThreadAttr_t){ .name = "fsstart",
 			.stack_size = 2048, .priority = osPriorityBelowNormal }) == 0) {
 		console_print("[fatal] thread fs\n");
+		return;
+	}
+	if (osThreadNew(task_sdio_start, 0, &(osThreadAttr_t){ .name = "sdiostart",
+			.stack_size = 2048, .priority = osPriorityBelowNormal }) == 0) {
+		console_print("[fatal] thread sdio\n");
 		return;
 	}
 

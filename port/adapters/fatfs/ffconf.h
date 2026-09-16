@@ -77,10 +77,10 @@
 				 * volume-qualified paths ("0:/dir/file") */
 #define FF_PATH_DEPTH	10
 
-/* Three logical volumes, one per block device (see include/fs.h). */
-#define FF_VOLUMES	3
+/* Four logical volumes, one per block device (see include/fs.h). */
+#define FF_VOLUMES	4
 #define FF_STR_VOLUME_ID	0
-#define FF_VOLUME_STRS		"0","1","2"
+#define FF_VOLUME_STRS		"0","1","2","3"
 
 /* One physical drive per volume, and each volume is the drive's partition 1.
  * This is what makes f_fdisk/f_mkfs addressable per volume and what makes a

@@ -59,7 +59,15 @@ INC_ADAPTER := -Ithird-party/FreeRTOS-Kernel/include \
 	-Ithird-party/lwip/src/include \
 	-Ithird-party/lwip/contrib/ports/freertos/include \
 	-Iport/adapters/fatfs \
-	-Ithird-party/fatfs
+	-Ithird-party/fatfs \
+	-Iport/adapters/sdmmc/shadow \
+	-Iport/adapters/sdmmc \
+	-Idrivers \
+	-Ithird-party/sdmmc/common \
+	-Ithird-party/sdmmc/sd \
+	-Ithird-party/sdmmc/osa \
+	-Ithird-party/sdmmc/mmc \
+	-Ithird-party/sdmmc/sdio
 
 # --- sources --------------------------------------------------------------
 
@@ -121,6 +129,19 @@ FATFS_SRCS := \
 	third-party/fatfs/ff.c \
 	third-party/fatfs/ffunicode.c
 
+# NXP fsl_sdmmc protocol layer, vendored (BSD-3). Only the card protocol and
+# its generic OSA are vendored: no SD card module (the sdmmc0 slot carries an
+# SDIO card, not storage), no host/ reference implementations (they are for
+# NXP controllers), no examples/templates. The SDK headers the stack expects
+# (fsl_common.h, fsl_os_abstraction.h) and the host contract
+# (fsl_sdmmc_host.h) come from the adapter's shadow directory, which the
+# include order places ahead of the vendored tree.
+SDMMC_SRCS := \
+	third-party/sdmmc/common/fsl_sdmmc_common.c \
+	third-party/sdmmc/mmc/fsl_mmc.c \
+	third-party/sdmmc/sd/fsl_sd.c \
+	third-party/sdmmc/sdio/fsl_sdio.c
+
 BOARD_SRCS := \
 	port/board/mmu.c \
 	port/board/memops.c \
@@ -153,7 +174,15 @@ ADAPTER_SRCS := \
 	port/adapters/fatfs/diskio.c \
 	port/adapters/fatfs/fatfs_os.c \
 	port/adapters/fatfs/fatfs_adapter.c \
-	port/adapters/fatfs/fatfs_cmds.c
+	port/adapters/fatfs/fatfs_cmds.c \
+	port/adapters/sdmmc/sdmmc_osa.c \
+	port/adapters/sdmmc/sdmmc_glue_irq.c \
+	port/adapters/sdmmc/sdmmc_dispatch.c \
+	port/adapters/sdmmc/sdmmc_host_dwmmc.c \
+	port/adapters/sdmmc/sdmmc_host_dwmshc.c \
+	port/adapters/sdmmc/sdmmc_storage.c \
+	port/adapters/sdmmc/sdmmc_adapter.c \
+	port/adapters/sdmmc/sdmmc_cmds.c
 
 DRIVER_SRCS := \
 	drivers/uart_ns16550.c \
@@ -166,7 +195,10 @@ DRIVER_SRCS := \
 	drivers/dwc_msix.c \
 	drivers/dwc_ahci.c \
 	drivers/rk3568_sata.c \
-	drivers/dwc_nvme.c
+	drivers/dwc_nvme.c \
+	drivers/dwc_mmc.c \
+	drivers/dwc_mshc.c \
+	drivers/rk3568_sdmmc.c
 
 APP_SRCS := \
 	app/main.c
@@ -178,7 +210,7 @@ ASM_SRCS := \
 
 # --- rules ----------------------------------------------------------------
 
-C_SRCS := $(KERNEL_SRCS) $(LWIP_SRCS) $(FATFS_SRCS) $(BOARD_SRCS) $(ADAPTER_SRCS) $(DRIVER_SRCS) $(APP_SRCS)
+C_SRCS := $(KERNEL_SRCS) $(LWIP_SRCS) $(FATFS_SRCS) $(SDMMC_SRCS) $(BOARD_SRCS) $(ADAPTER_SRCS) $(DRIVER_SRCS) $(APP_SRCS)
 OBJS := $(addprefix $(BUILD)/,$(C_SRCS:.c=.o)) $(addprefix $(BUILD)/,$(ASM_SRCS:.S=.o))
 DEPS := $(OBJS:.o=.d)
 
@@ -250,6 +282,7 @@ STUB_SRCS := \
 	port/adapters/stub/shell_stub.c \
 	port/adapters/stub/net_stub.c \
 	port/adapters/stub/fs_stub.c \
+	port/adapters/stub/sdio_stub.c \
 	port/board/gicv3.c \
 	port/board/gicv3_its.c \
 	port/board/gicv3_msi.c \

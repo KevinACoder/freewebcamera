@@ -29,8 +29,8 @@
 
 #include "blkdev.h"
 
-_Static_assert(FF_VOLUMES >= 3,
-	       "the board's three block devices need three logical volumes");
+_Static_assert(FF_VOLUMES >= 4,
+	       "the board's four block devices need four logical volumes");
 
 /* With FF_MULTI_PARTITION, FatFs consults this table to turn a logical volume
  * into (physical drive, partition). One drive per volume, partition 1.
@@ -41,6 +41,7 @@ PARTITION VolToPart[FF_VOLUMES] = {
 	{ 0, 0 },
 	{ 1, 0 },
 	{ 2, 0 },
+	{ 3, 0 },
 };
 
 /* What disk_status() reports. FatFs polls this, so it is kept rather than

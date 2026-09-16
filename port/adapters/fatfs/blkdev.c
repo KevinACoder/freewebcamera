@@ -272,6 +272,16 @@ int fatfs_bind_devices(void)
 		(void)blkdev_register(&blkdev_nvme, 0, "nvme0");
 	}
 
+	/* eMMC: the DW MSHC controller, initialized through the sdmmc adapter
+	 * (host bring-up + MMC protocol enumeration both happen in its init;
+	 * declarations by hand, the same rule as the driver handles above). */
+	extern const ARM_DRIVER_BLKDEV blkdev_emmc;
+	extern int sdmmc_storage_init(void);
+
+	if (sdmmc_storage_init() == 0) {
+		(void)blkdev_register(&blkdev_emmc, 0, "emmc0");
+	}
+
 	if (device_count == 0) {
 		return -1;
 	}
