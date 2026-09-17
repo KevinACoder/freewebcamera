@@ -12,11 +12,12 @@
  * Two things differ from the boot path:
  *
  *  - The boot stack is SLICED. The link script reserves one 64 KiB region
- *    under __stack_top; core 0 keeps the top slice and each Aff0 number takes
- *    the 16 KiB slice below it (sp = __stack_top - aff0 * 0x4000). The boot
- *    stack is transient - after the scheduler starts, every task runs on its
- *    own stack - so a transient 16 KiB budget per core is comfortably above
- *    what the descent path uses.
+ *    under __stack_top; core 0 keeps the top slice and each logical core
+ *    takes the 16 KiB slice below it (sp = __stack_top - core * 0x4000,
+ *    core = MPIDR Aff1 - this SoC numbers its cores in Aff1). The boot
+ *    stack is transient - after the scheduler starts, every task runs on
+ *    its own stack - so a transient 16 KiB budget per core is comfortably
+ *    above what the descent path uses.
  *
  *  - BSS is NOT cleared. Core 0 owns that; this core only consumes memory
  *    core 0 already initialised. A secondary that ever ran the boot path
@@ -78,6 +79,15 @@ sec_from_el2:
 	msr	hstr_el2, xzr
 	msr	vttbr_el2, xzr
 
+	/* Deliberately NO ICC_SRE_EL2 write here, although a bare-metal port
+	 * might expect one (the boot core's firmware, U-Boot, sets it before
+	 * `go`). Measured on this board: writing ICC_SRE_EL2 from a
+	 * PSCI-released core wedges it silently - with ICC_SRE_EL3.Enable=0
+	 * the access traps into EL3 and OP-TEE's unexpected-trap path eats
+	 * the core without a word. The firmware that releases the core also
+	 * configures the system-register interface for it, which is why the
+	 * secondaries sail through their EL1 GIC bring-up once released. */
+
 	adr	x1, sec_el1_entry
 	msr	elr_el2, x1
 	mov	x0, #0x3c5			/* SPSR_EL2: EL1h, DAIF masked */
@@ -102,23 +112,46 @@ sec_el1_entry:
 	msr	vbar_el1, x0
 	isb
 
-	/* This core's slice of the boot stack (see the file comment). */
+	/* This core's slice of the boot stack (see the file comment). The
+	 * slice index is the LOGICAL core number: on this SoC that is
+	 * MPIDR Aff1 (Aff0 is 0 for every core - measured). */
 	mrs	x1, mpidr_el1
+	lsr	x1, x1, #8
 	and	x1, x1, #0xff
 	ldr	x0, =__stack_top
 	mov	x2, #0x4000			/* 64 KiB / BOARD_SMP_CORES */
 	mul	x2, x1, x2
 	sub	sp, x0, x2
 
-	/* MMU on over the SAME page tables the boot core built (identity
-	 * mapping, plain Normal memory - a page table is walkable by any
-	 * core that points TTBR0 at it; the walk itself is per-core). */
-	bl	board_mmu_enable
+	/* MMU on, bound to the SAME page tables the boot core built. Must be
+	 * the secondary variant: rebuilding the tables here would pull valid
+	 * descriptors out from under the running boot core. */
+	bl	board_mmu_enable_secondary
+
+	/* Stage marker: MMU and stacks are live, C is next. MUST sit after
+	 * the SP setup - a marker call before SP is configured pushes to
+	 * whatever SP the firmware handoff left behind (round-12 lesson). */
+	bl	uart_early_puts_marker_a
 
 	/* Kernel port: own-GIC bring-up, report in, wait, first context
-	 * restore. Does not return. */
+	 * restore. Does not return.
+	 *
+	 * NOTE: the whole secondary path up to the scheduler is SILENT on
+	 * purpose. Console output here overlaps OP-TEE's own I/TC release
+	 * messages on the same UART, and that concurrency wedged the
+	 * transmitter mid-line during bring-up (rounds 6-10: output stopped
+	 * half-sentence, entire system mute). A secondary's proof of life is
+	 * its report-in flag, not a print. */
 	bl	uxPortSecondaryMain
 
 1:	wfe
 	b	1b
 	.size	freertos_secondary_entry, . - freertos_secondary_entry
+
+	.global uart_early_puts_marker_a
+uart_early_puts_marker_a:
+	adr	x0, mark_a
+	b	uart_early_puts
+
+	.section .rodata, "a"
+mark_a:	.asciz	"[descent-a]\r\n"

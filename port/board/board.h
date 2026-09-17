@@ -39,6 +39,12 @@ extern "C" {
  * on unaligned Normal access or performs cache maintenance. */
 void board_mmu_enable(void);
 
+/* Secondary-core variant: bind this core to the boot core's already-built
+ * page tables and turn its own MMU/caches on. Never rebuilds the tables and
+ * never flushes the image - see mmu.c for why both would kill the boot
+ * core. */
+void board_mmu_enable_secondary(void);
+
 /* Drop the loader's leftover dirty cache lines over our own image, then
  * invalidate the instruction cache. Called by board_mmu_enable() while caches
  * are still off; see port/board/cache.c for why skipping it produces
@@ -148,11 +154,19 @@ bool board_tick_is_running(void);
 
 /* --- SMP (four A55 cores, one cluster) ------------------------------------ */
 
-/* RK3568 is four Cortex-A55 in a single DynamIQ cluster: MPIDR Aff0 = 0..3
- * and Aff1/Aff2/Aff3 = 0. That makes Aff0 the natural logical core number,
- * and the whole cluster is hardware-coherent (inner-shareable Normal memory
- * needs no explicit maintenance between these cores - what DOES need it is
- * anything reached over a non-coherent port, as before).
+/* RK3568 is four Cortex-A55 in a single DynamIQ cluster, hardware-coherent
+ * (inner-shareable Normal memory needs no explicit maintenance between these
+ * cores - what DOES need it is anything reached over a non-coherent port, as
+ * before).
+ *
+ * CORE NUMBERING, MEASURED (bring-up round 6): a released secondary reads
+ * MPIDR_EL1 = 0x8100_0N00 with N = 0..3 - the logical core number lives in
+ * AFFINITY 1, and Aff0 is 0 for every core. (Bits 31 and 24 are the usual
+ * RES1/U.) Everything that derives a core identity reads it through
+ * board_smp_core_id() so the numbering has exactly one home. PSCI CPU_ON,
+ * in contrast, takes the LINEAR core index (1..3 released cores whose
+ * MPIDRs carry Aff1 = 1..3) - OP-TEE maps the low byte to its core table
+ * internally, which is why the small integers work as targets.
  *
  * Secondary cores are released through PSCI CPU_ON: BL31/OP-TEE are resident
  * on this board (they own PPI 29 as Group 0), the secondary cores park inside
@@ -172,18 +186,23 @@ bool board_tick_is_running(void);
  * interrupt priorities; the board does not get to move the number. */
 #define BOARD_SMP_YIELD_INTID	0U
 
-/* Logical core number of the calling core (MPIDR Aff0).
+/* Logical core number of the calling core.
  *
- * static inline, deliberately: the kernel port's portGET_CORE_ID() expands to
- * this on context-switch and IRQ-entry hot paths, and inlining one MRS keeps
- * those paths free of a cross-layer call. Board bring-up (smp.c) reasons
- * about the same numbering, so both sides cannot drift apart. */
+ * MEASURED on this board (bring-up round 6): the four A55s are numbered in
+ * AFFINITY 1, not Aff0 - a released secondary reads MPIDR_EL1 =
+ * 0x8100_0N00 (N = 0..3, so Aff0 = 0 for every core and Aff1 carries the
+ * core number; bits 31 and 24 are the usual RES1/U). PSCI CPU_ON still
+ * takes the linear core index in the low byte on this platform - OP-TEE
+ * maps it internally - but the LOGICAL identity of a running core is Aff1.
+ * Aff0-based extraction made every secondary believe it was core 0, which
+ * is what rounds 2-5 thrashed on: core-0's redistributor frame and boot
+ * stack shared by four cores. */
 static inline uint32_t board_smp_core_id(void)
 {
 	uint64_t mpidr;
 
 	__asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr));
-	return (uint32_t)(mpidr & 0xffu);
+	return (uint32_t)((mpidr >> 8) & 0xffu);
 }
 
 /* Release cores 1..BOARD_SMP_CORES-1 through PSCI CPU_ON, targeting the

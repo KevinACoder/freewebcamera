@@ -163,34 +163,74 @@ static volatile uint32_t *gicr_core_base(void)
 	return (volatile uint32_t *)(uintptr_t)BOARD_GICR_BASE;
 }
 
-/* Walk the redistributor frames and record which frame belongs to which
- * core. GICR_TYPER's affinity value (bits 63:32) packs MPIDR's Aff3..Aff0
- * the same way MPIDR does; on this SoC Aff0 alone selects among the four
- * cores of the single cluster. The walk stops at TYPER.Last. Runs on the
- * boot core, once, before any per-core GIC bring-up. */
-static void gicr_probe_frames(void)
+/* Resolve the CALLING core's own redistributor frame.
+ *
+ * MEASURED ON THIS BOARD (bring-up round 3, boot-time sweep): the four
+ * frames at BOARD_GICR_BASE + n*BOARD_GICR_STRIDE read
+ *
+ *   frame0 typer 00000000_00000021
+ *   frame1 typer 00000100_00000121
+ *   frame2 typer 00000200_00000221
+ *   frame3 typer 00000300_00000331   (bit8 = Last)
+ *
+ * i.e. GICR_TYPER carries the affinity as the 8-bit Aff0 value at bits
+ * [39:32] (the original GICv3.0 layout) - NOT the 32-bit MPIDR-shaped value
+ * at [63:32] that newer GIC parts and Linux's GIC-700 path use. Matching on
+ * [39:32] is therefore the primary, architectural resolution; the frame
+ * order (frame n = core n) agrees with every frame seen and serves as the
+ * fallback. Prints stay: if a firmware update changes the layout, the log
+ * shows it. */
+static void gicr_probe_self(const char *tag)
 {
+	static const char boot_tag[] = "boot";
+	uint32_t me = board_smp_core_id();
 	uintptr_t frame = (uintptr_t)BOARD_GICR_BASE;
-	uint32_t found = 0u;
 	uint32_t i;
+	uint64_t my_aff = 0ull;
 
-	for (i = 0u; i < (BOARD_SMP_CORES * 2u) && found < BOARD_SMP_CORES;
+	__asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(my_aff));
+	my_aff &= 0xffffffull;	/* Aff2 | Aff1 | Aff0, MPIDR-shaped */
+
+	for (i = 0u; i < BOARD_SMP_CORES * 2u;
 	     i++, frame += BOARD_GICR_STRIDE) {
 		uint64_t typer = reg_rd64(frame + GICR_TYPER);
-		uint64_t aff = (typer >> 32) & 0xffffffull;
-		uint32_t core = (uint32_t)(aff & 0xffull);
 
-		if (core < BOARD_SMP_CORES && gicr_frames[core] == NULL) {
-			gicr_frames[core] = (volatile uint32_t *)frame;
-			found++;
+		/* TYPER[55:32] holds the owning PE's affinity value in MPIDR
+		 * shape: measured 0x000000 / 0x000100 / 0x000200 / 0x000300
+		 * for frames 0..3 (this SoC numbers its cores in Aff1). */
+		if ((typer >> 32) == my_aff) {
+			gicr_frames[me] = (volatile uint32_t *)frame;
+			/* Secondaries stay SILENT here: their prints land in
+			 * the middle of OP-TEE's release-message window on
+			 * the same UART, and that overlap wedged the
+			 * transmitter during bring-up (rounds 6-10). The
+			 * boot core's sweep above already logged every
+			 * frame's TYPER. */
+			if (tag == boot_tag) {
+				board_log("gicv3: core%u %s frame typer"
+					  " %08x%08x waker %x",
+					  (unsigned)me, tag,
+					  (unsigned)(typer >> 32),
+					  (unsigned)typer,
+					  (unsigned)reg_rd32(frame +
+							     GICR_WAKER));
+			}
+			return;
 		}
 		if ((typer & GICR_TYPER_LAST) != 0u) {
 			break;
 		}
 	}
 
-	board_log("gicv3: %u/%u redistributor frames",
-		  (unsigned)found, (unsigned)BOARD_SMP_CORES);
+	/* Fallback: frame order. On this SoC the two mappings agree (see the
+	 * sweep above); reaching here means TYPER stopped making sense. */
+	gicr_frames[me] = (volatile uint32_t *)(uintptr_t)BOARD_GICR_BASE +
+			  (uintptr_t)me * BOARD_GICR_STRIDE;
+	if (tag == boot_tag) {
+		board_log("gicv3: core%u %s: TYPER no match, using frame"
+			  " order",
+			  (unsigned)me, tag);
+	}
 }
 
 static IRQHandler_t irq_handlers[IRQ_TABLE_SIZE];
@@ -428,12 +468,31 @@ void board_gicv3_init(void)
 	}
 
 	gicd = (volatile uint32_t *)(uintptr_t)BOARD_GICD_BASE;
-	/* Frame ownership comes from the TYPER walk, not a constant: the
-	 * secondaries will each resolve their own frame through the same
-	 * table. Before this runs, gicr_core_base() falls back to the boot
-	 * core's frame constant for the boot core - the pre-init window the
-	 * IRQ_* totality rule exists for. */
-	gicr_probe_frames();
+	/* Frame ownership is resolved per core, by that core, at its own GIC
+	 * bring-up (gicr_probe_self) - see that function for why a boot-time
+	 * sweep cannot see parked secondaries' frames. Before this runs,
+	 * gicr_core_base()'s fallback constant covers the boot core's
+	 * pre-init window (see irq_ensure_ready). The raw sweep below is
+	 * bring-up evidence: it shows what each frame reports while the
+	 * secondaries are still parked. */
+	gicr_probe_self("boot");
+	{
+		/* Raw sweep of the four candidate frames while the
+		 * secondaries are parked - the evidence that pinned the frame
+		 * layout (TYPER's affinity half reads zero on this part; see
+		 * gicr_probe_self). */
+		uint32_t f;
+
+		for (f = 0u; f < BOARD_SMP_CORES; f++) {
+			uint64_t typer = reg_rd64(
+				(uintptr_t)BOARD_GICR_BASE +
+				(uintptr_t)f * BOARD_GICR_STRIDE + GICR_TYPER);
+
+			board_log("gicv3: frame%u typer %08x%08x",
+				  (unsigned)f,
+				  (unsigned)(typer >> 32), (unsigned)typer);
+		}
+	}
 
 	for (i = 0; i < IRQ_TABLE_SIZE; i++) {
 		irq_handlers[i] = NULL;
@@ -877,6 +936,11 @@ void board_gicv3_dispatch(uint32_t intid)
  * ISENABLER0 set) against THIS core's frame via gicr_core_base(). */
 void board_gicv3_secondary_init(void)
 {
+	/* Resolve THIS core's redistributor frame first: the frame is live
+	 * now that the core is out of its park, and everything below keys
+	 * off gicr_core_base(). */
+	gicr_probe_self("secondary");
+
 	gic_cpu_interface_sre_enable();
 	gic_redistributor_init();
 	gic_cpu_interface_init();

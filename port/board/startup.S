@@ -36,8 +36,10 @@ _start:
 	 * exist once - the kind of failure that looks like random memory
 	 * corruption, not a wrong turn. Secondaries enter through PSCI at
 	 * freertos_secondary_entry (smp_secondary.S); if one lands here
-	 * anyway, park it where it cannot do harm. */
+	 * anyway, park it where it cannot do harm. The logical core number
+	 * is MPIDR Aff1 on this SoC (Aff0 is 0 for every core - measured). */
 	mrs	x1, mpidr_el1
+	lsr	x1, x1, #8
 	and	x1, x1, #0xff
 	cbz	x1, 1f
 2:	wfe
@@ -188,10 +190,27 @@ boot_vectors:
 	b	boot_serr_fault
 
 /* Each fault path prints a distinguishable marker, then parks. The console
- * is polled and needs no interrupt, so it is usable this early. */
+ * is polled and needs no interrupt, so it is usable this early.
+ *
+ * The synchronous path additionally reports ESR_EL1 and FAR_EL1: during SMP
+ * bring-up a sync fault could come from any core and several candidate
+ * causes, and the exception class + faulting address are what turn a coin
+ * toss into a diagnosis. (uart_early_panic re-programs the UART first, so
+ * these prints work even when the fault precedes console init.) */
 	.type	boot_sync_fault, %function
 boot_sync_fault:
 	ldr	x0, =msg_sync
+	bl	uart_early_panic
+	ldr	x0, =msg_esr
+	bl	uart_early_puts
+	mrs	x0, esr_el1
+	bl	uart_early_put_hex32
+	ldr	x0, =msg_far
+	bl	uart_early_puts
+	mrs	x0, far_el1
+	bl	uart_early_put_hex32
+	ldr	x0, =msg_newline
+	bl	uart_early_puts
 	b	boot_fault_common
 	.type	boot_irq_fault, %function
 boot_irq_fault:
@@ -223,3 +242,6 @@ msg_irq:	.asciz	"\n[carrier] FAULT: IRQ before scheduler\n"
 msg_fiq:	.asciz	"\n[carrier] FAULT: FIQ\n"
 	.globl	msg_serr
 msg_serr:	.asciz	"\n[carrier] FAULT: SError\n"
+msg_esr:	.asciz	"[fault] ESR_EL1="
+msg_far:	.asciz	" FAR_EL1="
+msg_newline:	.asciz	"\n"

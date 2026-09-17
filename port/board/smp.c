@@ -34,10 +34,11 @@
 #define PSCI_SUCCESS		0L
 #define PSCI_ALREADY_ON		(-4L)
 
-/* Bounded wait for the up-reports. A core that never reports must surface as
- * a printed timeout, not a silent boot hang: the anchor line is what the
- * acceptance criteria read. */
-#define SMP_UP_WAIT_LIMIT	50000000u
+/* Bounded wait for the up-reports (iterations of a spin loop, not wall
+ * time - roughly a second or two; the point is that a core which never
+ * reports surfaces as a printed timeout instead of an eternal hang, and
+ * that the boot continues on the cores that DID report). */
+#define SMP_UP_WAIT_LIMIT	500000000u
 
 static volatile uint32_t core_up[BOARD_SMP_CORES];
 
@@ -100,11 +101,19 @@ void board_smp_start_secondaries(void)
 	uint32_t psci_ver = board_smp_psci_version();
 
 	for (core = 1u; core < BOARD_SMP_CORES; core++) {
-		/* The target MPIDR is the Aff0 number: this SoC keeps all four
-		 * cores in Aff0 of one cluster with the higher affinity fields
-		 * at zero. Entry state per the PSCI spec: the firmware drops
-		 * the core at the given address, interrupts masked, MMU and
-		 * caches off - smp_secondary.S handles the rest. */
+		/* Target = the LINEAR core index in x1. Measured: OP-TEE maps
+		 * the low byte to its own core table and releases the core
+		 * whose hardware identity is Aff1 = index (MPIDRs here are
+		 * 0x8100_0N00 - see board.h). Passing an MPIDR-shaped value
+		 * instead does NOT reach the right core. Entry state per the
+		 * PSCI spec: interrupts masked, MMU and caches off -
+		 * smp_secondary.S handles the rest.
+		 *
+		 * The release loop is SILENT: printing here races OP-TEE's
+		 * own I/TC messages on the same UART, and bring-up rounds
+		 * 6-11 wedged the console (and then the boot) exactly in
+		 * this window. Everything worth reporting is printed after
+		 * the loop completes. */
 		long ret = psci_call(PSCI_CPU_ON_AARCH64,
 				     (uint64_t)core, entry, 0ul);
 
@@ -114,12 +123,34 @@ void board_smp_start_secondaries(void)
 		}
 	}
 
-	/* Wait for the secondaries' report-in, bounded. */
-	for (i = 0u; i < SMP_UP_WAIT_LIMIT; i++) {
-		if (board_smp_up_count() == (BOARD_SMP_CORES - 1u)) {
-			break;
+	{
+		extern void uart_early_puts(const char *s);
+
+		uart_early_puts("[rel]\r\n");
+	}
+
+	/* Wait for the secondaries' report-in. Plain spin with a generous
+	 * iteration bound: WFE here is a lost-event hang waiting to happen
+	 * (the SEV from a reporting core can land before this core's WFE,
+	 * and with no tick yet there is nothing to wake it). Progress leaks
+	 * to the raw UART - bypassing the print lock - so a wedge here shows
+	 * exactly how far the reports got. */
+	{
+		extern void uart_early_puts(const char *s);
+		extern void uart_early_put_hex32(unsigned int value);
+
+		for (i = 0u; i < SMP_UP_WAIT_LIMIT; i++) {
+			if (board_smp_up_count() ==
+			    (BOARD_SMP_CORES - 1u)) {
+				break;
+			}
+			if ((i & 0x3ffffffu) == 0u) {
+				uart_early_puts("[wait up=");
+				uart_early_put_hex32(board_smp_up_count());
+				uart_early_puts("]\r\n");
+			}
+			__asm__ __volatile__("yield" ::: "memory");
 		}
-		__asm__ __volatile__("wfe" ::: "memory");
 	}
 
 	board_log("smp: %u/%u cores up, psci %u.%u",

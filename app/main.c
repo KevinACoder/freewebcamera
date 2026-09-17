@@ -440,6 +440,18 @@ static void task_fs_start(void *argument)
 	osThreadTerminate(osThreadGetId());
 }
 
+/* Releases cores 1..3 through PSCI once the scheduler is live on core 0.
+ * Deliberately a TASK, not part of the boot path: if a secondary wedges
+ * during its bring-up the rest of the system is already running, the
+ * timeout is visible in the shell, and nothing above CMSIS-RTOS2 changes. */
+static void task_smp_boot(void *argument)
+{
+	(void)argument;
+
+	board_smp_start_secondaries();
+	osThreadTerminate(osThreadGetId());
+}
+
 /* SDIO card enumeration on the sdmmc0 slot: CMD5/CMD3/CMD7 plus the CCCR/
  * FBR/CIS walk over CMD52 - hundreds of milliseconds at the identification
  * clock. Same reasoning as fsstart: after the shell, below-normal priority,
@@ -543,6 +555,15 @@ void board_main(void)
 	if (osThreadNew(task_sdio_start, 0, &(osThreadAttr_t){ .name = "sdiostart",
 			.stack_size = 2048, .priority = osPriorityBelowNormal }) == 0) {
 		console_print("[fatal] thread sdio\n");
+		return;
+	}
+
+	/* SMP: bring the other three cores in once the scheduler is live.
+	 * Low priority so the acceptance anchors are not delayed by it, but
+	 * before the shell is expected to be used interactively. */
+	if (osThreadNew(task_smp_boot, 0, &(osThreadAttr_t){ .name = "smpboot",
+			.stack_size = 1024, .priority = osPriorityBelowNormal }) == 0) {
+		console_print("[fatal] thread smpboot\n");
 		return;
 	}
 

@@ -231,3 +231,52 @@ void board_mmu_enable(void)
 	__asm__ __volatile__("msr sctlr_el1, %0" : : "r"(value) : "memory");
 	__asm__ __volatile__("isb" ::: "memory");
 }
+
+/* Secondary-core variant: point THIS core at the boot core's page tables and
+ * switch its MMU on. Deliberately NOT board_mmu_enable(), and the difference
+ * is the whole point:
+ *
+ *  - No table build. The tables are plain Normal memory already in DRAM (the
+ *    boot core wrote them with its caches still off), and any core that sets
+ *    TTBR0 to the L0 table walks them. Rebuilding them here - clearing each
+ *    level before rewriting - would, for a few microseconds, leave descriptors
+ *    invalid while the BOOT CORE is translating every instruction and data
+ *    access through those same tables: its walk hits the cleared entries and
+ *    it dies on a synchronous exception through its pre-scheduler vectors.
+ *    That is not hypothetical; it is exactly what the first SMP boot did.
+ *
+ *  - No whole-image cache flush (board_cache_init). That job exists to drain
+ *    the LOADER's dirty lines before our caches come on; a secondary has no
+ *    such lines, and flushing the image from a second core while the boot
+ *    core mutates it is a lost-update race (clean, then invalidate, while the
+ *    owner re-dirties between the two halves).
+ *
+ *  - MAIR/TCR/TTBR0/SCTLR are per-core registers: every core writes its own,
+ *    with the same values. Instruction cache is invalidated locally (ic
+ *    iallu) so no stale pre-MMU fetches survive. Everything shared after
+ *    both MMUs are on is inner-shareable inside one coherent cluster. */
+void board_mmu_enable_secondary(void)
+{
+	uint64_t value;
+
+	value = 0xffULL | (0x04ULL << 8);
+	__asm__ __volatile__("msr mair_el1, %0" : : "r"(value) : "memory");
+
+	value = TCR_T0SZ | TCR_IRGN0_WBWA | TCR_ORGN0_WBWA |
+		TCR_SH0_INNER | TCR_PS_40BIT | TCR_EPD1_DISABLE;
+	__asm__ __volatile__("msr tcr_el1, %0" : : "r"(value) : "memory");
+
+	value = (uint64_t)(uintptr_t)l0_table;
+	__asm__ __volatile__("msr ttbr0_el1, %0" : : "r"(value) : "memory");
+
+	/* Drop anything this core speculatively fetched before the MMU was
+	 * configured, then enable M|C|I. */
+	__asm__ __volatile__("ic iallu" ::: "memory");
+	__asm__ __volatile__("dsb sy" ::: "memory");
+	__asm__ __volatile__("isb" ::: "memory");
+
+	__asm__ __volatile__("mrs %0, sctlr_el1" : "=r"(value));
+	value |= (1ULL << 0) | (1ULL << 2) | (1ULL << 12);
+	__asm__ __volatile__("msr sctlr_el1, %0" : : "r"(value) : "memory");
+	__asm__ __volatile__("isb" ::: "memory");
+}

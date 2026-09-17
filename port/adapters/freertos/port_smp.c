@@ -378,16 +378,21 @@ BaseType_t xPortStartScheduler( void )
         portDISABLE_INTERRUPTS();
 
         if( __atomic_load_n( &uxPortSchedulerRunning,
-                             __ATOMIC_RELAXED ) == ( uint64_t ) pdFALSE )
+                             __ATOMIC_ACQUIRE ) == ( uint64_t ) pdFALSE )
         {
-            /* Boot core: release the secondaries and wait until each has
-             * finished its per-core GIC bring-up and reported in. Their
-             * report-in precedes the flag, so no secondary can observe a
-             * half-initialised controller. */
-            board_smp_start_secondaries();
-
-            /* This core's own redistributor/CPU interface/yield-SGI arming.
-             * Idempotent over the boot path's earlier board_gicv3_init(). */
+            /* Boot core: this core's own redistributor/CPU interface/yield
+             * SGI arming. Idempotent over the boot path's earlier
+             * board_gicv3_init().
+             *
+             * The secondaries are NOT released here. Bring-up rounds 6-16
+             * showed that releasing cores before the scheduler runs - three
+             * booting cores plus firmware console traffic inside the same
+             * pre-tick silence - freezes the machine in ways that are pure
+             * timing races and leave no evidence. Instead the scheduler
+             * comes up on this core alone, and a low-priority application
+             * task releases the secondaries afterwards (smp_boot task in
+             * app/main.c): a straggling core then costs one core, not the
+             * boot, and every stage is observable through the live shell. */
             board_gicv3_secondary_init();
             uxPortInstallYieldSGIHandler();
 
@@ -419,7 +424,14 @@ BaseType_t xPortStartScheduler( void )
 /*-----------------------------------------------------------*/
 
 /* Secondary-core C entry, called from smp_secondary.S. Never returns: the
- * tail of xPortStartScheduler erets into this core's idle task. */
+ * tail of xPortStartScheduler erets into this core's idle task.
+ *
+ * The whole secondary path is SILENT until the scheduler runs: console
+ * output here overlaps OP-TEE's I/TC release messages on the same UART,
+ * and that concurrency wedged the transmitter mid-line during bring-up
+ * (rounds 6-10 - output stopped half-sentence, system mute). A secondary
+ * proves its life through its report-in flag, which the boot core's
+ * "smp: N/4 cores up" anchor vouches for. */
 void uxPortSecondaryMain( void )
 {
     /* Own redistributor (WAKER handshake only), CPU interface, yield SGI
@@ -429,10 +441,14 @@ void uxPortSecondaryMain( void )
     board_gicv3_secondary_init();
     board_smp_mark_core_up( board_smp_core_id() );
 
+    /* Plain spin, no WFE: the boot core's SEV can land before this loop's
+     * first WFE executes, and a secondary has no tick or other interrupt to
+     * break a lost-event sleep. The wait is over in microseconds once the
+     * boot core finishes arming the tick. */
     while( __atomic_load_n( &uxPortSchedulerRunning,
                             __ATOMIC_ACQUIRE ) == ( uint64_t ) pdFALSE )
     {
-        __asm volatile ( "wfe" ::: "memory" );
+        __asm volatile ( "yield" ::: "memory" );
     }
 
     ( void ) xPortStartScheduler();

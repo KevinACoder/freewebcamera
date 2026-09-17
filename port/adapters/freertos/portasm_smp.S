@@ -43,9 +43,12 @@
 	.global FreeRTOS_SWI_Handler
 	.global vPortRestoreTaskContext
 
-/* This port's core index: MPIDR Aff0 (board fact, see board.h). */
+/* This port's core index: MPIDR Aff1 (this SoC numbers its cores in Aff1 -
+ * Aff0 is 0 for every core; measured 0x8100_0N00, see board.h). Must match
+ * board_smp_core_id() bit for bit. */
 .macro port_get_core_id, reg
 	mrs	\reg, mpidr_el1
+	lsr	\reg, \reg, #8
 	and	\reg, \reg, #0xff
 .endm
 
@@ -232,8 +235,32 @@ FreeRTOS_SWI_Handler:
 	portRESTORE_CONTEXT
 
 FreeRTOS_Abort:
-	/* Full ESR is in X0, exception class code is in X1. */
-	B	.
+	/* Any synchronous exception that is NOT the port's SVC yield lands
+	 * here. A bare `B .` made this the most expensive blind spot in the
+	 * SMP bring-up: a data abort, an undefined instruction or a bad ERET
+	 * target in any task froze the whole system with zero output. Park
+	 * LOUD instead: the full ESR (exception class + syndrome) and the
+	 * faulting ELR go straight to the UART, then the core parks with
+	 * interrupts masked. */
+	adr	x2, abort_msg
+	bl	uart_early_puts
+	mrs	x3, ESR_EL1
+	lsr	x3, x3, #26		/* exception class in bits [31:26] */
+	adr	x2, abort_ec_msg
+	bl	uart_early_puts
+	mov	x0, x3
+	bl	uart_early_put_hex32
+	adr	x2, abort_elr_msg
+	bl	uart_early_puts
+	mrs	x0, ELR_EL1
+	lsr	x0, x0, #32
+	bl	uart_early_put_hex32
+	mrs	x0, ELR_EL1
+	bl	uart_early_put_hex32
+	adr	x2, abort_park_msg
+	bl	uart_early_puts
+2:	wfe
+	b	2b
 
 /******************************************************************************
  * vPortRestoreTaskContext is used to start the scheduler (on each core, with
@@ -468,5 +495,10 @@ pxCurrentTCBsConst:		.quad	pxCurrentTCBs
 ullPortTaskHasFPUContextConst:	.quad	ullPortTaskHasFPUContext
 ullPortInterruptNestingConst:	.quad	ullPortInterruptNesting
 ullPortYieldRequiredConst:	.quad	ullPortYieldRequired
+
+abort_msg:	.asciz	"\n[carrier] ABORT: non-yield synchronous exception, EC="
+abort_ec_msg:	.asciz	" ELR="
+abort_elr_msg:	.asciz	""
+abort_park_msg:	.asciz	"\n"
 
 .end
