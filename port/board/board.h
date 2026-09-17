@@ -146,6 +146,71 @@ bool board_tick_is_running(void);
  * number. */
 #define BOARD_CONSOLE_INTID	150U
 
+/* --- SMP (four A55 cores, one cluster) ------------------------------------ */
+
+/* RK3568 is four Cortex-A55 in a single DynamIQ cluster: MPIDR Aff0 = 0..3
+ * and Aff1/Aff2/Aff3 = 0. That makes Aff0 the natural logical core number,
+ * and the whole cluster is hardware-coherent (inner-shareable Normal memory
+ * needs no explicit maintenance between these cores - what DOES need it is
+ * anything reached over a non-coherent port, as before).
+ *
+ * Secondary cores are released through PSCI CPU_ON: BL31/OP-TEE are resident
+ * on this board (they own PPI 29 as Group 0), the secondary cores park inside
+ * BL31, and the boot chain provides no spin-table release address. PSCI is
+ * also what mainline Linux uses here (enable-method = "psci"). */
+#define BOARD_SMP_CORES		4U
+
+/* GIC-600 redistributor frame stride. A redistributor is a pair of 64KiB
+ * frames (RD_base + the paired vLPI frame), so consecutive cores' RD_base
+ * frames are 2 * 64KiB apart. Walking the frames and matching GICR_TYPER's
+ * affinity value against MPIDR is the only sound way to find a core's own
+ * redistributor; the boot core's frame happens to sit at BOARD_GICR_BASE. */
+#define BOARD_GICR_STRIDE	0x20000UL
+
+/* Cross-core yield interrupt: SGI 0, chosen by the kernel port (portmacro.h).
+ * Declared here because the priority policy lives with the board's other
+ * interrupt priorities; the board does not get to move the number. */
+#define BOARD_SMP_YIELD_INTID	0U
+
+/* Logical core number of the calling core (MPIDR Aff0).
+ *
+ * static inline, deliberately: the kernel port's portGET_CORE_ID() expands to
+ * this on context-switch and IRQ-entry hot paths, and inlining one MRS keeps
+ * those paths free of a cross-layer call. Board bring-up (smp.c) reasons
+ * about the same numbering, so both sides cannot drift apart. */
+static inline uint32_t board_smp_core_id(void)
+{
+	uint64_t mpidr;
+
+	__asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr));
+	return (uint32_t)(mpidr & 0xffu);
+}
+
+/* Release cores 1..BOARD_SMP_CORES-1 through PSCI CPU_ON, targeting the
+ * secondary entry point in smp_secondary.S, then wait (bounded) until each
+ * core has run its GIC bring-up and reported in. Called once by the kernel
+ * port from the boot core, before the tick is armed. */
+void board_smp_start_secondaries(void);
+
+/* A secondary core calls this once its redistributor / CPU interface / SGI
+ * setup is done. The boot core's bounded wait in
+ * board_smp_start_secondaries() is waiting for exactly these reports. */
+void board_smp_mark_core_up(uint32_t core);
+
+/* How many cores have reported up so far (boot-anchor evidence). */
+uint32_t board_smp_up_count(void);
+
+/* PSCI VERSION through the SMC conduit, 0 when BL31 does not answer. The
+ * composite form 0xMMmmmm (e.g. 0x10001 = PSCI 1.1). */
+uint32_t board_smp_psci_version(void);
+
+/* GICv3 per-core additions for SMP. board_gicv3_secondary_init() runs ON a
+ * secondary core and brings up ITS OWN redistributor and CPU interface (the
+ * distributor stays a boot-core-only concern); board_gicv3_send_sgi() raises
+ * a software interrupt on the cores in core_mask (bit i = logical core i). */
+void board_gicv3_secondary_init(void);
+void board_gicv3_send_sgi(uint32_t intid, uint32_t core_mask);
+
 /* --- interrupt priorities ------------------------------------------------- */
 /* The board owns this policy, not the kernel: FreeRTOSConfig.h derives its
  * configMAX_API_CALL_INTERRUPT_PRIORITY from BOARD_IRQ_PRIORITY_API_CALL, so
@@ -178,12 +243,22 @@ bool board_tick_is_running(void);
 #define BOARD_IRQ_PRIORITY_API_CALL	11U
 #define BOARD_IRQ_PRIORITY_DEFAULT	10U
 
+/* The cross-core yield SGI. Above API_CALL (numerically lower) on purpose:
+ * the SGI must stay deliverable while a core sits in a kernel critical
+ * section with ICC_PMR narrowed to API_CALL, or cross-core preemption stalls
+ * for the whole critical section. Its handler only sets a per-core "yield
+ * requested" flag and never calls a kernel API, so running above the API-call
+ * level breaks no port assertion. */
+#define BOARD_IRQ_PRIORITY_SGI		9U
+
 #define BOARD_IRQ_PRIORITY_TICK_RAW \
 	(BOARD_IRQ_PRIORITY_TICK << BOARD_IRQ_PRIORITY_SHIFT)
 #define BOARD_IRQ_PRIORITY_API_CALL_RAW \
 	(BOARD_IRQ_PRIORITY_API_CALL << BOARD_IRQ_PRIORITY_SHIFT)
 #define BOARD_IRQ_PRIORITY_DEFAULT_RAW \
 	(BOARD_IRQ_PRIORITY_DEFAULT << BOARD_IRQ_PRIORITY_SHIFT)
+#define BOARD_IRQ_PRIORITY_SGI_RAW \
+	(BOARD_IRQ_PRIORITY_SGI << BOARD_IRQ_PRIORITY_SHIFT)
 
 #ifdef __cplusplus
 }

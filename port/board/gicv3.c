@@ -6,7 +6,10 @@
  * by design; only this file knows the part is a GICv3. That is the point of
  * using the standard header: an implementation swap does not reach callers.
  *
- * Single core. Only the boot core's redistributor is brought up.
+ * SMP: the distributor is global and brought up once, by the boot core; the
+ * redistributor and CPU interface are per-core and each core brings up its
+ * own (board_gicv3_secondary_init). Frame ownership comes from a
+ * GICR_TYPER affinity walk, not from a hard-coded base.
  *
  * ---------------------------------------------------------------------------
  * Board-specific behaviour that this driver has to respect. All of it was
@@ -81,15 +84,17 @@
 #define GICD_CTLR_ENABLEGRP1NS	(1u << 1)
 #define GICD_CTLR_ARE_NS	(1u << 4)
 
-/* --- redistributor (this core's frame) ------------------------------------
+/* --- redistributor (the calling core's frame) ------------------------------
  *
  * A redistributor is two 64KiB frames: the RD_base frame at offset 0 (CTLR,
  * TYPER, WAKER, ...) and the SGI_base frame at +0x10000 (the per-INTID
  * Group/Enable/Pending/Priority/Config registers for INTID 0..31).
  *
- * ALL offsets below are relative to `gicr_base`, which is the RD_base frame -
- * including the ones that carry GICR_SGI_OFFSET. That is the whole convention:
- * every access is `gicr_base + OFFSET`, with no second addition anywhere.
+ * ALL offsets below are relative to the frame base returned by
+ * gicr_core_base(), which is the RD_base frame of the CALLING core -
+ * including the ones that carry GICR_SGI_OFFSET. That is the whole
+ * convention: every access is `gicr + OFFSET`, with no second addition
+ * anywhere.
  *
  * An earlier revision kept a second pointer that already had GICR_SGI_OFFSET
  * folded in and then added these offsets to it, so every SGI/PPI register
@@ -134,9 +139,59 @@
 #define GIC_WAIT_LIMIT		50000000u
 
 static volatile uint32_t *gicd;
-static volatile uint32_t *gicr_base;
+/* One RD_base frame per logical core, resolved by the TYPER walk in
+ * gicr_probe_frames(). All GICR accesses go through gicr_core_base(), which
+ * returns the CALLING core's frame - the per-core registers (SGI/PPI bank,
+ * WAKER) must touch the frame of whoever executes the access. */
+static volatile uint32_t *gicr_frames[BOARD_SMP_CORES];
 static uint32_t spi_line_count;
 static bool gic_ready;
+
+#define GICR_TYPER_LAST		(1ull << 8)
+
+/* This core's redistributor frame. The fallback exists for the one window
+ * where an IRQ_* call can precede board_gicv3_init() on the boot core (see
+ * irq_ensure_ready): before the probe, "core 0's frame" is the same constant
+ * the file has always used. */
+static volatile uint32_t *gicr_core_base(void)
+{
+	uint32_t core = board_smp_core_id();
+
+	if (core < BOARD_SMP_CORES && gicr_frames[core] != NULL) {
+		return gicr_frames[core];
+	}
+	return (volatile uint32_t *)(uintptr_t)BOARD_GICR_BASE;
+}
+
+/* Walk the redistributor frames and record which frame belongs to which
+ * core. GICR_TYPER's affinity value (bits 63:32) packs MPIDR's Aff3..Aff0
+ * the same way MPIDR does; on this SoC Aff0 alone selects among the four
+ * cores of the single cluster. The walk stops at TYPER.Last. Runs on the
+ * boot core, once, before any per-core GIC bring-up. */
+static void gicr_probe_frames(void)
+{
+	uintptr_t frame = (uintptr_t)BOARD_GICR_BASE;
+	uint32_t found = 0u;
+	uint32_t i;
+
+	for (i = 0u; i < (BOARD_SMP_CORES * 2u) && found < BOARD_SMP_CORES;
+	     i++, frame += BOARD_GICR_STRIDE) {
+		uint64_t typer = reg_rd64(frame + GICR_TYPER);
+		uint64_t aff = (typer >> 32) & 0xffffffull;
+		uint32_t core = (uint32_t)(aff & 0xffull);
+
+		if (core < BOARD_SMP_CORES && gicr_frames[core] == NULL) {
+			gicr_frames[core] = (volatile uint32_t *)frame;
+			found++;
+		}
+		if ((typer & GICR_TYPER_LAST) != 0u) {
+			break;
+		}
+	}
+
+	board_log("gicv3: %u/%u redistributor frames",
+		  (unsigned)found, (unsigned)BOARD_SMP_CORES);
+}
 
 static IRQHandler_t irq_handlers[IRQ_TABLE_SIZE];
 static IRQHandler_t lpi_handlers[IRQ_LPI_TABLE_SIZE];
@@ -159,11 +214,12 @@ static void gicd_wait_rwp(void)
 static void gicr_wait_rwp(void)
 {
 	uint32_t i;
+	volatile uint32_t *gicr = gicr_core_base();
 
 	/* The redistributor's own CTLR carries its RWP bit; it lives in the
-	 * RD_base frame, so it is reached as gicr_base + GICR_CTLR. */
+	 * RD_base frame, so it is reached as gicr + GICR_CTLR. */
 	for (i = 0; i < GIC_WAIT_LIMIT; i++) {
-		if ((reg_rd32((uintptr_t)gicr_base + GICR_CTLR) &
+		if ((reg_rd32((uintptr_t)gicr + GICR_CTLR) &
 		     GICR_CTLR_RWP) == 0u) {
 			return;
 		}
@@ -233,7 +289,10 @@ static void gic_distributor_init(void)
 						   GICD_ICFGR(i / 16u)) &
 				  ~(3u << (2u * (i % 16u))));
 
-		/* Route to CPU 0 (all affinity fields zero, IRM=0). */
+		/* Route to CPU 0 (all affinity fields zero, IRM=0). Every SPI
+		 * stays boot-core-affine by design: the drivers' ISRs run on
+		 * the boot core and waking tasks across cores is the kernel
+		 * port's business, not the routing table's. */
 		reg_wr64((uintptr_t)gicd + GICD_IROUTER(i), 0u);
 	}
 	gicd_wait_rwp();
@@ -258,6 +317,7 @@ static void gic_redistributor_init(void)
 {
 	uint32_t i;
 	uint32_t waker;
+	volatile uint32_t *gicr = gicr_core_base();
 
 	/* Wake the redistributor: clear ProcessorSleep, wait for ChildrenAsleep
 	 * to clear. Without this SPIs and PPIs never arrive.
@@ -286,13 +346,13 @@ static void gic_redistributor_init(void)
 	 * IRQ_SetHandler / IRQ_SetPriority / IRQ_Enable, and those paths touch
 	 * one line at a time. That is the CMSIS model this file implements, and
 	 * it keeps us off firmware's lines by construction. */
-	waker = reg_rd32((uintptr_t)gicr_base + GICR_WAKER);
-	reg_wr32((uintptr_t)gicr_base + GICR_WAKER,
-			  waker & ~GICR_WAKER_PROCESSORSLEEP);
+	waker = reg_rd32((uintptr_t)gicr + GICR_WAKER);
+	reg_wr32((uintptr_t)gicr + GICR_WAKER,
+		  waker & ~GICR_WAKER_PROCESSORSLEEP);
 
 	for (i = 0; i < GIC_WAIT_LIMIT; i++) {
-		if ((reg_rd32((uintptr_t)gicr_base +
-				      GICR_WAKER) & GICR_WAKER_CHILDRENASLEEP) == 0u) {
+		if ((reg_rd32((uintptr_t)gicr +
+			      GICR_WAKER) & GICR_WAKER_CHILDRENASLEEP) == 0u) {
 			break;
 		}
 	}
@@ -368,7 +428,12 @@ void board_gicv3_init(void)
 	}
 
 	gicd = (volatile uint32_t *)(uintptr_t)BOARD_GICD_BASE;
-	gicr_base = (volatile uint32_t *)(uintptr_t)BOARD_GICR_BASE;
+	/* Frame ownership comes from the TYPER walk, not a constant: the
+	 * secondaries will each resolve their own frame through the same
+	 * table. Before this runs, gicr_core_base() falls back to the boot
+	 * core's frame constant for the boot core - the pre-init window the
+	 * IRQ_* totality rule exists for. */
+	gicr_probe_frames();
 
 	for (i = 0; i < IRQ_TABLE_SIZE; i++) {
 		irq_handlers[i] = NULL;
@@ -482,6 +547,10 @@ int32_t IRQ_Enable(IRQn_ID_t irqn)
 	irq_ensure_ready();
 	uint32_t word;
 	uint32_t bit;
+	/* SGI/PPI registers are per-core: the enable lands in the CALLING
+	 * core's redistributor frame, which is what "enable this interrupt on
+	 * me" means for an SGI or PPI. */
+	volatile uint32_t *gicr = gicr_core_base();
 
 	if (irqn < 0) {
 		return -1;
@@ -526,15 +595,15 @@ int32_t IRQ_Enable(IRQn_ID_t irqn)
 		 * IGRPMODR0=1 is Group 1 *Secure*, which a non-secure handler
 		 * never receives. Setting only IGROUPR0 therefore looks correct
 		 * in every readback and still delivers nothing. */
-		reg_wr32((uintptr_t)gicr_base + GICR_IGROUPR0,
-				  reg_rd32((uintptr_t)gicr_base + GICR_IGROUPR0) |
-				  (1u << bit));
-		reg_wr32((uintptr_t)gicr_base + GICR_IGRPMODR0,
-				  reg_rd32((uintptr_t)gicr_base + GICR_IGRPMODR0) &
-				  ~(1u << bit));
+		reg_wr32((uintptr_t)gicr + GICR_IGROUPR0,
+			  reg_rd32((uintptr_t)gicr + GICR_IGROUPR0) |
+			  (1u << bit));
+		reg_wr32((uintptr_t)gicr + GICR_IGRPMODR0,
+			  reg_rd32((uintptr_t)gicr + GICR_IGRPMODR0) &
+			  ~(1u << bit));
 
-		reg_wr32((uintptr_t)gicr_base + GICR_ISENABLER0,
-				  1u << bit);
+		reg_wr32((uintptr_t)gicr + GICR_ISENABLER0,
+			  1u << bit);
 	} else {
 		reg_wr32((uintptr_t)gicd + GICD_ISENABLER(word),
 				  1u << bit);
@@ -549,6 +618,7 @@ int32_t IRQ_Disable(IRQn_ID_t irqn)
 	irq_ensure_ready();
 	uint32_t word;
 	uint32_t bit;
+	volatile uint32_t *gicr = gicr_core_base();
 
 	if (irqn >= IRQ_INTID_LPI_FIRST) {
 		/* Mirror of IRQ_Enable: an LPI's enabled state is the ITS
@@ -567,11 +637,11 @@ int32_t IRQ_Disable(IRQn_ID_t irqn)
 	bit = (uint32_t)irqn % 32u;
 
 	if (irqn <= IRQ_INTID_SGI_PPI_MAX) {
-		reg_wr32((uintptr_t)gicr_base + GICR_ICENABLER0,
-				  1u << bit);
+		reg_wr32((uintptr_t)gicr + GICR_ICENABLER0,
+			  1u << bit);
 	} else {
 		reg_wr32((uintptr_t)gicd + GICD_ICENABLER(word),
-				  1u << bit);
+			  1u << bit);
 	}
 	reg_dsb();
 	clear_enabled_bit((uint32_t)irqn);
@@ -638,12 +708,14 @@ int32_t IRQ_EndOfInterrupt(IRQn_ID_t irqn)
 int32_t IRQ_SetPending(IRQn_ID_t irqn)
 {
 	irq_ensure_ready();
+	volatile uint32_t *gicr = gicr_core_base();
+
 	if (irqn < 0 || irqn > (IRQn_ID_t)IRQ_INTID_SPI_MAX) {
 		return -1;
 	}
 	if (irqn <= IRQ_INTID_SGI_PPI_MAX) {
-		reg_wr32((uintptr_t)gicr_base + GICR_ISPENDR0,
-				  1u << ((uint32_t)irqn % 32u));
+		reg_wr32((uintptr_t)gicr + GICR_ISPENDR0,
+			  1u << ((uint32_t)irqn % 32u));
 	} else {
 		reg_wr32((uintptr_t)gicd + GICD_ISPENDR((uint32_t)irqn / 32u),
 				  1u << ((uint32_t)irqn % 32u));
@@ -654,11 +726,13 @@ int32_t IRQ_SetPending(IRQn_ID_t irqn)
 
 uint32_t IRQ_GetPending(IRQn_ID_t irqn)
 {
+	volatile uint32_t *gicr = gicr_core_base();
+
 	if (irqn < 0 || irqn > (IRQn_ID_t)IRQ_INTID_SPI_MAX) {
 		return 0u;
 	}
 	if (irqn <= IRQ_INTID_SGI_PPI_MAX) {
-		return (reg_rd32((uintptr_t)gicr_base + GICR_ISPENDR0) &
+		return (reg_rd32((uintptr_t)gicr + GICR_ISPENDR0) &
 			(1u << ((uint32_t)irqn % 32u))) ? 1u : 0u;
 	}
 	return (reg_rd32((uintptr_t)gicd +
@@ -669,12 +743,14 @@ uint32_t IRQ_GetPending(IRQn_ID_t irqn)
 int32_t IRQ_ClearPending(IRQn_ID_t irqn)
 {
 	irq_ensure_ready();
+	volatile uint32_t *gicr = gicr_core_base();
+
 	if (irqn < 0 || irqn > (IRQn_ID_t)IRQ_INTID_SPI_MAX) {
 		return -1;
 	}
 	if (irqn <= IRQ_INTID_SGI_PPI_MAX) {
-		reg_wr32((uintptr_t)gicr_base + GICR_ICPENDR0,
-				  1u << ((uint32_t)irqn % 32u));
+		reg_wr32((uintptr_t)gicr + GICR_ICPENDR0,
+			  1u << ((uint32_t)irqn % 32u));
 	} else {
 		reg_wr32((uintptr_t)gicd + GICD_ICPENDR((uint32_t)irqn / 32u),
 				  1u << ((uint32_t)irqn % 32u));
@@ -686,6 +762,8 @@ int32_t IRQ_ClearPending(IRQn_ID_t irqn)
 int32_t IRQ_SetPriority(IRQn_ID_t irqn, uint32_t priority)
 {
 	irq_ensure_ready();
+	volatile uint32_t *gicr = gicr_core_base();
+
 	if (irqn >= IRQ_INTID_LPI_FIRST) {
 		/* An LPI's priority lives in the ITS property table, not in a
 		 * per-INTID GICR register. It is set through the ITS module when
@@ -697,7 +775,7 @@ int32_t IRQ_SetPriority(IRQn_ID_t irqn, uint32_t priority)
 		return -1;
 	}
 	if (irqn <= IRQ_INTID_SGI_PPI_MAX) {
-		reg_wr8((uintptr_t)gicr_base + GICR_IPRIORITYR0 +
+		reg_wr8((uintptr_t)gicr + GICR_IPRIORITYR0 +
 				 (uint32_t)irqn, (uint8_t)(priority & 0xffu));
 	} else {
 		reg_wr8((uintptr_t)gicd + GICD_IPRIORITYR((uint32_t)irqn),
@@ -709,12 +787,14 @@ int32_t IRQ_SetPriority(IRQn_ID_t irqn, uint32_t priority)
 
 uint32_t IRQ_GetPriority(IRQn_ID_t irqn)
 {
+	volatile uint32_t *gicr = gicr_core_base();
+
 	if (irqn < 0 || irqn > (IRQn_ID_t)IRQ_INTID_SPI_MAX) {
 		return IRQ_PRIORITY_ERROR;
 	}
 	if (irqn <= IRQ_INTID_SGI_PPI_MAX) {
-		return reg_rd8((uintptr_t)gicr_base + GICR_IPRIORITYR0 +
-				       (uint32_t)irqn);
+		return reg_rd8((uintptr_t)gicr + GICR_IPRIORITYR0 +
+			       (uint32_t)irqn);
 	}
 	return reg_rd8((uintptr_t)gicd + GICD_IPRIORITYR((uint32_t)irqn));
 }
@@ -777,4 +857,55 @@ void board_gicv3_dispatch(uint32_t intid)
 	if (handler != NULL) {
 		handler();
 	}
+}
+
+/* --- SMP ------------------------------------------------------------------ */
+
+/* Per-core GIC bring-up, running ON the secondary core. Same order and same
+ * discipline as the boot core's board_gicv3_init(), minus everything that is
+ * global state: the distributor was configured once, while the secondaries
+ * were still parked, and is nobody else's to touch.
+ *
+ * The redistributor step is the WAKER handshake ONLY (see the long warning
+ * inside gic_redistributor_init: this bank is shared with firmware's secure
+ * lines, so no bank-wide writes, ever). The CPU interface registers
+ * (ICC_*) are banked per core by the architecture, so the same sequence the
+ * boot core ran is exactly right here.
+ *
+ * The yield SGI is armed through the ordinary IRQ_* API: IRQ_Enable takes
+ * the single-bit read-modify-write path (IGROUPR0 set, IGRPMODR0 cleared,
+ * ISENABLER0 set) against THIS core's frame via gicr_core_base(). */
+void board_gicv3_secondary_init(void)
+{
+	gic_cpu_interface_sre_enable();
+	gic_redistributor_init();
+	gic_cpu_interface_init();
+
+	IRQ_SetPriority((IRQn_ID_t)BOARD_SMP_YIELD_INTID,
+			BOARD_IRQ_PRIORITY_SGI_RAW);
+	IRQ_Enable((IRQn_ID_t)BOARD_SMP_YIELD_INTID);
+}
+
+/* Raise a software interrupt on the cores in core_mask (bit i = logical
+ * core i). This is the kernel port's cross-core yield path.
+ *
+ * ICC_SGI1R_EL1 (S3_0_C12_C11_6), system-register only - a GICv3 has no
+ * MMIO SGI register to write. All four cores share Aff1 = Aff2 = 0 (one
+ * cluster), so the TargetList field alone addresses them: bit i of [15:0]
+ * is Aff0 = i. IRM = 0 means "target list", not "all PEs".
+ *
+ * The DSB is what makes this correct, not decoration: the yield is often
+ * sent because this core just made scheduler state (unblocked a task,
+ * changed a ready list) that the target core is about to consume - a dsb
+ * orders those writes, it does not make them visible, but together with the
+ * inner-shareable coherency of the cluster it is the required barrier
+ * before the IPI can be taken. */
+void board_gicv3_send_sgi(uint32_t intid, uint32_t core_mask)
+{
+	uint64_t sgi1r = ((uint64_t)(intid & 0x0fu) << 24) |
+			 (uint64_t)(core_mask & 0xffffu);
+
+	__asm__ __volatile__("dsb sy" ::: "memory");
+	__asm__ __volatile__("msr s3_0_c12_c11_6, %0" ::"r"(sgi1r));
+	__asm__ __volatile__("isb" ::: "memory");
 }

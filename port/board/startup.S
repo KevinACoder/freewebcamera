@@ -31,6 +31,19 @@ _start:
 	/* Mask everything until EL1 is set up. */
 	msr	daifset, #0xf
 
+	/* This path is boot-core-only. A secondary running here would clear
+	 * the BSS under the running kernel and re-derive state that must only
+	 * exist once - the kind of failure that looks like random memory
+	 * corruption, not a wrong turn. Secondaries enter through PSCI at
+	 * freertos_secondary_entry (smp_secondary.S); if one lands here
+	 * anyway, park it where it cannot do harm. */
+	mrs	x1, mpidr_el1
+	and	x1, x1, #0xff
+	cbz	x1, 1f
+2:	wfe
+	b	2b
+1:
+
 	mrs	x0, CurrentEL
 	and	x0, x0, #0xc
 	cmp	x0, #0xc			/* EL3 */

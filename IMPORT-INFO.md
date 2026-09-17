@@ -9,7 +9,7 @@ directory are the same act — a component without an adapter is unfinished.
 
 | Component | Upstream source | Revision | Version | License | Vendored at | Used for |
 |---|---|---|---|---|---|---|
-| FreeRTOS-Kernel | `github.com/FreeRTOS/FreeRTOS-Kernel` | `3a22924e0a9ddbbc8b0758881c33b3422a5cc20d` | V11.3.1 | MIT | `third-party/FreeRTOS-Kernel/` | Kernel + `portable/GCC/ARM_AARCH64_SRE` (carrier context-switch core) |
+| FreeRTOS-Kernel | `github.com/FreeRTOS/FreeRTOS-Kernel` | `3a22924e0a9ddbbc8b0758881c33b3422a5cc20d` | V11.3.1 | MIT | `third-party/FreeRTOS-Kernel/` | Kernel. M0 compiled the upstream single-core `portable/GCC/ARM_AARCH64_SRE` port directly; since SMP that port is out of the build (still vendored byte-identical) and the project-owned SMP port — `port/adapters/freertos/{portmacro.h,port_smp.c,portasm_smp.S}`, derived from that same MIT port and registered in `docs/imports.md` §1.1 — is what compiles. |
 | CMSIS_6 | `github.com/ARM-software/CMSIS_6` | `26206e47dcf0abfbdc64eb753a0b6334b24439f6` | v6.3.1-dev-32 | Apache-2.0 | `third-party/cmsis/` | Interface layer: `RTOS2/Include/cmsis_os2.h` + `os_tick.h`, `Driver/Include/Driver_*.h` (18), `Core/Include/a-profile/irq_ctrl.h` |
 | CherrySH | `github.com/cherry-embedded/CherrySH` | `8efe539c6e55b71d2f2cd1116cd00c4d64222a67` | v1.0.1-20 | Apache-2.0 | `third-party/cherrysh/` | Interactive shell |
 | CherryRB | `github.com/cherry-embedded/CherryRB` | `19ea7c6efcf19dc9e805a0a662212533ee5b1edb` | v1.0.0 | Apache-2.0 | `third-party/cherryrb/` | Ring buffer (console input; later UVC/network/storage streams) |
@@ -39,3 +39,12 @@ All vendored components are permissively licensed and carry **no vendor
 traces**. Verify with `tools/cleanroom-scan.sh` (which excludes
 `third-party/` from the trace scan, since vendored trees are byte-identical
 upstream content).
+
+The SMP port (`port/adapters/freertos/portmacro.h`, `port_smp.c`,
+`portasm_smp.S`) is **project-owned**, derived from the vendored upstream
+MIT port (`portable/GCC/ARM_AARCH64_SRE`) as that licence allows; each file
+documents what was kept and what was added. A vendor SMP SDK was consulted
+for mechanism only — secondary boot via PSCI, SGI yield, per-core GICR
+walk, single-tick model — and no code was taken from it; the tree is named
+in `docs/imports.md` §2 (the only place vendor names belong), and the
+derivation is registered in §1.1.

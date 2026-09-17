@@ -403,6 +403,26 @@ static int cmd_uartint(int argc, char **argv)
 	return 0;
 }
 
+/* The SMP acceptance: four tasks pinned one-per-core, each verifying with
+ * MPIDR that it only ever ran on its bound core. Body in app/smp_test.c -
+ * the app layer owns the test, this adapter only owns the command shell
+ * around it (same split as its/its_test.c). */
+extern int smp_selftest(void);
+
+static int cmd_smp(int argc, char **argv)
+{
+	chry_shell_t *csh = CSH_FROM_ARGV(argc, argv);
+
+	csh_printf(csh, "smp: pinning one task per core, %u samples each...\r\n",
+		   20000u);
+	if (smp_selftest() != 0) {
+		csh_printf(csh, "smp: FAIL (see the lines above)\r\n");
+		return -1;
+	}
+	csh_printf(csh, "smp: PASS - every task ran only on its bound core\r\n");
+	return 0;
+}
+
 CSH_CMD_EXPORT_ALIAS_FULL(cmd_version, version, "version",
 			  "print build and target info");
 CSH_CMD_EXPORT_ALIAS_FULL(cmd_uptime, uptime, "uptime",
@@ -417,6 +437,8 @@ CSH_CMD_EXPORT_ALIAS_FULL(cmd_itsdump, itsdump, "itsdump",
 			  "dump ITS/LPI delivery state");
 CSH_CMD_EXPORT_ALIAS_FULL(cmd_uartint, uartint, "uartint",
 			  "show/move console RX INTID");
+CSH_CMD_EXPORT_ALIAS_FULL(cmd_smp, smp, "smp",
+			  "pin one task per core and verify with MPIDR");
 
 /* cherrysh resolves every command name against a PATH variable from the
  * variable table; with an empty variable table PATH is NULL and every

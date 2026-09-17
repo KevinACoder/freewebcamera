@@ -13,17 +13,18 @@
  *
  *   IMPLEMENTED - kernel control, threads, thread flags, delays, mutexes,
  *   semaphores, event flags, message queues, timers. These map onto real
- *   FreeRTOS primitives.
+ *   FreeRTOS primitives. With the SMP kernel, thread affinity maps too:
+ *   osThreadNew honours attr->affinity_mask and the Set/Get affinity calls
+ *   reach vTaskCoreAffinitySet/Get.
  *
  *   WRITTEN FROM SCRATCH - memory pools. FreeRTOS has no equivalent, so this is
  *   a fixed-block allocator over a caller-supplied or heap-supplied region.
  *
  *   STUBS - the CMSIS v6 functional-safety / MPU extensions (safety classes,
- *   thread zones, watchdog feeding, affinity masks, privileged protection,
- *   osFaultResume). This is single-core with no MPU regions and no watchdog,
- *   so the concepts have nothing to bind to. They return osError and are
- *   grouped at the end of this file; they are not silent no-ops pretending to
- *   work.
+ *   thread zones, watchdog feeding, privileged protection, osFaultResume).
+ *   There are no MPU regions and no watchdog, so the concepts have nothing to
+ *   bind to. They return osError and are grouped at the end of this file; they
+ *   are not silent no-ops pretending to work.
  *
  * Static allocation: CMSIS lets callers supply control blocks (cb_mem) and
  * storage. FreeRTOS owns its TCB inside the block it allocates, so a
@@ -318,8 +319,18 @@ osThreadId_t osThreadNew(osThreadFunc_t func, void *argument,
 		}
 	}
 
-	if (xTaskCreate((TaskFunction_t)func, name, stack_words, argument,
-			priority, &handle) != pdPASS) {
+	/* A non-zero affinity mask pins the thread; SMP kernel creates it
+	 * with the mask, single-core kernel path is the plain create. Either
+	 * way FreeRTOS owns the TCB allocation. */
+	if (attr != NULL && attr->affinity_mask != 0U) {
+		if (xTaskCreateAffinitySet((TaskFunction_t)func, name,
+					   stack_words, argument, priority,
+					   (UBaseType_t)attr->affinity_mask,
+					   &handle) != pdPASS) {
+			return NULL;
+		}
+	} else if (xTaskCreate((TaskFunction_t)func, name, stack_words,
+			       argument, priority, &handle) != pdPASS) {
 		return NULL;
 	}
 
@@ -1271,15 +1282,25 @@ osStatus_t osThreadTerminateZone(uint32_t zone)
 
 osStatus_t osThreadSetAffinityMask(osThreadId_t thread_id, uint32_t affinity_mask)
 {
-	(void)thread_id;
-	(void)affinity_mask;
-	return osError;			/* one core: affinity is meaningless */
+	/* CMSIS semantics: reject obviously-wrong arguments rather than
+	 * forwarding them. A zero mask would leave a task that can never be
+	 * scheduled; FreeRTOS would accept it silently. */
+	if (thread_id == NULL || affinity_mask == 0U) {
+		return osErrorParameter;
+	}
+
+	vTaskCoreAffinitySet((TaskHandle_t)thread_id,
+			     (UBaseType_t)affinity_mask);
+	return osOK;
 }
 
 uint32_t osThreadGetAffinityMask(osThreadId_t thread_id)
 {
-	(void)thread_id;
-	return 0x1U;			/* CPU 0 only, which is the truth */
+	if (thread_id == NULL) {
+		return 0U;
+	}
+
+	return (uint32_t)vTaskCoreAffinityGet((ConstTaskHandle_t)thread_id);
 }
 
 osStatus_t osKernelProtect(uint32_t safety_class)

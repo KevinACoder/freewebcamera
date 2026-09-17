@@ -46,9 +46,12 @@ LDFLAGS := -nostdlib -static -T port/board/rk3568.ld \
 # Interface layer: everything reaches CMSIS through here.
 INC_COMMON := -Iinclude -Iport/board
 # Available only to adapters (they are the only layer allowed to touch
-# vendored code and kernel internals).
+# vendored code and kernel internals). The port lives in the adapter too:
+# portmacro.h resolves from -Iport/adapters/freertos, and the vendored
+# single-core portable/GCC/ARM_AARCH64_SRE directory is deliberately NOT on
+# the include path - the SMP port replaced it, and an accidental include of
+# the single-core portmacro.h would silently compile the wrong kernel.
 INC_ADAPTER := -Ithird-party/FreeRTOS-Kernel/include \
-	-Ithird-party/FreeRTOS-Kernel/portable/GCC/ARM_AARCH64_SRE \
 	-Iport/adapters/freertos \
 	-Iport/adapters/cmsis_rtos2 \
 	-Iport/adapters/cherrysh \
@@ -78,7 +81,7 @@ KERNEL_SRCS := \
 	third-party/FreeRTOS-Kernel/timers.c \
 	third-party/FreeRTOS-Kernel/event_groups.c \
 	third-party/FreeRTOS-Kernel/portable/MemMang/heap_4.c \
-	third-party/FreeRTOS-Kernel/portable/GCC/ARM_AARCH64_SRE/port.c
+	port/adapters/freertos/port_smp.c
 
 # lwIP 2.2.1, vendored. The set follows upstream src/Filelists.mk for the core,
 # IPv4 and sequential-API groups, plus the FreeRTOS sys_arch from contrib.
@@ -148,6 +151,7 @@ BOARD_SRCS := \
 	port/board/minilibc.c \
 	port/board/cache.c \
 	port/board/board_early.c \
+	port/board/smp.c \
 	port/board/gicv3.c \
 	port/board/gicv3_its.c \
 	port/board/gicv3_msi.c \
@@ -205,12 +209,14 @@ DRIVER_SRCS := \
 	drivers/rk_sfc.c
 
 APP_SRCS := \
-	app/main.c
+	app/main.c \
+	app/smp_test.c
 
 ASM_SRCS := \
 	port/board/startup.S \
 	port/board/vectors.S \
-	third-party/FreeRTOS-Kernel/portable/GCC/ARM_AARCH64_SRE/portASM.S
+	port/board/smp_secondary.S \
+	port/adapters/freertos/portasm_smp.S
 
 # --- rules ----------------------------------------------------------------
 

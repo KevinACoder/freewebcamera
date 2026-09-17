@@ -32,8 +32,33 @@
 /* --- scheduler ------------------------------------------------------------ */
 
 #define configUSE_PREEMPTION			1
-#define configUSE_PORT_OPTIMISED_TASK_SELECTION	1
+/* The ready-priority bitmap is single-core-only (the kernel #errors when
+ * configNUMBER_OF_CORES > 1); task selection uses the list walk instead. */
+#define configUSE_PORT_OPTIMISED_TASK_SELECTION	0
 #define configUSE_TICKLESS_IDLE			0
+
+/* --- SMP ------------------------------------------------------------------ */
+
+/* Four A55 cores, one cluster. The port (portmacro.h / port_smp.c /
+ * portasm_smp.S in this directory) implements everything the kernel demands
+ * when configNUMBER_OF_CORES > 1: core id, cross-core yield, kernel locks,
+ * per-core nesting. SMP_CORES is overridable from the make command line so a
+ * single-core comparison image is one build flag away (make SMP_CORES=1);
+ * the port's portNUM_CORES is pinned to the same board constant, so kernel
+ * and port cannot disagree. */
+#ifndef SMP_CORES
+#define SMP_CORES				4
+#endif
+#define configNUMBER_OF_CORES			SMP_CORES
+#define configUSE_CORE_AFFINITY			1
+
+/* Only tasks of EQUAL priority may run simultaneously on different cores.
+ * With this off (1), a high-priority task and a low-priority task can be
+ * scheduled side by side; keeping it at 0 makes cross-core behaviour
+ * deterministic and the system behave like the single-core priority model,
+ * just wider wherever same-priority work exists. Revisit after the SMP
+ * milestone settles (port_smp.c documents the trade-off). */
+#define configRUN_MULTIPLE_PRIORITIES		0
 
 #define configCPU_CLOCK_HZ			24000000UL
 #define configTICK_RATE_HZ			1000U
@@ -55,6 +80,9 @@
 
 #define configUSE_IDLE_HOOK			0
 #define configUSE_TICK_HOOK			0
+/* SMP kernel idle tasks: one per core, each may need the hook slot defined
+ * (the kernel #errors without a definition, hook or not). */
+#define configUSE_PASSIVE_IDLE_HOOK		0
 #define configUSE_MALLOC_FAILED_HOOK		1
 #define configUSE_DAEMON_TASK_STARTUP_HOOK	0
 #define configCHECK_FOR_STACK_OVERFLOW		2

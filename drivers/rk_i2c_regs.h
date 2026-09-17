@@ -109,8 +109,8 @@
 #define RK_I2C1_SOFTRST_CON22		0x458U	/* bit2=p_rst bit3=rst */
 #define RK_I2C1_RST_MASK		((1UL << 2) | (1UL << 3))
 
-/* i2c1 nominal reference for the SCL divider (fdwi2c used the same value for
- * both buses; the ~1% actual deviation on i2c1 lands SCL at ~101 kHz). */
+/* i2c0/i2c1 nominal reference for the SCL divider (both buses use the same
+ * value; the ~1% actual deviation on i2c1 lands SCL at ~101 kHz). */
 #define RK_I2C_REF_CLK_HZ		100000000U
 
 /* Per-wait poll budget: a 32-byte chunk at 100 kHz takes < 3 ms. */
