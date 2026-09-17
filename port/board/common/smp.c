@@ -2,23 +2,23 @@
  * @file   smp.c
  * @brief  SMP bring-up: PSCI secondary-core release, per-core report flags.
  *
- * One job, done the only way this board allows: release cores 1..3 from
- * BL31's park loop with PSCI CPU_ON and wait until each has run its own GIC
- * bring-up and reported in.
+ * One job: release cores 1..N-1 from the firmware's park loop with PSCI
+ * CPU_ON and wait until each has run its own GIC bring-up and reported in.
  *
- * Why PSCI and nothing else: the secondary cores sit inside BL31 (the same
- * resident firmware that owns PPI 29 as a Group 0 interrupt), so a spin-table
- * release address cannot reach them. PSCI is also what the shipped boot chain
- * and mainline Linux both use on this SoC (enable-method = "psci"), which
- * makes the SMC conduit (smc #0 from non-secure EL1 straight into BL31) the
- * board-proven path rather than an inference.
+ * Why PSCI and nothing else: the secondary cores park inside resident
+ * firmware on every board so far (BL31/OP-TEE on RK3568, QEMU's built-in
+ * PSCI on virt), so a spin-table release address cannot reach them. PSCI is
+ * also what mainline Linux uses on both (enable-method = "psci"). The
+ * conduit instruction and the CPU_ON target encoding are board_conf.h
+ * policy - SMC into BL31 on RK3568, HVC into QEMU on virt - because the
+ * two firmwares answer on different channels and identify CPUs differently.
  *
  * Coherency, and why there is no cache flush before CPU_ON: the page tables
  * the secondary will walk are built by board_mmu_enable() while the boot
  * core's caches are still off (startup.S clears SCTLR first), so they are
  * already in DRAM. The image itself arrived by DMA. Everything the cores
- * share after their MMUs come on is inner-shareable Normal memory inside one
- * DynamIQ cluster, which the hardware keeps coherent.
+ * share after their MMUs come on is inner-shareable Normal memory inside
+ * one coherent cluster, which the hardware keeps coherent.
  */
 
 #include <stdint.h>
@@ -42,8 +42,10 @@
 
 static volatile uint32_t core_up[BOARD_SMP_CORES];
 
-/* SMCCC call through the SMC conduit. Four argument registers in, one result
- * out; BL31 clobbers nothing else the AAPCS holds live across the call. */
+/* SMCCC call through the board's conduit (BOARD_PSCI_INSN: "smc #0" into
+ * BL31 on RK3568, "hvc #0" into QEMU on virt). Four argument registers in,
+ * one result out; the firmware clobbers nothing else the AAPCS holds live
+ * across the call. */
 static long psci_call(uint64_t fid, uint64_t a0, uint64_t a1, uint64_t a2)
 {
 	register uint64_t r0 __asm__("x0") = fid;
@@ -51,7 +53,7 @@ static long psci_call(uint64_t fid, uint64_t a0, uint64_t a1, uint64_t a2)
 	register uint64_t r2 __asm__("x2") = a1;
 	register uint64_t r3 __asm__("x3") = a2;
 
-	__asm__ __volatile__("smc #0"
+	__asm__ __volatile__(BOARD_PSCI_INSN
 			     : "+r"(r0)
 			     : "r"(r1), "r"(r2), "r"(r3)
 			     : "memory", "cc");
@@ -101,21 +103,22 @@ void board_smp_start_secondaries(void)
 	uint32_t psci_ver = board_smp_psci_version();
 
 	for (core = 1u; core < BOARD_SMP_CORES; core++) {
-		/* Target = the LINEAR core index in x1. Measured: OP-TEE maps
-		 * the low byte to its own core table and releases the core
-		 * whose hardware identity is Aff1 = index (MPIDRs here are
-		 * 0x8100_0N00 - see board.h). Passing an MPIDR-shaped value
-		 * instead does NOT reach the right core. Entry state per the
-		 * PSCI spec: interrupts masked, MMU and caches off -
-		 * smp_secondary.S handles the rest.
+		/* Target encoding per BOARD_PSCI_CPU_ON_TARGET: the LINEAR
+		 * core index on RK3568 (measured: OP-TEE maps the low byte to
+		 * its own core table and releases the core whose hardware
+		 * identity is Aff1 = index; an MPIDR-shaped value does NOT
+		 * reach the right core), the full MPIDR on QEMU virt. Entry
+		 * state per the PSCI spec: interrupts masked, MMU and caches
+		 * off - smp_secondary.S handles the rest.
 		 *
-		 * The release loop is SILENT: printing here races OP-TEE's
-		 * own I/TC messages on the same UART, and bring-up rounds
-		 * 6-11 wedged the console (and then the boot) exactly in
-		 * this window. Everything worth reporting is printed after
-		 * the loop completes. */
+		 * The release loop is SILENT: printing here races the
+		 * firmware's own console traffic on RK3568, and bring-up
+		 * rounds 6-11 wedged the console (and then the boot) exactly
+		 * in this window. Everything worth reporting is printed
+		 * after the loop completes. */
 		long ret = psci_call(PSCI_CPU_ON_AARCH64,
-				     (uint64_t)core, entry, 0ul);
+				     BOARD_PSCI_CPU_ON_TARGET(core), entry,
+				     0ul);
 
 		if (ret != PSCI_SUCCESS && ret != PSCI_ALREADY_ON) {
 			board_log("smp: psci cpu_on core %u failed (%ld)",

@@ -166,7 +166,7 @@ void uart_early_init(void)
  *
  * The earlier "silent hang" that motivated a bound was misdiagnosed: the real
  * cause was a bad GIC register offset elsewhere in bring-up (see
- * port/board/gicv3.c), not a stuck transmit-ready bit. */
+ * port/board/common/gicv3.c), not a stuck transmit-ready bit. */
 static void polled_putc(char c)
 {
 	if (!early_ready) {

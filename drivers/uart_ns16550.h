@@ -16,25 +16,15 @@
 #ifndef FREEWEBCAMERA_UART_NS16550_H
 #define FREEWEBCAMERA_UART_NS16550_H
 
-/* UART2 is the console on this board. */
-#define UART_CONSOLE_BASE	0xfe660000UL
-#define UART_CONSOLE_CLOCK_HZ	24000000UL
-#define UART_CONSOLE_BAUD	115200UL
+/* The calibration lives with the board's other coordinates
+ * (port/board/<board>/board_conf.h), reached through board.h; the names
+ * below are this driver's historical aliases. */
+#include "board.h"
 
-/* The GIC INTID of this UART's interrupt.
- *
- * Established from three independent device trees that agree (uart2's node
- * carries GIC_SPI 118; and uart1..uart9 map to SPI 117..125, so the sequence is
- * self-consistent), and confirmed equal in the vendor SoC header. SPI N is
- * INTID N+32, hence 150.
- *
- * NOTE: the lab's FreeBSD logs report `irq 66` for this same base address. That
- * discrepancy is unresolved. It is recorded here rather than silently ignored,
- * because getting the INTID wrong produces a console that simply never
- * receives - the exact silent failure this file spends so long warning about -
- * and the first thing to try if RX does not work is the other number.
- */
-#define UART_CONSOLE_INTID	150U
+#define UART_CONSOLE_BASE	BOARD_UART_BASE
+#define UART_CONSOLE_CLOCK_HZ	BOARD_UART_CLOCK_HZ
+#define UART_CONSOLE_BAUD	BOARD_UART_BAUD
+#define UART_CONSOLE_INTID	BOARD_CONSOLE_INTID
 
 /* No functions are declared here. Everything this driver offers is reachable
  * through the CMSIS ARM_DRIVER_USART vtable, which is the point of implementing

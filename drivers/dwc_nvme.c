@@ -33,7 +33,7 @@
  *   - PCI access goes through drivers/dwc_pcie.h (config access plus a flat
  *     device list) instead of embox's PCI framework;
  *   - MSI-X is programmed by drivers/dwc_msix.c and the ITS mapping comes from
- *     the board's MSI domain (port/board/gicv3_msi.c) through include/msi.h;
+ *     the board's MSI domain (port/board/common/gicv3_msi.c) through include/msi.h;
  *   - the completion wait is "poll the CQE phase, sleeping one tick between
  *     rounds" with the handler only bumping a counter, instead of embox's
  *     wait queue: this project's ISR-safe wake-up (osThreadFlagsSetFromISR) is

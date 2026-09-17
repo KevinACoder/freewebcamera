@@ -14,15 +14,16 @@
  *  - The boot stack is SLICED. The link script reserves one 64 KiB region
  *    under __stack_top; core 0 keeps the top slice and each logical core
  *    takes the 16 KiB slice below it (sp = __stack_top - core * 0x4000,
- *    core = MPIDR Aff1 - this SoC numbers its cores in Aff1). The boot
- *    stack is transient - after the scheduler starts, every task runs on
- *    its own stack - so a transient 16 KiB budget per core is comfortably
- *    above what the descent path uses.
+ *    core per BOARD_MPIDR_CORE_SHIFT - RK3568 numbers its cores in MPIDR
+ *    Aff1, QEMU virt in Aff0; see board_conf.h). The boot stack is
+ *    transient - after the scheduler starts, every task runs on its own
+ *    stack - so a transient 16 KiB budget per core is comfortably above
+ *    what the descent path uses.
  *
  *  - BSS is NOT cleared. Core 0 owns that; this core only consumes memory
  *    core 0 already initialised. A secondary that ever ran the boot path
- *    would zero live kernel state - startup.S parks any Aff0 != 0 core for
- *    exactly that reason.
+ *    would zero live kernel state - startup.S parks any nonzero logical
+ *    core number for exactly that reason.
  *
  * Hand-off after the MMU is on goes to the kernel port's uxPortSecondaryMain
  * (GIC bring-up, report-in, wait for the scheduler, first context restore).
@@ -34,6 +35,10 @@
 
 	.arch	armv8-a
 	.text
+
+/* board_conf.h is data-only #defines, so the preprocessor pass over .S files
+ * can take it directly - same core-numbering truth as the C side. */
+#include "board_conf.h"
 
 	.globl	freertos_secondary_entry
 	.type	freertos_secondary_entry, %function
@@ -113,10 +118,10 @@ sec_el1_entry:
 	isb
 
 	/* This core's slice of the boot stack (see the file comment). The
-	 * slice index is the LOGICAL core number: on this SoC that is
-	 * MPIDR Aff1 (Aff0 is 0 for every core - measured). */
+	 * slice index is the LOGICAL core number, extracted per
+	 * BOARD_MPIDR_CORE_SHIFT (board_conf.h). */
 	mrs	x1, mpidr_el1
-	lsr	x1, x1, #8
+	lsr	x1, x1, #BOARD_MPIDR_CORE_SHIFT
 	and	x1, x1, #0xff
 	ldr	x0, =__stack_top
 	mov	x2, #0x4000			/* 64 KiB / BOARD_SMP_CORES */

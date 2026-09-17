@@ -1,6 +1,6 @@
 /*
  * @file   mmu.c
- * @brief  Identity-mapped MMU bring-up for the RK3568 carrier.
+ * @brief  Identity-mapped MMU bring-up for the board layer.
  *
  * Runs at EL1 with the MMU and both caches ON. Normal cacheable memory for
  * the image (unaligned access must work once C library code runs) and
@@ -11,31 +11,33 @@
  * bringing up the interrupt controller and the ITS.
  *
  * Layout: 4KiB granule, 48-bit VA (T0SZ=16), walk starts at L0, so L0 entries
- * are always table descriptors, L1 blocks are 1GiB and L2 blocks 2MiB.
+ * are always table descriptors, L1 blocks are 1GiB and L2 blocks 2MiB. The
+ * addresses come from board_conf.h:
  *
  *   L1[0]  0x00000000-0x3fffffff -> L2: 2MiB blocks, Device below the image
- *          RAM base, Normal from 0x0a000000 upward
+ *          RAM base (BOARD_MMU_IMAGE_RAM_BASE), Normal above it
  *   L1[1]  0x40000000-0x7fffffff -> 1GiB Normal block
  *   L1[2]  0x80000000-0xbfffffff -> 1GiB Normal block
  *   L1[3]  0xc0000000-0xffffffff -> L2: 2MiB blocks, Device everywhere EXCEPT
- *          0xc0000000-0xc1ffffff, which is Normal
- *   L1[15] 0x3c0000000-0x3ffffffff -> L2: Device, but only the PCIe DBI
- *          windows are populated; anything else in that 1GiB faults
+ *          the BOARD_MMU_LPI_WINDOW range, which is Normal
+ *   L1[L1_IDX_PCIE_DBI] (the 1GiB holding the PCIe DBI frames) -> L2: Device,
+ *          only those frames populated; present only when the board conf
+ *          defines BOARD_MMU_PCIE_DBI0_BASE
  *
- * That L1[3] exception matters. The ITS LPI property and pending tables live
- * at 0xc0010000 / 0xc0020000 (see carriers/gicv3_its.c). They are ordinary
- * shared memory that the CPU writes and the ITS reads, so they must be
- * Normal cacheable for the flush/invalidate discipline to mean anything. If
- * they were mapped Device, writes would bypass the cache and the
- * flush/invalidate calls would become no-ops that merely look correct.
+ * The L1[3] Normal window matters (or did): the ITS LPI property and pending
+ * tables are ordinary shared memory that the CPU writes and the ITS reads, so
+ * they must be Normal cacheable for the flush/invalidate discipline to mean
+ * anything. If they were mapped Device, writes would bypass the cache and the
+ * flush/invalidate calls would become no-ops that merely look correct. (The
+ * tables have since moved into the image's .bss, inside the Normal image RAM
+ * mapping; the conf window is kept because removing it would change the boot
+ * mapping for no measured benefit.)
  *
- * The 15GiB entry exists because the DesignWare PCIe register file (DBI, where
+ * The PCIe DBI entry exists because the DesignWare register file (DBI, where
  * the iATU lives and where the root port's own config space is served) is
- * addressed above 4GiB: 0x3c0000000 for pcie2x1 and 0x3c0800000 for pcie3x2.
- * Those two frames are the only thing up there, so only they are populated -
- * an unmapped access faults loudly instead of landing on a Device mapping that
- * happens to read as zero. The PCIe config/MMIO windows the endpoints use
- * (0xf0xxxxxx/0xf4xxxxxx) are inside L1[3] and need nothing new.
+ * addressed above 4GiB on RK3568. Those frames are the only thing up there, so
+ * only they are populated - an unmapped access faults loudly instead of
+ * landing on a Device mapping that happens to read as zero.
  */
 
 #include <stdint.h>
@@ -60,33 +62,36 @@
 #define L2_BLOCK_SIZE		(2ULL * 1024 * 1024)
 #define L1_BLOCK_SIZE		(1ULL * 1024 * 1024 * 1024)
 
-/* Image RAM base: below this is firmware and must stay Device (never cached,
- * never speculated, never executed). */
-#define IMAGE_RAM_BASE		0x0a000000ULL
+/* Image RAM base (board_conf.h): below this is firmware and must stay Device
+ * (never cached, never speculated, never executed). */
+#define IMAGE_RAM_BASE		BOARD_MMU_IMAGE_RAM_BASE
 
-/* Normal-cacheable window reserved for the ITS LPI tables. Must agree with
- * LPI_PROP_BASE / LPI_PEND_BASE in carriers/gicv3_its.c. */
-#define LPI_TABLE_BASE		0xc0000000ULL
-#define LPI_TABLE_END		0xc2000000ULL
+/* Normal-cacheable window inside the top 1GiB (board_conf.h). An empty
+ * window (BASE == END) maps the whole 1GiB Device. */
+#define LPI_TABLE_BASE		BOARD_MMU_LPI_WINDOW_BASE
+#define LPI_TABLE_END		BOARD_MMU_LPI_WINDOW_END
 
 /* DesignWare PCIe register files (DBI), one per controller, both in the same
- * 1GiB at 15GiB. The RK3568 numbers, matching the board table in
- * drivers/rk3568_pcie.c and the vendor tree's reg-names = "dbi". */
-#define PCIE_DBI0_BASE		0x3c0000000ULL
-#define PCIE_DBI0_END		(PCIE_DBI0_BASE + 0x400000ULL)
-#define PCIE_DBI1_BASE		0x3c0800000ULL
-#define PCIE_DBI1_END		(PCIE_DBI1_BASE + 0x400000ULL)
+ * 1GiB - the RK3568 numbers, matching the board table in
+ * drivers/rk3568_pcie.c. Boards without PCIe above 4GiB do not define
+ * BOARD_MMU_PCIE_DBI0_BASE and get no L2 table for it. */
+#ifdef BOARD_MMU_PCIE_DBI0_BASE
+#define PCIE_DBI0_BASE		BOARD_MMU_PCIE_DBI0_BASE
+#define PCIE_DBI0_END		BOARD_MMU_PCIE_DBI0_END
+#define PCIE_DBI1_BASE		BOARD_MMU_PCIE_DBI1_BASE
+#define PCIE_DBI1_END		BOARD_MMU_PCIE_DBI1_END
 #define L1_IDX_PCIE_DBI		((uint32_t)((PCIE_DBI0_BASE >> 30) & 0x1ffULL))
+#endif
 
 /* TCR_EL1 geometry. T0SZ=16 gives 48-bit VA. IRGN0/ORGN0 = write-back
- * write-allocate, SH0 = inner shareable. PS=0b010 selects 40-bit PA, which is
- * what this SoC implements (a larger IPS than the hardware supports is
- * UNPREDICTABLE). */
+ * write-allocate, SH0 = inner shareable. The physical address size is the
+ * board's (BOARD_MMU_TCR_PS): a larger IPS than the hardware supports is
+ * UNPREDICTABLE. */
 #define TCR_T0SZ		(16ULL)
 #define TCR_IRGN0_WBWA		(3ULL << 8)
 #define TCR_ORGN0_WBWA		(3ULL << 10)
 #define TCR_SH0_INNER		(3ULL << 12)
-#define TCR_PS_40BIT		(2ULL << 32)
+#define TCR_PS_40BIT		BOARD_MMU_TCR_PS
 #define TCR_EPD1_DISABLE	(1ULL << 23)	/* we only use TTBR0 */
 
 /* Four tables: one per level of the walk.
@@ -111,7 +116,9 @@ static uint64_t l0_table[512] __attribute__((aligned(PAGE_GRANULE)));
 static uint64_t l1_table[512] __attribute__((aligned(PAGE_GRANULE)));
 static uint64_t l2_low[512]  __attribute__((aligned(PAGE_GRANULE)));
 static uint64_t l2_top[512]  __attribute__((aligned(PAGE_GRANULE)));
+#ifdef BOARD_MMU_PCIE_DBI0_BASE
 static uint64_t l2_pcie[512] __attribute__((aligned(PAGE_GRANULE)));
+#endif
 
 /* Normal memory: inner-shareable, cacheable (MAIR byte 0). */
 static uint64_t block_desc(uint64_t base, uint64_t attrs)
@@ -165,6 +172,7 @@ void board_mmu_enable(void)
 	/* L2 covering the 1GiB that holds the two PCIe DBI register files.
 	 * Only those two frames get a descriptor; the rest of the 1GiB stays
 	 * invalid on purpose. */
+#ifdef BOARD_MMU_PCIE_DBI0_BASE
 	for (i = 0; i < 512U; i++) {
 		uint64_t base = (uint64_t)L1_IDX_PCIE_DBI * L1_BLOCK_SIZE +
 				(uint64_t)i * L2_BLOCK_SIZE;
@@ -176,6 +184,7 @@ void board_mmu_enable(void)
 			l2_pcie[i] = 0;
 		}
 	}
+#endif
 
 	/* L1 covering the low 4GiB. */
 	for (i = 0; i < 512U; i++) {
@@ -187,7 +196,9 @@ void board_mmu_enable(void)
 	l1_table[2] = block_desc(L1_BLOCK_SIZE * 2ULL,
 				 DESC_ATTR_NORMAL);
 	l1_table[3] = DESC_TABLE | (uint64_t)(uintptr_t)l2_top;
+#ifdef BOARD_MMU_PCIE_DBI0_BASE
 	l1_table[L1_IDX_PCIE_DBI] = DESC_TABLE | (uint64_t)(uintptr_t)l2_pcie;
+#endif
 
 	/* L0: where the walk actually starts for a 48-bit VA. Only table
 	 * descriptors are valid at this level. */

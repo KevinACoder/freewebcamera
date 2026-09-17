@@ -20,7 +20,12 @@
  *
  * CurrentEL encodes the level as 0x4 / 0x8 / 0xC (not 1 / 2 / 3) - this is a
  * classic source of misrouted boot paths.
+ *
+ * .S files run the preprocessor, so board_conf.h (data-only #defines) is
+ * includable directly - the same source of truth the C files use.
  */
+
+#include "board_conf.h"
 
 	.arch	armv8-a
 	.section .text.boot, "ax"
@@ -37,9 +42,10 @@ _start:
 	 * corruption, not a wrong turn. Secondaries enter through PSCI at
 	 * freertos_secondary_entry (smp_secondary.S); if one lands here
 	 * anyway, park it where it cannot do harm. The logical core number
-	 * is MPIDR Aff1 on this SoC (Aff0 is 0 for every core - measured). */
+	 * comes from BOARD_MPIDR_CORE_SHIFT (board_conf.h: Aff1 on RK3568,
+	 * Aff0 on QEMU virt). */
 	mrs	x1, mpidr_el1
-	lsr	x1, x1, #8
+	lsr	x1, x1, #BOARD_MPIDR_CORE_SHIFT
 	and	x1, x1, #0xff
 	cbz	x1, 1f
 2:	wfe

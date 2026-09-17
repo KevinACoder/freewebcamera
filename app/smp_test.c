@@ -5,7 +5,8 @@
  * The claim under test is not "the scheduler has affinity APIs" - it is
  * "a task pinned to core N executes on core N, and on no other core, while
  * three other tasks are pinned the same way on the neighbouring cores".
- * The only honest witness is the hardware: each task reads MPIDR on every
+ * The only honest witness is the hardware: each task reads the core number
+ * (board_smp_core_id, the one home of the MPIDR extraction) on every
  * iteration and counts any sample that does not match its bound core.
  *
  * Four tasks, same priority (with configRUN_MULTIPLE_PRIORITIES 0 only
@@ -26,9 +27,9 @@
 #include "board.h"
 #include "cmsis_os2.h"
 
-/* Iterations per task. Each iteration reads MPIDR and compares Aff0 against
- * the bound core; every 32nd iteration yields, so the test also exercises
- * scheduler rotation while it runs. */
+/* Iterations per task. Each iteration reads the hardware core number and
+ * compares it against the bound core; every 32nd iteration yields, so the
+ * test also exercises scheduler rotation while it runs. */
 #define SMP_TEST_SAMPLES	20000U
 #define SMP_TEST_YIELD_MASK	0x1FU
 
@@ -61,7 +62,11 @@ static void smp_test_task(void *argument)
 	for (i = 0U; i < SMP_TEST_SAMPLES; i++) {
 		uint32_t mpidr = read_mpidr();
 
-		if ((mpidr & 0xffU) != core) {
+		/* The logical number, extracted per the board's conf (RK3568
+		 * carries it in MPIDR Aff1, so a raw `mpidr & 0xff` read Aff0
+		 * - which is 0 for every core there - and misreported every
+		 * task except core 0). */
+		if (board_smp_core_id() != core) {
 			bad++;
 			mismatch_mpidr[core] = mpidr;
 		}

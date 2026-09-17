@@ -1,12 +1,16 @@
-# Build for the RK3568 FreeRTOS carrier.
+# Build for the FreeRTOS carrier image.
 #
-# Produces a flat raw binary the board loads with
+# Produces a flat raw binary. The RK3568 board loads it with
 #   tftp 0xa000000 freertos.bin ; go 0xa000000
-# (bootelf is unusable on this board - it faults at the jump).
+# (bootelf is unusable on that board - it faults at the jump). The
+# aarch64-virt board runs under qemu-system-aarch64 (see the run-virt
+# target).
 #
 # Layers, and the include-path rule that enforces them:
 #   include/      interface layer: vendored CMSIS headers + our gap headers
-#   port/board/   CPU bring-up (startup, MMU, GICv3, tick)
+#   port/board/   CPU bring-up (startup, MMU, GICv3, tick);
+#                 common/ is board-agnostic, <board>/ holds the conf + link
+#                 script, selected by BOARD=
 #   port/adapters/ one directory per vendored component
 #   drivers/      CMSIS driver implementations
 #   app/          application
@@ -15,6 +19,11 @@
 # app/ and drivers/ never get third-party/ or kernel include paths: if they
 # need something it has to come through include/. tools/check-deps.sh checks
 # the same rule statically.
+
+# Board selection: the port/board/<board>/ directory supplies board_conf.h
+# (register bases, interrupt numbers, MMU windows, PSCI conventions) and the
+# link script. Default unchanged since forever: the RK3568 board.
+BOARD ?= rk3568
 
 # Bare-metal toolchain. Set explicitly rather than inherited: non-interactive
 # shells do not source ~/.bashrc, and silently picking up a Linux-targeted
@@ -25,7 +34,7 @@ CC      := $(CROSS_COMPILE)gcc
 OBJCOPY := $(CROSS_COMPILE)objcopy
 SIZE    := $(CROSS_COMPILE)size
 
-BUILD   := build
+BUILD   := build/$(BOARD)
 TARGET  := $(BUILD)/freertos
 
 # -mgeneral-regs-only: the port saves no FP state, so any FP instruction is a
@@ -38,13 +47,16 @@ CFLAGS := -O2 -g -std=c11 -Wall -Wextra \
 	-DGUEST \
 	-Wno-unused-parameter -Wno-sign-compare
 
-LDFLAGS := -nostdlib -static -T port/board/rk3568.ld \
+LDFLAGS := -nostdlib -static -T port/board/$(BOARD)/$(BOARD).ld \
 	-Wl,--build-id=none -Wl,--no-warn-rwx-segments -Wl,-Map=$(TARGET).map
 
 # --- include paths --------------------------------------------------------
 
-# Interface layer: everything reaches CMSIS through here.
-INC_COMMON := -Iinclude -Iport/board
+# Interface layer: everything reaches CMSIS through here. -Iport/board and
+# -Iport/board/common resolve board.h and the board-agnostic bring-up
+# headers (gicv3_its.h); -Iport/board/$(BOARD) resolves the selected board's
+# board_conf.h (which board.h includes).
+INC_COMMON := -Iinclude -Iport/board -Iport/board/common -Iport/board/$(BOARD)
 # Available only to adapters (they are the only layer allowed to touch
 # vendored code and kernel internals). The port lives in the adapter too:
 # portmacro.h resolves from -Iport/adapters/freertos, and the vendored
@@ -145,19 +157,20 @@ SDMMC_SRCS := \
 	third-party/sdmmc/sd/fsl_sd.c \
 	third-party/sdmmc/sdio/fsl_sdio.c
 
+# Board bring-up, board-agnostic part: the same set builds for every board.
 BOARD_SRCS := \
-	port/board/mmu.c \
-	port/board/memops.c \
-	port/board/minilibc.c \
-	port/board/cache.c \
-	port/board/board_early.c \
-	port/board/smp.c \
-	port/board/gicv3.c \
-	port/board/gicv3_its.c \
-	port/board/gicv3_msi.c \
-	port/board/its_test.c \
-	port/board/itsdump.c \
-	port/board/tick.c
+	port/board/common/mmu.c \
+	port/board/common/memops.c \
+	port/board/common/minilibc.c \
+	port/board/common/cache.c \
+	port/board/common/board_early.c \
+	port/board/common/smp.c \
+	port/board/common/gicv3.c \
+	port/board/common/gicv3_its.c \
+	port/board/common/gicv3_msi.c \
+	port/board/common/its_test.c \
+	port/board/common/itsdump.c \
+	port/board/common/tick.c
 
 ADAPTER_SRCS := \
 	port/adapters/freertos/port_glue.c \
@@ -213,9 +226,9 @@ APP_SRCS := \
 	app/smp_test.c
 
 ASM_SRCS := \
-	port/board/startup.S \
-	port/board/vectors.S \
-	port/board/smp_secondary.S \
+	port/board/common/startup.S \
+	port/board/common/vectors.S \
+	port/board/common/smp_secondary.S \
 	port/adapters/freertos/portasm_smp.S
 
 # --- rules ----------------------------------------------------------------
@@ -293,16 +306,18 @@ STUB_SRCS := \
 	port/adapters/stub/net_stub.c \
 	port/adapters/stub/fs_stub.c \
 	port/adapters/stub/sdio_stub.c \
-	port/board/gicv3.c \
-	port/board/gicv3_its.c \
-	port/board/gicv3_msi.c \
-	port/board/its_test.c \
-	port/board/itsdump.c \
-	port/board/board_early.c \
-	port/board/memops.c \
-	port/board/minilibc.c \
-	port/board/cache.c \
-	port/board/mmu.c
+	port/adapters/stub/smp_stub.c \
+	port/board/common/gicv3.c \
+	port/board/common/gicv3_its.c \
+	port/board/common/gicv3_msi.c \
+	port/board/common/its_test.c \
+	port/board/common/itsdump.c \
+	port/board/common/board_early.c \
+	port/board/common/memops.c \
+	port/board/common/minilibc.c \
+	port/board/common/cache.c \
+	port/board/common/mmu.c \
+	port/board/common/smp.c
 
 STUB_OBJS := $(addprefix $(BUILD)/stub/,$(STUB_SRCS:.c=.o)) \
 	     $(addprefix $(BUILD)/stub/,$(DRIVER_SRCS:.c=.o)) \
@@ -310,7 +325,8 @@ STUB_OBJS := $(addprefix $(BUILD)/stub/,$(STUB_SRCS:.c=.o)) \
 
 $(BUILD)/stub/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -Iinclude -Iport/board -Iport/adapters/stub \
+	$(CC) $(CFLAGS) -Iinclude -Iport/board -Iport/board/common \
+		-Iport/board/$(BOARD) -Iport/adapters/stub \
 		-MMD -MP -c $< -o $@
 
 .PHONY: k4
@@ -321,19 +337,19 @@ k4: $(BUILD)/freertos-stub.elf
 # handlers, so it belongs to the kernel side of the seam, not to the layers
 # this target is testing. What is under test is that app/ and drivers/ link
 # with no kernel; the kernel's own glue is allowed to be absent.
-STUB_ASM := $(BUILD)/stub/port/board/startup.o
+STUB_ASM := $(BUILD)/stub/port/board/common/startup.o
 
 $(BUILD)/freertos-stub.elf: $(STUB_OBJS) $(STUB_ASM)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(STUB_OBJS) $(STUB_ASM) \
-		-nostdlib -static -T port/board/rk3568.ld \
+		-nostdlib -static -T port/board/$(BOARD)/$(BOARD).ld \
 		-Wl,--build-id=none -Wl,--no-warn-rwx-segments -o $@
 	@printf 'K4 OK: app/ and drivers/ link with no kernel and no shell\n'
 	@printf '        (CMSIS-RTOS2 and include/shell.h are the only interfaces they see)\n'
 
-$(BUILD)/stub/port/board/startup.o: port/board/startup.S
+$(BUILD)/stub/port/board/common/startup.o: port/board/common/startup.S
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -Iinclude -Iport/board -c $< -o $@
+	$(CC) $(CFLAGS) -Iinclude -Iport/board -Iport/board/$(BOARD) -c $< -o $@
 
 # The gates are the things M0 is allowed to be judged on. k4 is included
 # because "the kernel interface is real" is a claim this build has to keep

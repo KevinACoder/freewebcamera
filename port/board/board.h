@@ -1,7 +1,7 @@
 /*
  * @file   board.h
- * @brief  Board bring-up for the RK3568: everything needed to get the CPU
- *         into a state where the CMSIS interfaces can work.
+ * @brief  Board bring-up interface: everything needed to get the CPU into a
+ *         state where the CMSIS interfaces can work.
  *
  * This is not an interface layer and not a driver. It holds the code that
  * runs before any of that exists:
@@ -19,6 +19,13 @@
  *
  *  - The tick is exposed as OS_Tick_* (also CMSIS), so this layer carries no
  *    FreeRTOS dependency: swapping the kernel must not require editing it.
+ *
+ * BOARD SELECTION: the code in common/ is board-agnostic and is calibrated
+ * through board_conf.h, which the build resolves from port/board/<board>/
+ * (Makefile: BOARD=rk3568 | aarch64-virt). This header carries the shared
+ * policy and every function signature; the per-board register bases,
+ * interrupt numbers, MMU windows and PSCI conventions live in that board's
+ * board_conf.h.
  */
 
 #ifndef FREEWEBCAMERA_BOARD_H
@@ -28,6 +35,11 @@
 #include <stdint.h>
 
 #include "os_tick.h"
+
+/* The board's calibration table: register bases, interrupt numbers, MMU
+ * windows, core-numbering and PSCI conventions. Resolved from
+ * port/board/$(BOARD)/ via the include path. */
+#include "board_conf.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -47,7 +59,7 @@ void board_mmu_enable_secondary(void);
 
 /* Drop the loader's leftover dirty cache lines over our own image, then
  * invalidate the instruction cache. Called by board_mmu_enable() while caches
- * are still off; see port/board/cache.c for why skipping it produces
+ * are still off; see port/board/common/cache.c for why skipping it produces
  * intermittent corruption rather than a clean failure. */
 void board_cache_init(void);
 
@@ -63,13 +75,9 @@ void board_dcache_flush_invalidate(uintptr_t addr, unsigned long size);
 /* C entry point of the image. */
 void board_main(void);
 
-/* --- board coordinates (register facts, verified on this board) ---------- */
-
-#define BOARD_UART2_BASE	0xfe660000UL
-#define BOARD_GICD_BASE		0xfd400000UL
-#define BOARD_GICR_BASE		0xfd460000UL	/* core 0 redistributor */
-#define BOARD_ITS_BASE		0xfd440000UL
-#define BOARD_ITS_TRANSLATER	0xfd450040UL
+/* Board coordinates - register bases, console/tick interrupt numbers, the
+ * redistributor stride, the UART calibration and the MMU windows - are the
+ * board_conf.h table above, not repeated here. */
 
 /* --- early output --------------------------------------------------------- */
 
@@ -119,67 +127,27 @@ void board_gicv3_dispatch(uint32_t intid);
 
 /* --- tick ----------------------------------------------------------------- */
 
-/* Tick source: the EL1 virtual timer (CNTV), INTID 27.
- *
- * Not the physical timer, despite that being the obvious choice. On this
- * board OP-TEE claims the physical timer as a Group 0 interrupt that
- * non-secure code cannot enable, and the EL2 physical timer is unreachable
- * because the `go` boot path leaves CNTHCTL_EL2.EL1PCEN=0. The virtual timer
- * is the one that works, measured: writing CNTV_TVAL raises GICR_ISPENDR0
- * bit 27 and INTID 27 arrives.
- *
- * The OS_Tick_* functions below are declared in include/os_tick.h (CMSIS); a
- * separate declaration would be redundant. */
-#define BOARD_TICK_INTID	27U
+/* The tick INTID lives in board_conf.h (BOARD_TICK_INTID); on every board so
+ * far it is the EL1 virtual timer, INTID 27 - the physical-timer alternatives
+ * are firmware-hostage on real hardware, and the RK3568 story is told in that
+ * board's conf. */
 
 /* True once the virtual timer is armed and running. */
 bool board_tick_is_running(void);
 
 /* --- console -------------------------------------------------------------- */
 
-/* The GIC INTID of the console UART's interrupt.
- *
- * 150, from three independent sources that agree: the device trees (uart2's
- * node carries GIC_SPI 118, and uart1..uart9 map to SPI 117..125, so the
- * sequence is self-consistent), and the vendor SoC header for this board,
- * whose FUART2_IRQ_NUM is 150 against the same base address 0xfe660000.
- * SPI N is INTID N+32, hence 150.
- *
- * The lab's FreeBSD logs report `irq 66` for the same base address; that is
- * FreeBSD's own interrupt-rack numbering, not the GIC INTID. A brief earlier
- * attempt at 66 delivered nothing, and an interrupt storm seen with 150 was
- * traced to the driver's own handler not clearing the source - not to the
- * number. */
-#define BOARD_CONSOLE_INTID	150U
+/* The console UART's GIC INTID is BOARD_CONSOLE_INTID (board_conf.h). */
 
-/* --- SMP (four A55 cores, one cluster) ------------------------------------ */
+/* --- SMP ------------------------------------------------------------------- */
 
-/* RK3568 is four Cortex-A55 in a single DynamIQ cluster, hardware-coherent
- * (inner-shareable Normal memory needs no explicit maintenance between these
- * cores - what DOES need it is anything reached over a non-coherent port, as
- * before).
- *
- * CORE NUMBERING, MEASURED (bring-up round 6): a released secondary reads
- * MPIDR_EL1 = 0x8100_0N00 with N = 0..3 - the logical core number lives in
- * AFFINITY 1, and Aff0 is 0 for every core. (Bits 31 and 24 are the usual
- * RES1/U.) Everything that derives a core identity reads it through
- * board_smp_core_id() so the numbering has exactly one home. PSCI CPU_ON,
- * in contrast, takes the LINEAR core index (1..3 released cores whose
- * MPIDRs carry Aff1 = 1..3) - OP-TEE maps the low byte to its core table
- * internally, which is why the small integers work as targets.
- *
- * Secondary cores are released through PSCI CPU_ON: BL31/OP-TEE are resident
- * on this board (they own PPI 29 as Group 0), the secondary cores park inside
- * BL31, and the boot chain provides no spin-table release address. PSCI is
- * also what mainline Linux uses here (enable-method = "psci"). */
+/* The number of cores, the redistributor frame stride, how a core's logical
+ * number is extracted from MPIDR, and the PSCI conventions (conduit
+ * instruction, CPU_ON target encoding) are board_conf.h policy. The
+ * declarations below are the board-independent SMP surface every board
+ * provides. */
+
 #define BOARD_SMP_CORES		4U
-
-/* GIC-600 redistributor frame stride. A redistributor is a pair of 64KiB
- * frames (RD_base + the paired vLPI frame), so consecutive cores' RD_base
- * frames are 2 * 64KiB apart. Walking the frames and matching GICR_TYPER's
- * affinity value against MPIDR is the only sound way to find a core's own
- * redistributor; the boot core's frame happens to sit at BOARD_GICR_BASE. */
-#define BOARD_GICR_STRIDE	0x20000UL
 
 /* Cross-core yield interrupt: SGI 0, chosen by the kernel port (portmacro.h).
  * Declared here because the priority policy lives with the board's other
@@ -188,27 +156,30 @@ bool board_tick_is_running(void);
 
 /* Logical core number of the calling core.
  *
- * MEASURED on this board (bring-up round 6): the four A55s are numbered in
- * AFFINITY 1, not Aff0 - a released secondary reads MPIDR_EL1 =
- * 0x8100_0N00 (N = 0..3, so Aff0 = 0 for every core and Aff1 carries the
- * core number; bits 31 and 24 are the usual RES1/U). PSCI CPU_ON still
- * takes the linear core index in the low byte on this platform - OP-TEE
- * maps it internally - but the LOGICAL identity of a running core is Aff1.
- * Aff0-based extraction made every secondary believe it was core 0, which
- * is what rounds 2-5 thrashed on: core-0's redistributor frame and boot
- * stack shared by four cores. */
+ * The extraction (which MPIDR affinity field carries the logical number) is
+ * BOARD_MPIDR_CORE_SHIFT in board_conf.h - RK3568 numbers cores in Aff1,
+ * QEMU virt in Aff0, and getting that wrong made every secondary believe it
+ * was core 0 (bring-up rounds 2-5 on RK3568). Everything that derives a core
+ * identity reads it through this function so the numbering has exactly one
+ * home - including the assembly paths, whose macro expands to the same shift
+ * from the same conf header. */
 static inline uint32_t board_smp_core_id(void)
 {
 	uint64_t mpidr;
 
 	__asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr));
-	return (uint32_t)((mpidr >> 8) & 0xffu);
+	return (uint32_t)((mpidr >> BOARD_MPIDR_CORE_SHIFT) & 0xffu);
 }
 
 /* Release cores 1..BOARD_SMP_CORES-1 through PSCI CPU_ON, targeting the
  * secondary entry point in smp_secondary.S, then wait (bounded) until each
- * core has run its GIC bring-up and reported in. Called once by the kernel
- * port from the boot core, before the tick is armed. */
+ * core has run its GIC bring-up and reported in.
+ *
+ * Called from TASK context after the scheduler is running (the app's boot
+ * task does it), not from the kernel port: releasing three cores while the
+ * boot core is still alone in its pre-ticker window produced freezes with no
+ * evidence on RK3568. This way a straggling core costs one core, not the
+ * boot. */
 void board_smp_start_secondaries(void);
 
 /* A secondary core calls this once its redistributor / CPU interface / SGI

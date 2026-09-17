@@ -9,9 +9,10 @@
  * the SP_EL0/SP_ELx dance (tasks run with SP_ELx selected; the SP_EL0 stack
  * carries the context frames) - with three SMP changes:
  *
- *  1. The "current task" is pxCurrentTCBs[core], core read from MPIDR
- *     (Aff0), not the single pxCurrentTCB. The index arithmetic is
- *     [base, index, lsl #3] on a pointer array - pointer size 8.
+ *  1. The "current task" is pxCurrentTCBs[core], core read from MPIDR via
+ *     BOARD_MPIDR_CORE_SHIFT (board_conf.h), not the single pxCurrentTCB.
+ *     The index arithmetic is [base, index, lsl #3] on a pointer array -
+ *     pointer size 8.
  *
  *  2. Every per-core scalar (yield-required, interrupt nesting, FPU flag)
  *     is an array indexed the same way.
@@ -30,6 +31,13 @@
 
 	.text
 
+/* board_conf.h is data-only #defines; the preprocessor pass over .S files
+ * takes it directly, so this macro and board_smp_core_id() expand from the
+ * same board conf and cannot drift apart (an earlier inline copy of the
+ * shift here read the WRONG affinity field and every core indexed
+ * pxCurrentTCBs[0] - bring-up round 15). */
+#include "board_conf.h"
+
 	/* Variables and functions. */
 	.extern pxCurrentTCBs
 	.extern vTaskSwitchContext
@@ -43,12 +51,12 @@
 	.global FreeRTOS_SWI_Handler
 	.global vPortRestoreTaskContext
 
-/* This port's core index: MPIDR Aff1 (this SoC numbers its cores in Aff1 -
- * Aff0 is 0 for every core; measured 0x8100_0N00, see board.h). Must match
- * board_smp_core_id() bit for bit. */
+/* This port's core index: MPIDR shifted per BOARD_MPIDR_CORE_SHIFT (Aff1 on
+ * RK3568 - Aff0 is 0 for every core, measured 0x8100_0N00; Aff0 on QEMU
+ * virt). Must match board_smp_core_id() bit for bit. */
 .macro port_get_core_id, reg
 	mrs	\reg, mpidr_el1
-	lsr	\reg, \reg, #8
+	lsr	\reg, \reg, #BOARD_MPIDR_CORE_SHIFT
 	and	\reg, \reg, #0xff
 .endm
 
@@ -293,10 +301,11 @@ vPortRestoreTaskContext:
  * therefore, use ICC_IAR1_EL1 and ICC_EOIR1_EL1.
  *
  * SMP changes against the upstream sequence: the nesting counter and the
- * yield-required flag are per-core arrays indexed by MPIDR Aff0, and the
- * tail call to vTaskSwitchContext carries this core's id. The core index is
- * kept alive across the C dispatch call on the stack (X0-X18 are
- * caller-saved), exactly like the INTID.
+ * yield-required flag are per-core arrays indexed by the logical core
+ * number (port_get_core_id), and the tail call to vTaskSwitchContext
+ * carries this core's id. The core index is kept alive across the C
+ * dispatch call on the stack (X0-X18 are caller-saved), exactly like the
+ * INTID.
  *
  * [1] https://developer.arm.com/documentation/198123/0300/Arm-CoreLink-GIC-fundamentals
  *****************************************************************************/
