@@ -6,18 +6,28 @@
  * in the project talks to CMSIS-RTOS2 (include/cmsis_os2.h), so replacing the
  * kernel means rewriting this directory and port/adapters/cmsis_rtos2/ only.
  *
- * It supplies the three things the upstream ARM_AARCH64_SRE port expects the
- * integrator to provide:
+ * Shape transplanted from the board-validated reference SMP line's
+ * freertos_configs.c (D33, see IMPORT-INFO.md); the standalone-SDK calls it
+ * made map onto this tree's board layer as:
  *
- *   1. configSETUP_TICK_INTERRUPT()  -> board_tick_port_setup()
- *   2. vApplicationIRQHandler()      -> the port has already read ICC_IAR1_EL1
- *                                      and will perform EOI itself, so this
- *                                      only routes the INTID to a handler
- *   3. the application hooks the config enables (malloc/stack/assert)
+ *   vConfigureTickInterrupt / vClearTickInterrupt
+ *       -> the CMSIS OS_Tick_* interface (tick.c), same CNTPNS/PPI30 TVAL
+ *          programming, single tick on core 0;
+ *   StartSecondaryCpuUp -> board_smp_start_secondaries() (PSCI CPU_ON plus
+ *       the per-core report-in flags, smp.c);
+ *   InterruptSecondaryInit + SecondaryCoreStartup -> uxPortSecondaryMain()
+ *       (per-core GIC bring-up, report in, wait for the scheduler, enter it);
+ *   FExceptionInterruptHandler -> board_gicv3_dispatch();
+ *   DbgRawPrint -> board_early_print (polled UART, spinlock, DAIF masked).
  *
- * The tick is armed through the CMSIS OS_Tick_* interface rather than by
- * poking CNTV here, so the board layer keeps no kernel dependency and the same
- * tick code serves any kernel.
+ * Called out by the port proper:
+ *   1. vApplicationInterruptHandler() - the port's IRQ entry has already
+ *      read ICC_IAR1_EL1 and will write ICC_EOIR1_EL1 itself, so this only
+ *      routes: tick, spurious, or the board's handler table;
+ *   2. vApplicationInIrq() - in-interrupt predicate for xPortIsInsideInterrupt;
+ *   3. the application hooks the config enables (malloc/stack/assert);
+ *   4. the synchronous-exception / SError parking spots the port's vector
+ *      table falls into for anything that is not a yield.
  */
 
 #include <stdint.h>
@@ -29,35 +39,182 @@
 #include "irq_ctrl.h"
 #include "os_tick.h"
 
+/* --- interrupt dispatch --------------------------------------------------- */
+
+static volatile uint32_t is_in_irq = 0;
+
+/* Called by the port's FreeRTOS_IRQ_Handler with the raw ICC_IAR1_EL1 value.
+ * The entry code performs the EOI itself on the way out, so nothing here may
+ * acknowledge or deactivate. */
+void vApplicationInterruptHandler(uint32_t ulICCIAR)
+{
+	is_in_irq++;
+
+	if (ulICCIAR < 8192)
+	{
+		/* Interrupts cannot be re-enabled until the source of the interrupt is
+		 * cleared. The ID of the interrupt is obtained by bitwise ANDing the
+		 * ICCIAR value with 0x3FF. */
+		ulICCIAR = ulICCIAR & 0x3FFUL;
+	}
+
+	/* call handler function */
+	if (ulICCIAR == (uint32_t)BOARD_TICK_INTID)
+	{
+		/* Generic Timer - the tick lives on core 0 only (single-tick
+		 * architecture; the tick handler indexes ullPortYieldRequired[0]). */
+		FreeRTOS_Tick_Handler();
+	}
+	else
+	{
+		if (ulICCIAR != 1023U)
+		{
+			/* Everything else - SPIs, the console, GMAC, and LPIs routed
+			 * through the ITS - goes through the board's handler table. */
+			board_gicv3_dispatch(ulICCIAR);
+		}
+		else
+		{
+			/* spurious（IAR=1023）是真异常信号，保留裸串口打点 */
+			board_early_print("  [irq] spurious\r\n");
+		}
+	}
+	is_in_irq--;
+}
+
+int vApplicationInIrq(void)
+{
+	return (int)is_in_irq;
+}
+
 /* --- tick ----------------------------------------------------------------- */
 
-void board_tick_port_setup(void);
-
-/* Arms the tick. Called by xPortStartScheduler via configSETUP_TICK_INTERRUPT.
+/* Arms the tick. Called by xPortStartScheduler via configSETUP_TICK_INTERRUPT,
+ * on core 0 only.
  *
- * The timer is CNTV on INTID 27, for reasons documented in board.h: the
- * physical timer is claimed by OP-TEE and the EL2 physical timer is gated by
- * CNTHCTL_EL2.EL1PCEN which the `go` boot path leaves clear.
- *
- * The handler passed to OS_Tick_Setup is the kernel's own tick entry, which is
- * what re-arms the timer and performs the scheduler bookkeeping. */
+ * The timer is board_conf.h policy, selected by core count: CNTV on INTID 27
+ * single-core, CNTPNS on INTID 30 under SMP (the virtual timer's line pends
+ * but is never delivered to the boot core in SMP mode on this board - the
+ * story is in board_conf.h). OS_Tick_Setup rearms through the CMSIS
+ * OS_Tick_* interface, so this file never touches timer registers itself. */
 void board_tick_port_setup(void)
 {
 	(void)OS_Tick_Setup(configTICK_RATE_HZ, FreeRTOS_Tick_Handler);
 	OS_Tick_Enable();
+
+	/* Make the selection and the arm visible. If the tick later proves
+	 * dead, this line is the difference between "the wrong source was
+	 * selected" and "the right source was armed but never delivered". */
+	board_log("tick: INTID=%u %s armed, load=%u",
+		  (unsigned)BOARD_TICK_INTID,
+#if BOARD_SMP_CORES > 1
+		  "cntpns"
+#else
+		  "cntv"
+#endif
+		  , (unsigned)OS_Tick_GetInterval());
 }
 
-/* --- interrupt dispatch ---------------------------------------------------- */
+/* --- SMP: secondary bring-up and the scheduler handshake ------------------- */
 
-/* The port's FreeRTOS_IRQ_Handler has already read ICC_IAR1_EL1 into
- * ulICCAck, incremented the nesting count, and will write ICC_EOIR1_EL1 on the
- * way out. So this function must NOT acknowledge or EOI - doing either again
- * would corrupt the controller state.
- *
- * Spurious INTID 1023 is dropped here rather than dispatched. */
-void vApplicationIRQHandler(uint32_t ulICCAck)
+#if ( configNUMBER_OF_CORES > 1 )
+
+/* Defined by the port proper (port.c): raised by core 0 right after the tick
+ * is armed, which is the signal for the parked secondaries to enter. */
+extern volatile uint64_t uxPortSchedularRunning;
+
+/* Called by xPortStartScheduler on core 0, BEFORE the tick is armed - the
+ * reference line's order, kept exactly: all secondaries are released and
+ * have run their own GIC bring-up (and are parked in uxPortSecondaryMain
+ * below, waiting) by the time the first task ever runs. */
+void StartSecondaryCpuUp(void)
 {
-	board_gicv3_dispatch(ulICCAck);
+	board_smp_start_secondaries();
+}
+
+/* The kernel's cross-core yield (portYIELD_CORE): raise SGI
+ * ulInterruptID on exactly the target core. The encoding (Aff1 in
+ * ICC_SGI1R_EL1 bits [23:16], TargetList = 1, one write per core - the
+ * silently-dropped-affinity lesson is in board_gicv3_send_sgi) lives in the
+ * board layer. */
+void vInterruptCore(uint32_t ulInterruptID, uint32_t ulCoreID)
+{
+	configASSERT(ulCoreID < (uint32_t)configNUMBER_OF_CORES);
+	configASSERT(ulInterruptID < 16U);
+
+	board_gicv3_send_sgi(ulInterruptID, 1UL << ulCoreID);
+}
+
+/* Secondary-core landing from smp_secondary.S. Does not return.
+ *
+ * Order is the reference line's: (1) this core's own redistributor and CPU
+ * interface, (2) report in - the boot core's bounded wait in
+ * board_smp_start_secondaries is waiting for exactly this, (3) spin until
+ * core 0 has armed the tick and raised uxPortSchedularRunning, (4) enter the
+ * scheduler, which installs this core's VBAR and restores the first task
+ * with interrupts enabled via the task's initial PSTATE. */
+void uxPortSecondaryMain(void)
+{
+	uint32_t cpu_id = board_smp_core_id();
+
+	configASSERT(cpu_id < (uint32_t)configNUMBER_OF_CORES);
+
+	board_gicv3_secondary_init();
+
+	board_smp_mark_core_up(cpu_id);
+
+	while (uxPortSchedularRunning == 0)
+	{
+		;
+	}
+
+	(void)xPortStartScheduler();
+
+	/* Not reached: the scheduler ends in vPortRestoreTaskContext. */
+	for (;;) {
+		__asm__ __volatile__("wfe");
+	}
+}
+
+#else /* configNUMBER_OF_CORES == 1 */
+
+/* smp_secondary.S branches here unconditionally, but a single-core image
+ * never releases a secondary (StartSecondaryCpuUp does not exist below
+ * configNUMBER_OF_CORES > 1), so this is a never-reached park. */
+void uxPortSecondaryMain(void)
+{
+	for (;;) {
+		__asm__ __volatile__("wfe");
+	}
+}
+
+#endif /* configNUMBER_OF_CORES > 1 */
+
+/* --- fault parking (reached from the port's vector table) ------------------ */
+
+/* A synchronous exception that is not a yield (ESR EC != 0x15) lands here
+ * from vSynchronousInterruptHandler / vSynchronousInterruptHandlerSPx. There
+ * is no recovery path - report the fact and park, with the port's saved
+ * frame still on this stack (it no longer matters). */
+void SynchronousInterrupt(void *frame)
+{
+	(void)frame;
+	board_early_print("\n[port] FAULT: synchronous exception\n");
+	taskDISABLE_INTERRUPTS();
+	for (;;) {
+		__asm__ __volatile__("wfe");
+	}
+}
+
+/* Asynchronous external abort, from vSErrorInterruptHandler. */
+void SErrorInterrupt(void *frame)
+{
+	(void)frame;
+	board_early_print("\n[port] FAULT: SError (bus error)\n");
+	taskDISABLE_INTERRUPTS();
+	for (;;) {
+		__asm__ __volatile__("wfe");
+	}
 }
 
 /* --- application hooks the config enables --------------------------------- */

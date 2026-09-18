@@ -25,6 +25,14 @@
 # link script. Default unchanged since forever: the RK3568 board.
 BOARD ?= rk3568
 
+# Number of cores this image runs on (1..4 on RK3568). Forwarded to the
+# compiler as -D so board_conf.h / board.h and FreeRTOSConfig.h derive the
+# kernel core count, the port arrays, the app fan-out and the tick source
+# selection from ONE number. `make SMP_CORES=1` is the single-core
+# comparator image. An earlier layout had the flag in FreeRTOSConfig.h but
+# never passed it through, so it silently built 4-core every time.
+SMP_CORES ?= 4
+
 # Bare-metal toolchain. Set explicitly rather than inherited: non-interactive
 # shells do not source ~/.bashrc, and silently picking up a Linux-targeted
 # compiler produces a link against glibc assumptions that cannot work here.
@@ -41,10 +49,13 @@ TARGET  := $(BUILD)/freertos
 #   bug we want the compiler to prevent rather than discover as corruption.
 # -DGUEST: selects the port's EL1 path. Without it the port targets EL3 and
 #   asserts on CurrentEL at scheduler start.
+# -mno-outline-atomics: the MCS kernel locks use __atomic exchange/CAS; with
+#   outline atomics GCC emits calls to __aarch64_* helpers that a -nostdlib
+#   image has no library for. Inlined LDXR/STXR loops need no library.
 CFLAGS := -O2 -g -std=c11 -Wall -Wextra \
 	-ffreestanding -nostdlib -fno-builtin -fno-stack-protector \
-	-march=armv8-a -mgeneral-regs-only -mstrict-align \
-	-DGUEST \
+	-march=armv8-a -mgeneral-regs-only -mstrict-align -mno-outline-atomics \
+	-DGUEST -DSMP_CORES=$(SMP_CORES) \
 	-Wno-unused-parameter -Wno-sign-compare
 
 LDFLAGS := -nostdlib -static -T port/board/$(BOARD)/$(BOARD).ld \
@@ -93,7 +104,7 @@ KERNEL_SRCS := \
 	third-party/FreeRTOS-Kernel/timers.c \
 	third-party/FreeRTOS-Kernel/event_groups.c \
 	third-party/FreeRTOS-Kernel/portable/MemMang/heap_4.c \
-	port/adapters/freertos/port_smp.c
+	port/adapters/freertos/port.c
 
 # lwIP 2.2.1, vendored. The set follows upstream src/Filelists.mk for the core,
 # IPv4 and sequential-API groups, plus the FreeRTOS sys_arch from contrib.
@@ -227,9 +238,9 @@ APP_SRCS := \
 
 ASM_SRCS := \
 	port/board/common/startup.S \
-	port/board/common/vectors.S \
 	port/board/common/smp_secondary.S \
-	port/adapters/freertos/portasm_smp.S
+	port/adapters/freertos/portasm_smp.S \
+	port/adapters/freertos/port_vectors.S
 
 # --- rules ----------------------------------------------------------------
 

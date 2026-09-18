@@ -1,61 +1,62 @@
 /*
- * @file   portmacro.h
- * @brief  SMP port macros for the RK3568 (four A55, EL1/GUEST, GIC-600).
+ * FreeRTOS Kernel V11.1.0
+ * Copyright (C) 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
- * Derived from the vendored upstream single-core port
- * (third-party/FreeRTOS-Kernel/portable/GCC/ARM_AARCH64_SRE/portmacro.h,
- * MIT) and extended with the pieces the V11.3 kernel requires when
- * configNUMBER_OF_CORES > 1. The kernel, not this file, defines the
- * contract; see FreeRTOS.h lines around "required in SMP". Registered as a
- * derivative of the vendored MIT port in IMPORT-INFO.md / imports.md.
+ * SPDX-License-Identifier: MIT
  *
- * What changed against the single-core port, and why:
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of
+ * this software and associated documentation files (the "Software"), to deal in
+ * the Software without restriction, including without limitation the rights to
+ * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ * the Software, and to permit persons to whom the Software is furnished to do so,
+ * subject to the following conditions:
  *
- *  - portGET_CORE_ID(): MPIDR Aff0 through the board's static inline. One
- *    MRS, no function call, valid on every path that needs it.
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
  *
- *  - portYIELD_CORE(): the cross-core yield. The kernel calls this from
- *    inside its own critical sections when a task on ANOTHER core must be
- *    preempted; on THIS core it just pends xYieldPendings[] instead. The
- *    SGI's handler only sets a per-core flag, so it may run above the
- *    API-call priority level (BOARD_IRQ_PRIORITY_SGI).
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+ * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+ * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+ * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  *
- *  - portGET/RELEASE_TASK_LOCK + ISR_LOCK: two global spinlocks (task and
- *    ISR). The kernel's own discipline pairs every acquire with a release
- *    and releases-then-reacquires around yields, so a plain non-recursive
- *    spinlock is sufficient - and keeping interrupts fully masked in the
- *    paths that hold them (see port_smp.c) means no same-core re-entry can
- *    occur. The xCoreID parameter exists for ports that track per-core
- *    recursion; this one does not need it and ignores it.
+ * https://www.FreeRTOS.org
+ * https://github.com/FreeRTOS
  *
- *  - Critical sections: the kernel's vTaskEnterCritical/vTaskExitCritical
- *    (DAIF + both locks + TCB-resident nesting count), NOT the single-core
- *    port's PMR-based vPortEnterCritical. taskENTER_CRITICAL maps here
- *    unconditionally (task.h), so this file's macros must match.
- *
- *  - portSET/CLEAR_INTERRUPT_MASK (and the _FROM_ISR forms): unchanged
- *    PMR semantics from the single-core port; the kernel uses them around
- *    uxSchedulerSuspended updates and xTaskGetCurrentTaskHandle.
- *
- *  - portENTER/EXIT_CRITICAL_FROM_ISR: the kernel's FromISR critical
- *    sections (ISR lock + PMR save), which the V11.3 kernel provides.
- *
- *  - portEND_SWITCHING_ISR: per-core yield-required array.
- *
- * EL vocabulary is unchanged (GUEST): tasks run at EL1, yield is SVC 0,
- * vectors live at VBAR_EL1, initial pstate is EL1 with SP_EL0.
+ * freewebcamera adaptation (D33): the SMP port is the board-validated
+ * implementation proven on this hardware by the reference SDK line; the
+ * integrator-supplied pieces map onto this tree's board layer as follows:
+ *   FGetCpuLogicalId()   -> board_smp_core_id()   (board.h; MPIDR Aff1 here)
+ *   InterruptSetPriority -> IRQ_SetPriority       (CMSIS irq_ctrl.h, raw byte)
+ *   vInterruptCore()     -> port_glue.c           -> board_gicv3_send_sgi()
+ * Priority values follow the board's policy (board.h): 16 unique levels,
+ * logical level N lives in the register byte as N << 4. Registered in
+ * IMPORT-INFO.md / docs/imports.md.
  */
 
 #ifndef PORTMACRO_H
 #define PORTMACRO_H
-
-#include "board.h"
 
 /* *INDENT-OFF* */
 #ifdef __cplusplus
     extern "C" {
 #endif
 /* *INDENT-ON* */
+#include <stddef.h>
+#include <stdint.h>
+
+#include "board.h"
+#include "FreeRTOSConfig.h"
+/*-----------------------------------------------------------
+ * Port specific definitions.
+ *
+ * The settings in this file configure FreeRTOS correctly for the given hardware
+ * and compiler.
+ *
+ * These settings should not be altered.
+ *-----------------------------------------------------------
+ */
 
 /* Type definitions. */
 #define portCHAR          char
@@ -86,61 +87,50 @@ typedef uint64_t         TickType_t;
 #define portPOINTER_SIZE_TYPE    uint64_t
 
 /*-----------------------------------------------------------*/
+#if( configNUMBER_OF_CORES == 1 )
 
-/* The number of cores this port runs on, and the INTID of the cross-core
- * yield SGI. configNUMBER_OF_CORES is derived from the same value, so the
- * kernel and the port cannot disagree (FreeRTOSConfig.h). */
-#define portNUM_CORES               BOARD_SMP_CORES
-#define portYIELD_SGI_INTID         BOARD_SMP_YIELD_INTID
-
-/* The kernel keeps the critical-section nesting count in the TCB (one field
- * per task, indexed through pxCurrentTCBs[core]); the port keeps no copy of
- * its own, and the asm context switch carries none - a task is only ever
- * switched with a zero count. */
-#define portCRITICAL_NESTING_IN_TCB    1
-
-/* Task utilities. */
-
-/* Called at the end of an ISR that can cause a context switch. Per-core:
- * the switch is pended for whichever core is running the ISR. */
-#define portEND_SWITCHING_ISR( xSwitchRequired )                      \
-    {                                                                 \
-        extern uint64_t ullPortYieldRequired[ portNUM_CORES ];        \
-                                                                      \
-        if( ( xSwitchRequired ) != pdFALSE )                          \
-        {                                                             \
-            ullPortYieldRequired[ portGET_CORE_ID() ] = pdTRUE;       \
-        }                                                             \
+#define portEND_SWITCHING_ISR( xSwitchRequired ) \
+    {                                            \
+        extern uint64_t ullPortYieldRequired;    \
+                                                 \
+        if( xSwitchRequired != pdFALSE )         \
+        {                                        \
+            ullPortYieldRequired = pdTRUE;       \
+        }                                        \
     }
 
+#else
+
+/* Task utilities. */
+extern uint64_t ullPortYieldRequired[];
+/* Called at the end of an ISR that can cause a context switch. */
+#define portEND_SWITCHING_ISR( xSwitchRequired ) \
+    {                                            \
+                                                 \
+        if( xSwitchRequired != pdFALSE )         \
+        {                                        \
+            ullPortYieldRequired[portGET_CORE_ID()] = pdTRUE;       \
+        }                                        \
+    }
+
+#endif
+
 #define portYIELD_FROM_ISR( x )    portEND_SWITCHING_ISR( x )
-#define portYIELD()                __asm volatile ( "SVC 0" ::: "memory" )
 
-/* Cross-core yield: SGI to the target core. Called by the kernel with its
- * own critical section held, so the send must work with interrupts masked
- * (an SGI register write does). */
-#define portYIELD_CORE( xCoreID ) \
-    board_gicv3_send_sgi( portYIELD_SGI_INTID, 1UL << ( xCoreID ) )
-
-/* Core identification: one MRS. */
-#define portGET_CORE_ID()    ( ( BaseType_t ) board_smp_core_id() )
+#if defined( GUEST )
+    #define portYIELD()            __asm volatile ( "SVC 0" ::: "memory" )
+#else
+    #define portYIELD()            __asm volatile ( "SMC 0" ::: "memory" )
+#endif
 
 /*-----------------------------------------------------------
 * Critical section control
 *----------------------------------------------------------*/
 
-/* Interrupt masking is unchanged from the single-core port: PMR-based,
- * per-core by GICv3 architecture. */
-extern void vPortClearInterruptMask( UBaseType_t uxNewMaskValue );
-extern UBaseType_t uxPortSetInterruptMask( void );
 
-/* Task-level critical sections are the kernel's SMP implementation: DAIF
- * mask, task+ISR spinlocks, nesting count in the TCB. Prototypes here
- * because these macros expand in files that include only FreeRTOS.h. */
-extern void vTaskEnterCritical( void );
-extern void vTaskExitCritical( void );
-extern UBaseType_t vTaskEnterCriticalFromISR( void );
-extern void vTaskExitCriticalFromISR( UBaseType_t uxSavedInterruptStatus );
+extern UBaseType_t uxPortSetInterruptMask( void );
+extern void vPortClearInterruptMask( UBaseType_t uxNewMaskValue );
+extern void vPortInstallFreeRTOSVectorTable( void );
 
 #define portDISABLE_INTERRUPTS()                       \
     __asm volatile ( "MSR DAIFSET, #2" ::: "memory" ); \
@@ -152,49 +142,91 @@ extern void vTaskExitCriticalFromISR( UBaseType_t uxSavedInterruptStatus );
     __asm volatile ( "DSB SY" );                       \
     __asm volatile ( "ISB SY" );
 
-#define portENTER_CRITICAL()                      vTaskEnterCritical()
-#define portEXIT_CRITICAL()                       vTaskExitCritical()
 
-/* The kernel's scheduler-masking calls (vTaskSuspendAll et al). */
-#define portSET_INTERRUPT_MASK()                   uxPortSetInterruptMask()
-#define portCLEAR_INTERRUPT_MASK( x )              vPortClearInterruptMask( x )
+static inline UBaseType_t uxDisableInterrupts()
+{
+    unsigned long flags;
 
-/* ISR paths keep the single-core semantics. */
-#define portSET_INTERRUPT_MASK_FROM_ISR()          uxPortSetInterruptMask()
-#define portCLEAR_INTERRUPT_MASK_FROM_ISR( x )     vPortClearInterruptMask( x )
+    __asm volatile (
+        "mrs %0, daif\n"
+        "msr daifset, #2\n"
+        : "=r" (flags)
+        :
+        : "memory"
+    );
 
-/* FromISR critical sections: kernel-provided (ISR lock + PMR save). */
-#define portENTER_CRITICAL_FROM_ISR()              vTaskEnterCriticalFromISR()
-#define portEXIT_CRITICAL_FROM_ISR( x )            vTaskExitCriticalFromISR( x )
+    return flags;
+}
 
-/* Kernel locks: two global spinlocks (see the file comment). The core id is
- * accepted and ignored - it exists for ports that track recursion per core,
- * which this one does not (no holder can re-enter: every path that holds a
- * lock runs with interrupts fully masked). */
-extern void uxPortTaskLock( void );
-extern void uxPortTaskUnlock( void );
-extern void uxPortISRLock( void );
-extern void uxPortISRUnlock( void );
+static inline void vRestoreInterrupts(UBaseType_t flags)
+{
+    __asm volatile (
+        "and x2, %0, #128\n"
+        "mrs x1, daif\n"
+        "bic x1, x1, #128\n"
+        "orr x1, x1, x2\n"
+        "msr daif, x1\n"
+        :
+        : "r" (flags)
+        : "x0","x1","x2","memory"
+    );
+}
 
-#define portGET_TASK_LOCK( xCoreID )           uxPortTaskLock()
-#define portRELEASE_TASK_LOCK( xCoreID )       uxPortTaskUnlock()
-#define portGET_ISR_LOCK( xCoreID )            uxPortISRLock()
-#define portRELEASE_ISR_LOCK( xCoreID )        uxPortISRUnlock()
+#define portSET_INTERRUPT_MASK_FROM_ISR()         uxPortSetInterruptMask()
+#define portCLEAR_INTERRUPT_MASK_FROM_ISR( x )    vPortClearInterruptMask( x )
 
-/* The IRQ entry counts nesting depth per core; asserting "not in ISR" reads
- * this core's depth. */
-extern uint64_t ullPortInterruptNesting[ portNUM_CORES ];
+#if( configNUMBER_OF_CORES == 1 )
 
-#if ( configASSERT_DEFINED == 1 )
-    #define portASSERT_IF_IN_ISR()                                            \
-        configASSERT( ullPortInterruptNesting[ portGET_CORE_ID() ] == 0U )
-#endif /* configASSERT_DEFINED */
+extern void vPortEnterCritical( void );
+extern void vPortExitCritical( void );
+
+/* These macros do not globally disable/enable interrupts.  They do mask off
+ * interrupts that have a priority below configMAX_API_CALL_INTERRUPT_PRIORITY. */
+#define portENTER_CRITICAL()                      vPortEnterCritical();
+#define portEXIT_CRITICAL()                       vPortExitCritical();
+
+
+#else /* #if( configNUMBER_OF_CORES == 1 ) */
+
+#define portENTER_CRITICAL()		            vTaskEnterCritical();
+#define portEXIT_CRITICAL()			            vTaskExitCritical();
+
+#define portSET_INTERRUPT_MASK()                uxDisableInterrupts()
+#define portCLEAR_INTERRUPT_MASK(x)             vRestoreInterrupts(x)
+
+#define portENTER_CRITICAL_FROM_ISR()           vTaskEnterCriticalFromISR()
+#define portEXIT_CRITICAL_FROM_ISR( x )         vTaskExitCriticalFromISR( x )
+
+/*-----------------------------------------------------------
+ * Critical section locks
+ *----------------------------------------------------------*/
+#define ISR_LOCK                (0u)
+#define TASK_LOCK               (1u)
+
+extern void vPortRecursiveLock(BaseType_t xCoreID, uint32_t ulLockNum, BaseType_t uxAcquire);
+
+/* Per-core lock state initialisation. */
+void vPortLockInit(void);
+
+/* Task lock interface. */
+void vPortTaskLock(BaseType_t coreId, BaseType_t acquire);
+
+/* ISR lock interface. */
+void vPortISRLock(BaseType_t coreId, BaseType_t acquire);
+
+#define portRELEASE_ISR_LOCK( xCoreID )     vPortISRLock(( xCoreID ), pdFALSE)
+#define portGET_ISR_LOCK( xCoreID )         vPortISRLock(( xCoreID ), pdTRUE)
+
+#define portRELEASE_TASK_LOCK( xCoreID )    vPortTaskLock(( xCoreID ), pdFALSE)
+#define portGET_TASK_LOCK( xCoreID )        vPortTaskLock(( xCoreID ), pdTRUE)
+
+#endif
 
 /*-----------------------------------------------------------*/
 
-/* Task function macros as described on the FreeRTOS.org WEB site.  These
- * are not required for this port but included in case common demo code that
- * uses these macros is used. */
+/* Task function macros as described on the FreeRTOS.org WEB site.  These are
+ * not required for this port but included in case common demo code that uses these
+ * macros is used. */
 #define portTASK_FUNCTION_PROTO( vFunction, pvParameters )    void vFunction( void * pvParameters )
 #define portTASK_FUNCTION( vFunction, pvParameters )          void vFunction( void * pvParameters )
 
@@ -202,9 +234,8 @@ extern uint64_t ullPortInterruptNesting[ portNUM_CORES ];
  * handler for whichever peripheral is used to generate the RTOS tick. */
 void FreeRTOS_Tick_Handler( void );
 
-/* If configUSE_TASK_FPU_SUPPORT is set to 1 (or left undefined) then tasks
- * are created without an FPU context and must call vPortTaskUsesFPU() to
- * give themselves an FPU context before using any FPU instructions. */
+/* Any task that uses the floating point unit MUST call vPortTaskUsesFPU()
+ * before any floating point instructions are executed. */
 void vPortTaskUsesFPU( void );
 #define portTASK_USES_FLOATING_POINT()    vPortTaskUsesFPU()
 
@@ -228,7 +259,7 @@ void vPortTaskUsesFPU( void );
 
 #endif /* configUSE_PORT_OPTIMISED_TASK_SELECTION */
 
-#if ( configASSERT_DEFINED == 1 )
+#ifdef configASSERT
     void vPortValidateInterruptPriority( void );
     #define portASSERT_IF_INTERRUPT_PRIORITY_INVALID()    vPortValidateInterruptPriority()
 #endif /* configASSERT */
@@ -257,7 +288,42 @@ void vPortTaskUsesFPU( void );
     #error Invalid configUNIQUE_INTERRUPT_PRIORITIES setting.  configUNIQUE_INTERRUPT_PRIORITIES must be set to the number of unique priorities implemented by the target hardware
 #endif /* if configUNIQUE_INTERRUPT_PRIORITIES == 16 */
 
-#define portMEMORY_BARRIER()    __asm volatile ( "dsb sy" ::: "memory" )
+/* Interrupt controller access addresses. */
+#define portICCPMR_PRIORITY_MASK_OFFSET                      ( 0x04 )
+#define portICCIAR_INTERRUPT_ACKNOWLEDGE_OFFSET              ( 0x0C )
+#define portICCEOIR_END_OF_INTERRUPT_OFFSET                  ( 0x10 )
+#define portICCBPR_BINARY_POINT_OFFSET                       ( 0x08 )
+#define portICCRPR_RUNNING_PRIORITY_OFFSET                   ( 0x14 )
+
+
+#define portMEMORY_BARRIER()    __asm volatile ( "" ::: "memory" )
+
+/* Symmetric MultiProcessing (SMP) utility */
+#if ( configNUMBER_OF_CORES > 1 )
+
+static inline BaseType_t xPortGetCoreID()
+{
+   register BaseType_t xCoreID;
+   xCoreID = (BaseType_t)board_smp_core_id();
+   return xCoreID;
+}
+
+/* port for SMP */
+#define portGET_CORE_ID()       xPortGetCoreID()
+
+/* Assembly paths need an out-of-line symbol; the static inline above cannot
+ * be reached with BL. port.c provides it on top of the same board primitive. */
+extern uint32_t vPortGetCoreID( void );
+
+extern void vInterruptCore(uint32_t ulInterruptID, uint32_t ulCoreID);
+/* Use sgi0 as the yield core interrupt. */
+#define portYIELD_CORE_INT_ID       0
+#define portYIELD_CORE( xCoreID )   vInterruptCore(portYIELD_CORE_INT_ID, (uint32_t)xCoreID)
+
+
+int xPortIsInsideInterrupt( void );
+
+#endif
 
 /* *INDENT-OFF* */
 #ifdef __cplusplus

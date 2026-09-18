@@ -440,17 +440,10 @@ static void task_fs_start(void *argument)
 	osThreadTerminate(osThreadGetId());
 }
 
-/* Releases cores 1..3 through PSCI once the scheduler is live on core 0.
- * Deliberately a TASK, not part of the boot path: if a secondary wedges
- * during its bring-up the rest of the system is already running, the
- * timeout is visible in the shell, and nothing above CMSIS-RTOS2 changes. */
-static void task_smp_boot(void *argument)
-{
-	(void)argument;
-
-	board_smp_start_secondaries();
-	osThreadTerminate(osThreadGetId());
-}
+/* SMP core bring-up follows the reference line (D33): the kernel port's
+ * xPortStartScheduler releases the secondaries (StartSecondaryCpuUp) before
+ * the tick is armed, so there is no application-side boot task any more -
+ * by the time the first task runs, every core is up and in the scheduler. */
 
 /* SDIO card enumeration on the sdmmc0 slot: CMD5/CMD3/CMD7 plus the CCCR/
  * FBR/CIS walk over CMD52 - hundreds of milliseconds at the identification
@@ -478,9 +471,6 @@ void board_main(void)
 
 	(void)Driver_USART_Console.Initialize(console_event);
 	(void)Driver_USART_Console.PowerControl(ARM_POWER_FULL);
-
-	/* Point the board's fault reporting at the console now that it exists. */
-	board_early_print_hook = console_print;
 
 	console_print("\nfreewebcamera M0 - RK3568 FreeRTOS carrier\n");
 
@@ -558,14 +548,8 @@ void board_main(void)
 		return;
 	}
 
-	/* SMP: bring the other three cores in once the scheduler is live.
-	 * Low priority so the acceptance anchors are not delayed by it, but
-	 * before the shell is expected to be used interactively. */
-	if (osThreadNew(task_smp_boot, 0, &(osThreadAttr_t){ .name = "smpboot",
-			.stack_size = 1024, .priority = osPriorityBelowNormal }) == 0) {
-		console_print("[fatal] thread smpboot\n");
-		return;
-	}
+	/* SMP: nothing to do here any more - xPortStartScheduler brings the
+	 * other cores in (see the note above task_sdio_start). */
 
 	/* Pend the probe SPI. It stays pending until interrupts are unmasked,
 	 * so the first handler entry proves the whole path: distributor enable,

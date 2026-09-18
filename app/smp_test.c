@@ -9,11 +9,13 @@
  * (board_smp_core_id, the one home of the MPIDR extraction) on every
  * iteration and counts any sample that does not match its bound core.
  *
- * Four tasks, same priority (with configRUN_MULTIPLE_PRIORITIES 0 only
- * equal-priority tasks run simultaneously, so all four genuinely overlap),
- * each pinned with attr->affinity_mask = 1 << i through the standard
- * CMSIS-RTOS2 attribute - no project-specific binding API exists, which is
- * the point of wiring affinity through osThreadNew.
+ * Four tasks, same priority, each pinned with attr->affinity_mask = 1 << i
+ * through the standard CMSIS-RTOS2 attribute - no project-specific binding
+ * API exists, which is the point of wiring affinity through osThreadNew.
+ * A second phase (smp_delay_probe) then proves the cross-core WAKE chain:
+ * a task pinned to the last core must wake from osDelay five times, each
+ * wake having travelled tick (core 0) -> unblock -> yield SGI -> reschedule
+ * on the pinned core.
  *
  * Completion is one event flag per task; the whole test is bounded by a
  * timeout so a wedged core surfaces as a FAIL with the observed state
@@ -91,29 +93,74 @@ static void smp_test_task(void *argument)
 	(void)osThreadTerminate(osThreadGetId());
 }
 
+/* --- cross-core wake probe ------------------------------------------------- */
+
+/* The end-to-end wake chain under the one-tick architecture: a task pinned
+ * to the LAST core sleeps in osDelay, but the tick lives on core 0 - so
+ * every wake requires tick -> xTaskIncrementTick unblock -> prvYieldCore ->
+ * yield SGI -> this core's IRQ-exit reschedule. Any broken link in that
+ * chain (SGI silently dropped, tick not delivered, run-state race) shows up
+ * as missing wakes. Five wakes at one-second spacing, all of them required,
+ * bounded by a timeout so a dead chain FAILs instead of hanging. */
+#define SMP_DELAY_WAKES		5U
+#define SMP_DELAY_PERIOD_MS	1000U
+#define SMP_DELAY_TIMEOUT_MS	((SMP_DELAY_WAKES + 3U) * SMP_DELAY_PERIOD_MS)
+
+static volatile uint32_t delay_wake_count;
+
+static void smp_delay_task(void *argument)
+{
+	(void)argument;
+
+	for (uint32_t i = 0U; i < SMP_DELAY_WAKES; i++) {
+		osDelay(SMP_DELAY_PERIOD_MS);
+		delay_wake_count++;
+		board_log("smp: delay woke on core %u, tick %u",
+			  (unsigned)board_smp_core_id(),
+			  (unsigned)osKernelGetTickCount());
+	}
+}
+
+static int smp_delay_probe(void)
+{
+	osThreadAttr_t attr = { 0 };
+
+	attr.name = "smp_delay";
+	attr.stack_size = 1024U;
+	attr.priority = osPriorityNormal;
+	attr.affinity_mask = 1U << (BOARD_SMP_CORES - 1U);
+
+	delay_wake_count = 0U;
+
+	if (osThreadNew(smp_delay_task, NULL, &attr) == NULL) {
+		board_early_print("smp: delay task create FAILED\n");
+		return -1;
+	}
+
+	{
+		uint32_t deadline = osKernelGetTickCount() +
+				    SMP_DELAY_TIMEOUT_MS;
+
+		while (delay_wake_count < SMP_DELAY_WAKES) {
+			if (osKernelGetTickCount() > deadline) {
+				board_log("smp: delay TIMEOUT, %u/%u wakes",
+					  (unsigned)delay_wake_count,
+					  (unsigned)SMP_DELAY_WAKES);
+				return -1;
+			}
+			osDelay(50U);
+		}
+	}
+
+	return 0;
+}
+
 int smp_selftest(void)
 {
 	osEventFlagsId_t done;
 	uint32_t wait_all = 0U;
 	uint32_t core;
 	uint32_t failures = 0U;
-
-	/* TEMPORARY SGI-delivery probe: ping every core, let the handlers
-	 * run, report who answered. Runs BEFORE task creation so it executes
-	 * even if the creation path wedges. */
-	{
-		extern volatile unsigned int uxPortSGIHits[BOARD_SMP_CORES];
-
-		board_log("smp: sending yield SGI to all cores");
-		board_gicv3_send_sgi(BOARD_SMP_YIELD_INTID,
-				     (1U << BOARD_SMP_CORES) - 1U);
-		osDelay(100U);
-		board_log("smp: sgi hits %u/%u/%u/%u",
-			  (unsigned)uxPortSGIHits[0],
-			  (unsigned)uxPortSGIHits[1],
-			  (unsigned)uxPortSGIHits[2],
-			  (unsigned)uxPortSGIHits[3]);
-	}
 
 	done = osEventFlagsNew(NULL);
 	if (done == NULL) {
@@ -150,21 +197,6 @@ int smp_selftest(void)
 	board_log("smp: %u tasks created, waiting for completion",
 		  (unsigned)BOARD_SMP_CORES);
 
-	/* TEMPORARY SGI-delivery probe: ping every core, let the handlers
-	 * run, report who answered. */
-	{
-		extern volatile unsigned int uxPortSGIHits[BOARD_SMP_CORES];
-
-		board_gicv3_send_sgi(BOARD_SMP_YIELD_INTID,
-				     (1U << BOARD_SMP_CORES) - 1U);
-		osDelay(100U);
-		board_log("smp: sgi hits %u/%u/%u/%u",
-			  (unsigned)uxPortSGIHits[0],
-			  (unsigned)uxPortSGIHits[1],
-			  (unsigned)uxPortSGIHits[2],
-			  (unsigned)uxPortSGIHits[3]);
-	}
-
 	{
 		uint32_t flags = osEventFlagsWait(done, wait_all,
 						  osFlagsWaitAll,
@@ -200,6 +232,15 @@ int smp_selftest(void)
 		if (bad != 0U || sample_count[core] != SMP_TEST_SAMPLES) {
 			failures++;
 		}
+	}
+
+	/* Phase 2: the cross-core wake chain (see smp_delay_probe). */
+	if (smp_delay_probe() != 0) {
+		failures++;
+	} else {
+		board_log("smp: delay probe %u/%u wakes OK",
+			  (unsigned)SMP_DELAY_WAKES,
+			  (unsigned)SMP_DELAY_WAKES);
 	}
 
 	return (failures == 0U) ? 0 : -1;

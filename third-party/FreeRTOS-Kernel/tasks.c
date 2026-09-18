@@ -361,8 +361,16 @@
             /* Request other core to yield if it is not requested before. */                 \
             if( pxCurrentTCBs[ ( xCoreID ) ]->xTaskRunState != taskTASK_SCHEDULED_TO_YIELD ) \
             {                                                                                \
-                portYIELD_CORE( xCoreID );                                                   \
+                /* FREERTOS_PORT: set SCHEDULED_TO_YIELD BEFORE raising the IPI.            \
+                 * Upstream order (IPI first, flag second) races the target core:            \
+                 * its yield ISR can run vTaskSwitchContext, reselect the same task and      \
+                 * clear the run state back to RUNNING before the flag store lands - the     \
+                 * late STY then has nobody to clear it and the task waits forever in        \
+                 * prvCheckForRunStateChange (observed on hardware: delayed tasks on a       \
+                 * remote core never woke). Flag-then-IPI is self-closing: an early ISR      \
+                 * clears a flag that is already set. */                                     \
                 pxCurrentTCBs[ ( xCoreID ) ]->xTaskRunState = taskTASK_SCHEDULED_TO_YIELD;   \
+                portYIELD_CORE( xCoreID );                                                   \
             }                                                                                \
         }                                                                                    \
     } while( 0 )

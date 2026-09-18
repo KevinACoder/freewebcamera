@@ -2,22 +2,24 @@
  * @file   FreeRTOSConfig.h
  * @brief  Kernel configuration for the RK3568 carrier.
  *
- * Everything here is dictated by two things: the upstream ARM_AARCH64_SRE port
- * (which has hard requirements, see below) and the board's interrupt model.
+ * Everything here is dictated by two things: the SMP port's hard requirements
+ * (see below) and the board's interrupt model. The port is the
+ * board-validated implementation transplanted from the reference SDK line
+ * (D33, IMPORT-INFO.md); its non-negotiables:
  *
- * Port requirements that are NOT optional:
  *  - configSETUP_TICK_INTERRUPT() must be defined; port.c #errors without it.
+ *  - configINTERRUPT_CONTROLLER_BASE_ADDRESS / _CPU_INTERFACE_OFFSET are
+ *    compile-time checked (the SRE-style port drives the GIC through system
+ *    registers, so the values are documentation + a guard, not MMIO).
  *  - configMAX_API_CALL_INTERRUPT_PRIORITY must be defined, non-zero, <=
  *    configUNIQUE_INTERRUPT_PRIORITIES, and strictly greater than half of it.
- *    port.c rejects several combinations at compile time.
  *  - configUNIQUE_INTERRUPT_PRIORITIES == 16 selects portPRIORITY_SHIFT == 4,
  *    which is what this GIC-600 implements (4 priority bits, 16 levels).
  *
- * The priority numbers are raw hardware values. The tick must run at the
- * lowest usable priority: FreeRTOS_Tick_Handler asserts that the running
- * priority equals portLOWEST_USABLE_INTERRUPT_PRIORITY, so a tick at any other
- * priority trips the assertion. Any interrupt that calls a FromISR API must be
- * configured at configMAX_API_CALL_INTERRUPT_PRIORITY instead, or
+ * The priority numbers follow the board's policy (board.h) and the reference
+ * line's board-validated values: the tick at 13, the API-call ceiling at 15.
+ * Any interrupt that calls a FromISR API must be configured at
+ * configMAX_API_CALL_INTERRUPT_PRIORITY or higher numerically, or
  * vPortValidateInterruptPriority fires.
  */
 
@@ -39,26 +41,37 @@
 
 /* --- SMP ------------------------------------------------------------------ */
 
-/* Four A55 cores, one cluster. The port (portmacro.h / port_smp.c /
- * portasm_smp.S in this directory) implements everything the kernel demands
- * when configNUMBER_OF_CORES > 1: core id, cross-core yield, kernel locks,
- * per-core nesting. SMP_CORES is overridable from the make command line so a
- * single-core comparison image is one build flag away (make SMP_CORES=1);
- * the port's portNUM_CORES is pinned to the same board constant, so kernel
- * and port cannot disagree. */
-#ifndef SMP_CORES
-#define SMP_CORES				4
-#endif
+/* Four A55 cores, one cluster. The port (port.c / portmacro.h /
+ * portasm_smp.S in this directory, transplanted from the board-validated
+ * reference line) implements everything the kernel demands when
+ * configNUMBER_OF_CORES > 1: core id, cross-core yield, MCS kernel locks,
+ * per-core nesting. SMP_CORES arrives from the Makefile (-DSMP_CORES, the
+ * single source of truth is board_conf.h) so `make SMP_CORES=1` builds a
+ * real single-core comparator image. */
 #define configNUMBER_OF_CORES			SMP_CORES
+/* V11.3 kernel: affinity APIs exist only when there is more than one core
+ * (FreeRTOS.h #errors on the single-core combination). */
+#if SMP_CORES > 1
 #define configUSE_CORE_AFFINITY			1
+#endif
 
-/* Only tasks of EQUAL priority may run simultaneously on different cores.
- * With this off (1), a high-priority task and a low-priority task can be
- * scheduled side by side; keeping it at 0 makes cross-core behaviour
- * deterministic and the system behave like the single-core priority model,
- * just wider wherever same-priority work exists. Revisit after the SMP
- * milestone settles (port_smp.c documents the trade-off). */
-#define configRUN_MULTIPLE_PRIORITIES		0
+/* Pin each core's idle task to its own core. Without this the idles are
+ * created unpinned and migrate: prvYieldCore then marks a FOREIGN core's
+ * idle SCHEDULED_TO_YIELD while the scheduler waits for the owning core to
+ * switch it, and the per-core bookkeeping (idle on the wrong core, runstate
+ * never clearing) wedges the whole machine a few seconds into any multi-core
+ * run - observed as "all anchors OK, then every core parks in its idle with
+ * the test tasks never scheduled". */
+#define configIDLE_AFFINITY			1
+
+/* Cross-priority co-residency. This MUST be 1 on this board: with 0, a core
+ * whose only runnable pinned task sits below the GLOBAL highest ready
+ * priority may not schedule anything (not even down to idle under the same
+ * rule), never re-selects, and never sends or consumes a cross-core yield -
+ * a delay task on such a core never wakes. Proven on the reference SMP line
+ * (its "轮 17" fix) with a bound delayed task + busy task pair: 0 deadlocks
+ * within seconds, 1 runs stable for hours. */
+#define configRUN_MULTIPLE_PRIORITIES		1
 
 #define configCPU_CLOCK_HZ			24000000UL
 #define configTICK_RATE_HZ			1000U
@@ -131,15 +144,32 @@
 #define configUNIQUE_INTERRUPT_PRIORITIES	16
 
 /* Interrupts at or below (numerically) this level may call FromISR APIs.
- * Derived from the board's policy so the two cannot disagree. */
+ * Derived from the board's policy so the two cannot disagree: 14, the
+ * highest SIGNABLE level on this GIC (15 is not signable - see board.h for
+ * the four-bit-PMR arithmetic and the board boot that proved it). Every
+ * FromISR driver (console, GMAC, ITS LPIs) sits at exactly this level. */
 #define configMAX_API_CALL_INTERRUPT_PRIORITY	BOARD_IRQ_PRIORITY_API_CALL
 
-/* configKERNEL_INTERRUPT_PRIORITY is deliberately NOT defined. It is a
- * Cortex-M/R-style setting that this AArch64 SRE port never reads (grep the
- * port directory: zero uses) - the tick's priority reaches the hardware
- * through configSETUP_TICK_INTERRUPT below and the board's own
- * BOARD_IRQ_PRIORITY_TICK_RAW. Defining it here would look authoritative while
- * having no effect, which is exactly the kind of setting worth not having. */
+/* The tick's logical priority, also board policy (BOARD_IRQ_PRIORITY_TICK).
+ * The port passes configKERNEL_INTERRUPT_PRIORITY semantics through the
+ * board's tick setup (tick.c programs the raw byte); kept defined so the
+ * kernel-port contract is visible in one place. */
+#define configKERNEL_INTERRUPT_PRIORITY		BOARD_IRQ_PRIORITY_TICK
+
+/* The port's compile-time guard wants the controller's coordinates; on this
+ * system-register-interface port they are never dereferenced. */
+#define configINTERRUPT_CONTROLLER_BASE_ADDRESS	BOARD_GICD_BASE
+#define configINTERRUPT_CONTROLLER_CPU_INTERFACE_OFFSET	0x2000UL
+
+/* FPU context policy of the port's initial stack frame: 1 = tasks start
+ * without FP context and must call vPortTaskUsesFPU() first (the build is
+ * -mgeneral-regs-only, so nothing ever will - the flag just fixes the frame
+ * shape). */
+#define configUSE_TASK_FPU_SUPPORT		1
+
+/* The kernel keeps the critical-section nesting count in the TCB (one field
+ * per task, indexed through pxCurrentTCBs[core]). */
+#define portCRITICAL_NESTING_IN_TCB		1
 
 /* --- the port's required hooks -------------------------------------------- */
 
@@ -150,17 +180,14 @@ void board_tick_port_setup(void);
 void OS_Tick_AcknowledgeIRQ(void);
 
 /* Called from xPortStartScheduler to arm the tick. Implemented in
- * port/adapters/freertos/port_glue.c, which drives the board's CNTV/INTID 27
- * through OS_Tick_Setup. */
+ * port/adapters/freertos/port_glue.c, which drives the board's selected
+ * tick timer through OS_Tick_Setup (CNTV/INTID 27 single-core,
+ * CNTPNS/INTID 30 under SMP - see board_conf.h). */
 #define configSETUP_TICK_INTERRUPT() \
 	board_tick_port_setup()
 
 #define configCLEAR_TICK_INTERRUPT() \
 	OS_Tick_AcknowledgeIRQ()
-
-/* The port's IRQ entry reads ICC_IAR1_EL1 and then calls this with the INTID;
- * the port performs the EOI itself. */
-void vApplicationIRQHandler(uint32_t ulICCAck);
 
 /* Declared rather than included: this header is consumed by FreeRTOS.h before
  * task.h is available, so pulling in task.h here would be circular. */

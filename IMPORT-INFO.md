@@ -7,9 +7,21 @@ adaptation lives outside the vendored tree (in `port/adapters/`, `hal/`,
 Registering a component and creating its `port/adapters/<component>/`
 directory are the same act — a component without an adapter is unfinished.
 
+**Registered local deviations from byte-identical** (clean-room §4.1:
+minimal, marked `FREERTOS_PORT:` at the site, registered here and in
+`docs/imports.md` in the same commit):
+
+| Component | File | Deviation | Why |
+|---|---|---|---|
+| FreeRTOS-Kernel V11.3.1 | `tasks.c` `prvYieldCore` | Two statements swapped: `xTaskRunState = taskTASK_SCHEDULED_TO_YIELD` now executes **before** `portYIELD_CORE()`, with an inline `FREERTOS_PORT:` comment. | Upstream order raises the cross-core IPI first; the target core's yield ISR can reselect the same task and clear the run state to RUNNING before the flag store lands, leaving the late flag with nobody to clear it — the task then waits forever in `prvCheckForRunStateChange`. Observed on hardware (pinned delayed tasks never woke; the reference SMP line carries the identical fix). |
+| port (transplanted SMP port) | `port.c` `ullCriticalNesting[]` | SMP array seeded 0 (reference: 9999). | Vestigial under the SMP kernel (nesting lives in the TCB); 9999 makes the asm restore path park ICC_PMR at the API level forever, starving FromISR drivers that sit at that level. |
+| port (transplanted SMP port) | `port.c` `uxPortSetInterruptMask` / `portUMASK_INTERRUPT` | No blind `portENABLE_INTERRUPTS`/DAIFCLR; caller's DAIF saved and restored exactly. | FromISR paths enter with IRQs masked by exception entry; a blind re-enable lets level-triggered lines nest into their own critical section (the wip/smp-qemu line carried and board-proved the same fix). |
+| port (transplanted SMP port) | `port.c` `icc_rpr_read` | ICC_RPR_EL1 encoded `s3_0_c12_c11_3`. | First draft used `s3_0_c12_c8_0` = ICC_IAR0 (Group 0); an NS EL1 read traps to EL3 and OP-TEE's unexpected-trap path resets the machine silently. Board-proven (5-round freeze root cause). |
+| board | `gicv3.c` `board_gicv3_send_sgi` | SGI1R encoded `s3_0_c12_c11_5` (was `_6` = ICC_ASGI1R). | Per ARM IHI 0069 and the standalone reference tree's GIC header; ASGI1R has a different targeting semantic. |
+
 | Component | Upstream source | Revision | Version | License | Vendored at | Used for |
 |---|---|---|---|---|---|---|
-| FreeRTOS-Kernel | `github.com/FreeRTOS/FreeRTOS-Kernel` | `3a22924e0a9ddbbc8b0758881c33b3422a5cc20d` | V11.3.1 | MIT | `third-party/FreeRTOS-Kernel/` | Kernel. M0 compiled the upstream single-core `portable/GCC/ARM_AARCH64_SRE` port directly; since SMP that port is out of the build (still vendored byte-identical) and the project-owned SMP port — `port/adapters/freertos/{portmacro.h,port_smp.c,portasm_smp.S}`, derived from that same MIT port and registered in `docs/imports.md` §1.1 — is what compiles. |
+| FreeRTOS-Kernel | `github.com/FreeRTOS/FreeRTOS-Kernel` | `3a22924e0a9ddbbc8b0758881c33b3422a5cc20d` | V11.3.1 | MIT | `third-party/FreeRTOS-Kernel/` | Kernel. M0 compiled the upstream single-core `portable/GCC/ARM_AARCH64_SRE` port directly; since D33 the compiles-come-from port is the transplanted SMP port (`port/adapters/freertos/{portmacro.h,port.c,portasm_smp.S,port_vectors.S}`, logic-faithful from the board-validated reference SDK line, registered in `docs/imports.md` §1.1 with the deviation table above). Both the single-core SRE port and the retired project-owned SMP port remain in git history only. |
 | CMSIS_6 | `github.com/ARM-software/CMSIS_6` | `26206e47dcf0abfbdc64eb753a0b6334b24439f6` | v6.3.1-dev-32 | Apache-2.0 | `third-party/cmsis/` | Interface layer: `RTOS2/Include/cmsis_os2.h` + `os_tick.h`, `Driver/Include/Driver_*.h` (18), `Core/Include/a-profile/irq_ctrl.h` |
 | CherrySH | `github.com/cherry-embedded/CherrySH` | `8efe539c6e55b71d2f2cd1116cd00c4d64222a67` | v1.0.1-20 | Apache-2.0 | `third-party/cherrysh/` | Interactive shell |
 | CherryRB | `github.com/cherry-embedded/CherryRB` | `19ea7c6efcf19dc9e805a0a662212533ee5b1edb` | v1.0.0 | Apache-2.0 | `third-party/cherryrb/` | Ring buffer (console input; later UVC/network/storage streams) |
