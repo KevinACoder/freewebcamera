@@ -468,13 +468,11 @@ static int32_t usart_receive(void *data, uint32_t num)
  * data or the FIFO timeout, both handled below. So an unexpected
  * identification means the line we are on belongs to something else, and
  * because that something keeps asserting, returning without clearing would
- * livelock the core. Instead the handler counts the hits and, after a few,
- * moves the console to the fallback INTID (66 - the number the lab's
- * FreeBSD logs reported for this base address) with the same handler ->
- * priority -> state -> drain -> IER -> enable sequence as rx_start. One
- * rebind, ever: if the fallback storms the same way it is simply disabled
- * and the console goes receive-dead with the evidence in the log. */
-#define CONSOLE_INTID_FALLBACK	66U
+ * livelock the core. The handler counts the hits and, after a few, disables
+ * the console INTID and logs the fact - and that is ALL it does. It never
+ * moves the console to another INTID: an earlier revision rebounded to 66,
+ * which is dead on this board (board_conf.h), and turned "noisy line" into
+ * "deaf console" with nothing but a log line to show for it. */
 #define CONSOLE_BADHIT_LIMIT	5U
 
 void usart_rx_irq_handler(void)
@@ -515,16 +513,20 @@ void usart_rx_irq_handler(void)
 		if ((++unexpected_reports >= CONSOLE_BADHIT_LIMIT) &&
 		    (rebound == 0U)) {
 			rebound = 1U;
+			/* Storm defence, nothing more: disable the asserting
+			 * line so it cannot livelock the core, and leave the
+			 * evidence. An earlier revision rebounded RX to the
+			 * fallback INTID 66 here - 66 is DEAD on this board
+			 * (board_conf.h: a brief earlier attempt at 66
+			 * delivered nothing), so the rebind silently deafened
+			 * the shell while looking like progress. Console RX
+			 * stays on BOARD_CONSOLE_INTID, full stop. */
 			(void)IRQ_Disable((IRQn_ID_t)intid);
 			uart_early_puts("[uart] line asserts without RX data;"
-					" moving console RX to intid ");
-			uart_early_put_u32(CONSOLE_INTID_FALLBACK);
+					" console RX disabled on intid ");
+			uart_early_put_u32(intid);
 			uart_early_puts("\n");
-			console_intid = CONSOLE_INTID_FALLBACK;
-			if (usart_rx_start() != ARM_DRIVER_OK) {
-				reg_write(REG_IER, 0x00u);
-				rx_active = 0u;
-			}
+			rx_active = 0u;
 		}
 		return;
 	}

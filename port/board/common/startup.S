@@ -215,6 +215,10 @@ boot_sync_fault:
 	bl	uart_early_puts
 	mrs	x0, far_el1
 	bl	uart_early_put_hex32
+	ldr	x0, =msg_elr
+	bl	uart_early_puts
+	mrs	x0, elr_el1
+	bl	uart_early_put_hex32
 	ldr	x0, =msg_newline
 	bl	uart_early_puts
 	b	boot_fault_common
@@ -250,4 +254,5 @@ msg_fiq:	.asciz	"\n[carrier] FAULT: FIQ\n"
 msg_serr:	.asciz	"\n[carrier] FAULT: SError\n"
 msg_esr:	.asciz	"[fault] ESR_EL1="
 msg_far:	.asciz	" FAR_EL1="
+msg_elr:	.asciz	" ELR_EL1="
 msg_newline:	.asciz	"\n"

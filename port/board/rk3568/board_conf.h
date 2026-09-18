@@ -17,6 +17,25 @@
 #ifndef FREEWEBCAMERA_RK3568_BOARD_CONF_H
 #define FREEWEBCAMERA_RK3568_BOARD_CONF_H
 
+/* --- core count (defined FIRST: the tick selection below keys off it) ----- */
+
+/* HOW MANY CORES THIS IMAGE RUNS ON, and where the number comes from.
+ *
+ * Single source of truth: the SMP_CORES make flag (Makefile passes
+ * -DSMP_CORES=$(SMP_CORES); default 4). Every consumer derives from it -
+ * the kernel's configNUMBER_OF_CORES, the port's portNUM_CORES, the app's
+ * task fan-out and this file's tick selection - so a `make SMP_CORES=1`
+ * comparator image really is single-core everywhere. An earlier layout
+ * pinned BOARD_SMP_CORES to a literal 4 here and never forwarded the make
+ * flag to the compiler, so the "single-core comparator" silently built
+ * four-core. */
+#ifndef SMP_CORES
+#define SMP_CORES		4
+#endif
+/* No cast here: this macro is evaluated in #if directives (the tick
+ * selection below), and the preprocessor rejects C casts. */
+#define BOARD_SMP_CORES		(SMP_CORES)
+
 /* --- register bases ------------------------------------------------------- */
 
 #define BOARD_UART2_BASE	0xfe660000UL	/* console UART2 */
@@ -48,15 +67,31 @@
  * number. */
 #define BOARD_CONSOLE_INTID	150U
 
-/* Tick source: the EL1 virtual timer (CNTV), INTID 27.
+/* Tick source, selected by core count.
  *
- * Not the physical timer, despite that being the obvious choice. On this
- * board OP-TEE claims the physical timer as a Group 0 interrupt that
- * non-secure code cannot enable, and the EL2 physical timer is unreachable
- * because the `go` boot path leaves CNTHCTL_EL2.EL1PCEN=0. The virtual timer
- * is the one that works, measured: writing CNTV_TVAL raises GICR_ISPENDR0
- * bit 27 and INTID 27 arrives. */
-#define BOARD_TICK_INTID	27U
+ * SINGLE-CORE (BOARD_SMP_CORES == 1): the EL1 virtual timer (CNTV), INTID
+ * 27. Measured on this board: writing CNTV_TVAL raises GICR_ISPENDR0 bit 27
+ * and INTID 27 arrives - the M0..M4 acceptance baseline, unchanged.
+ *
+ * SMP (BOARD_SMP_CORES > 1): the EL1 NON-SECURE PHYSICAL timer (CNTPNS),
+ * INTID 30 - NOT PPI 29, which is the SECURE physical timer (CNTPS) that
+ * OP-TEE holds as Group 0. The virtual timer's line is enabled and pends
+ * correctly under SMP, but the GIC never delivers it to the boot core
+ * (enabled+pending forever, reproducible, SMP-mode-specific - the reference
+ * SMP line spent rounds 0-10 excluding every other theory on this exact
+ * board). CNTPNS/PPI30 delivers, and the same line has run for weeks as the
+ * RTEMS BSP's tick. Access from EL1 is legal: startup.S's EL2 descent sets
+ * CNTHCTL_EL2.EL1PCTEN|EL1PCEN (an earlier comment here claimed the `go`
+ * path leaves EL1PCEN clear - falsified; our own startup sets it before any
+ * EL1 code runs).
+ *
+ * The timer line is level-triggered in either case; rearming = rewriting the
+ * TVAL register (see tick.c). */
+#if BOARD_SMP_CORES > 1
+#define BOARD_TICK_INTID	30U	/* CNTPNS */
+#else
+#define BOARD_TICK_INTID	27U	/* CNTV */
+#endif
 
 /* GIC-600 redistributor frame stride. A redistributor is a pair of 64KiB
  * frames (RD_base + the paired vLPI frame), so consecutive cores' RD_base
@@ -66,6 +101,9 @@
 #define BOARD_GICR_STRIDE	0x20000UL
 
 /* --- SMP: core numbering and PSCI ------------------------------------------ */
+
+/* The core COUNT is BOARD_SMP_CORES, defined at the top of this file from
+ * the SMP_CORES make flag (the tick selection above keys off it). */
 
 /* HOW A CORE'S LOGICAL NUMBER IS EXTRACTED FROM MPIDR_EL1.
  *

@@ -108,7 +108,16 @@
 
 /* Macro to unmask all interrupt priorities. Named differently from the
  * kernel-contract portCLEAR_INTERRUPT_MASK(x) in portmacro.h, which is a
- * save/restore-style call - this one is the bare PMR primitive underneath. */
+ * save/restore-style call - this one is the bare PMR primitive underneath.
+ *
+ * NO DAIF manipulation here. The upstream single-core port ends this
+ * sequence with "enable interrupts", which is correct for its design (the
+ * PMR, not DAIF, is the ISR masking mechanism there). This port inverts
+ * that: critical sections and ISRs hold DAIF masked for their whole body,
+ * so clearing DAIF.I here would let a tick or SGI nest on top of a context
+ * that holds the kernel locks - the exact deadlock that froze both boards
+ * (tick frame nested under vTaskSwitchContext, spinning on the ISR lock its
+ * own interrupted context held). */
 /* s3_0_c4_c6_0 is ICC_PMR_EL1. */
 #define portPMR_UNMASK_ALL()                           \
     {                                                  \
@@ -116,9 +125,6 @@
                          "DSB SY                 \n"   \
                          "ISB SY                 \n"   \
                          "MSR s3_0_c4_c6_0, %0   \n"   \
-                         "DSB SY                 \n"   \
-                         "ISB SY                 \n"   \
-                         "MSR DAIFCLR, #2        \n"   \
                          "DSB SY                 \n"   \
                          "ISB SY                 \n"   \
                          ::"r" ( portUNMASK_VALUE ) ); \
@@ -173,15 +179,38 @@ __attribute__( ( used ) ) const uint64_t ullMaxAPIPriorityMask = ( configMAX_API
 
 /*-----------------------------------------------------------*/
 
-/* --- kernel locks: two global spinlocks ----------------------------------- */
+/* --- kernel locks: two global RECURSIVE spinlocks ------------------------- */
 
-static volatile unsigned int task_lock_held;
-static volatile unsigned int isr_lock_held;
+/* The kernel's SMP design requires these locks to be re-entrant by the
+ * OWNING core, not plain spinlocks. The stock paths take the task lock
+ * twice in a row from one task - vTaskSuspendAll() holds it across the
+ * suspended region, and vQueueWaitForMessageRestricted() (the timer task's
+ * block) then enters a critical section, which takes it again. With a
+ * non-recursive lock that is the timer task deadlocking against itself the
+ * first time the timer queue goes empty - which is the first time the
+ * timer task blocks, a second or two into every boot. The kernel's own
+ * reference SMP ports are recursive for exactly this reason
+ * (vPortRecursiveLock in the IAR CM55_NTZ port that ships in the vendored
+ * tree).
+ *
+ * Ownership is the CORE id, and re-entry is only ever same-context: a task
+ * re-taking the task lock (interrupts are masked around both takes, so no
+ * interrupt can interleave), or ISR paths that never nest (DAIF stays
+ * masked from exception entry). The exclusion word keeps the LDAXR/STXR
+ * shape - written in assembly because __atomic_test_and_set calls into
+ * libatomic, which does not exist in a -nostdlib image. */
 
-/* Written in assembly on purpose: __atomic_test_and_set on a 4-byte object
- * compiles to a call into libatomic (undefined in a -nostdlib image), while
- * the LDAXR/STXR pair is two instructions and needs no runtime. Returns 0
- * when the lock was taken. */
+typedef struct smp_rlock
+{
+    volatile unsigned int locked;   /* exclusion word: 0 = free */
+    volatile uint64_t owner;        /* core id of the holder when locked */
+    volatile unsigned int count;    /* recursion depth */
+} smp_rlock_t;
+
+static smp_rlock_t task_lock = { 0u, 0xffffffffffffffffULL, 0u };
+static smp_rlock_t isr_lock = { 0u, 0xffffffffffffffffULL, 0u };
+
+/* Returns 0 when the exclusion word was taken. */
 static inline unsigned int smp_lock_try( volatile unsigned int * lock )
 {
     unsigned int status;
@@ -199,42 +228,75 @@ static inline unsigned int smp_lock_try( volatile unsigned int * lock )
     return status;
 }
 
-static void smp_lock_acquire( volatile unsigned int * lock )
+static void smp_rlock_acquire( smp_rlock_t * lock )
 {
-    while( smp_lock_try( lock ) != 0u )
+    uint64_t core = ( uint64_t ) portGET_CORE_ID();
+
+    for( ; ; )
     {
+        if( smp_lock_try( &lock->locked ) == 0u )
+        {
+            /* Won the exclusion race: become the owner at depth 1. */
+            lock->owner = core;
+            lock->count = 1u;
+            __asm volatile ( "dsb sy" ::: "memory" );
+            return;
+        }
+
+        if( lock->owner == core )
+        {
+            /* Re-entry by the owner (the vTaskSuspendAll / critical-section
+             * nesting above). Only the owner ever writes count while it
+             * holds the lock, so the increment needs no exclusion. */
+            lock->count++;
+            __asm volatile ( "dsb sy" ::: "memory" );
+            return;
+        }
+
+        /* Another core holds it: wait. WFE with SEV on release - there is
+         * always a live interrupt (tick or SGI) on a running system to
+         * recover a lost event, and while the scheduler is up the holder
+         * cannot stay silent forever because the lock is never held
+         * across a block. */
         do
         {
             __asm volatile ( "wfe" ::: "memory" );
-        } while( *lock != 0u );
+        } while( lock->locked != 0u );
     }
 }
 
-static void smp_lock_release( volatile unsigned int * lock )
+static void smp_rlock_release( smp_rlock_t * lock )
 {
-    /* STLR: store with release semantics, the pairing half of LDAXR. */
-    __asm volatile ( "stlr %w1, %0" : "=Q" ( *lock ) : "r" ( 0u ) : "memory" );
-    __asm volatile ( "sev" ::: "memory" );
+    /* The releaser is always the owner: the kernel pairs get/release
+     * within one task or ISR body. Dropping the last reference is what
+     * hands the lock over. */
+    if( --lock->count == 0u )
+    {
+        lock->owner = 0xffffffffffffffffULL;
+        /* STLR: store with release semantics, the pairing half of LDAXR. */
+        __asm volatile ( "stlr %w1, %0" : "=Q" ( lock->locked ) : "r" ( 0u ) : "memory" );
+        __asm volatile ( "sev" ::: "memory" );
+    }
 }
 
 void uxPortTaskLock( void )
 {
-    smp_lock_acquire( &task_lock_held );
+    smp_rlock_acquire( &task_lock );
 }
 
 void uxPortTaskUnlock( void )
 {
-    smp_lock_release( &task_lock_held );
+    smp_rlock_release( &task_lock );
 }
 
 void uxPortISRLock( void )
 {
-    smp_lock_acquire( &isr_lock_held );
+    smp_rlock_acquire( &isr_lock );
 }
 
 void uxPortISRUnlock( void )
 {
-    smp_lock_release( &isr_lock_held );
+    smp_rlock_release( &isr_lock );
 }
 
 /*-----------------------------------------------------------*/
@@ -339,11 +401,15 @@ StackType_t * pxPortInitialiseStack( StackType_t * pxTopOfStack,
 }
 /*-----------------------------------------------------------*/
 
+/* TEMPORARY bring-up probe: per-core count of yield-SGI entries. */
+volatile unsigned int uxPortSGIHits[ portNUM_CORES ];
+
 static void uxPortYieldSGIHandler( void )
 {
     /* Runs above the API-call priority and therefore must not (and does
      * not) call a kernel API: pending the switch on this core is the whole
      * job. The actual switch happens on IRQ exit, in the asm. */
+    uxPortSGIHits[ portGET_CORE_ID() ]++;
     portEND_SWITCHING_ISR( pdTRUE );
 }
 
@@ -494,14 +560,18 @@ void FreeRTOS_Tick_Handler( void )
      * section below. */
     configCLEAR_TICK_INTERRUPT();
 
-    /* The kernel does not lock inside xTaskIncrementTick - taking the ISR
-     * lock around it is the port's contract. Interrupts stay fully masked
-     * for the whole handler (no mid-handler re-enable like the single-core
-     * port), so a nested ISR can never attempt to take this lock on this
-     * core while it is held. Other cores' FromISR callers block on the lock
-     * for the (few) instructions the increment takes. */
-    uxPortISRLock();
+    /* The kernel does not lock inside xTaskIncrementTick - wrapping it in
+     * the FROM_ISR critical section is the port's contract, and it must be
+     * the CRITICAL SECTION, not a bare ISR lock: prvYieldForTask (which
+     * xTaskIncrementTick reaches through the yield paths) asserts that the
+     * calling core's critical nesting count is positive. The
+     * kernel-replacement reference ports do exactly this - see the
+     * CM23/CM55 SysTick_Handler in the vendored tree. Interrupts stay fully
+     * masked for the whole handler; other cores' FromISR callers block on
+     * the ISR lock for the (few) instructions the increment takes. */
     {
+        UBaseType_t uxSavedInterruptStatus = portENTER_CRITICAL_FROM_ISR();
+
         /* Increment the RTOS tick. A true return pends the switch on THIS
          * core; other cores are reached through the kernel's prvYieldCore,
          * which sends them the yield SGI. */
@@ -509,8 +579,9 @@ void FreeRTOS_Tick_Handler( void )
         {
             ullPortYieldRequired[ xCoreID ] = ( uint64_t ) pdTRUE;
         }
+
+        portEXIT_CRITICAL_FROM_ISR( uxSavedInterruptStatus );
     }
-    uxPortISRUnlock();
 }
 /*-----------------------------------------------------------*/
 
@@ -562,7 +633,11 @@ UBaseType_t uxPortSetInterruptMask( void )
                          ::"r" ( configMAX_API_CALL_INTERRUPT_PRIORITY << portPRIORITY_SHIFT ) : "memory" );
     }
 
-    portENABLE_INTERRUPTS();
+    /* Deliberately NO portENABLE_INTERRUPTS() here, unlike the single-core
+     * upstream this was derived from: DAIF.I stays exactly as the caller
+     * left it. In this port ISRs run with DAIF masked for their whole body;
+     * re-enabling here let an interrupt nest on a context holding the
+     * kernel locks (see the portPMR_UNMASK_ALL note). */
 
     return ulReturn;
 }

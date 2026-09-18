@@ -81,12 +81,12 @@ void board_main(void);
 
 /* --- early output --------------------------------------------------------- */
 
-/* Fatal bring-up failures are reported here. Installed by the console driver
- * once output is possible; before that it is a no-op, which is the correct
- * default (writing to an unprogrammed UART looks like a working console that
- * prints nothing). */
-extern void (*board_early_print_hook)(const char *message);
-
+/* Fatal bring-up failures and driver probe reports go through
+ * board_early_print / board_log, which write on the POLLED early UART
+ * (startup.S's uart_early_puts) under a per-line spinlock. They never block
+ * and are safe from any context, on any core. App console output uses the
+ * CMSIS console driver instead (console_print); the two sinks may interleave
+ * on the wire, which is cosmetic. */
 void board_early_print(const char *message);
 
 /* Same sink, formatted. Drivers that report what they found (register
@@ -127,12 +127,14 @@ void board_gicv3_dispatch(uint32_t intid);
 
 /* --- tick ----------------------------------------------------------------- */
 
-/* The tick INTID lives in board_conf.h (BOARD_TICK_INTID); on every board so
- * far it is the EL1 virtual timer, INTID 27 - the physical-timer alternatives
- * are firmware-hostage on real hardware, and the RK3568 story is told in that
- * board's conf. */
+/* The tick INTID lives in board_conf.h (BOARD_TICK_INTID) and is selected
+ * by core count: CNTV/INTID 27 single-core (the M0..M4 baseline),
+ * CNTPNS/INTID 30 under SMP - the virtual timer's line pends but is never
+ * delivered to the boot core in SMP mode on this board, while CNTPNS/PPI30
+ * delivers (and has run for weeks as the RTEMS BSP's tick). The full story
+ * is in that board's conf. */
 
-/* True once the virtual timer is armed and running. */
+/* True once the tick timer is armed and running. */
 bool board_tick_is_running(void);
 
 /* --- console -------------------------------------------------------------- */
@@ -147,7 +149,11 @@ bool board_tick_is_running(void);
  * declarations below are the board-independent SMP surface every board
  * provides. */
 
-#define BOARD_SMP_CORES		4U
+/* The core count (BOARD_SMP_CORES) is board_conf.h policy, derived from the
+ * SMP_CORES make flag so `make SMP_CORES=1` really builds a single-core
+ * image everywhere (kernel configNUMBER_OF_CORES, port arrays, app fan-out
+ * and the tick selection all derive from the same number). The declarations
+ * below are the board-independent SMP surface every board provides. */
 
 /* Cross-core yield interrupt: SGI 0, chosen by the kernel port (portmacro.h).
  * Declared here because the priority policy lives with the board's other
@@ -175,11 +181,13 @@ static inline uint32_t board_smp_core_id(void)
  * secondary entry point in smp_secondary.S, then wait (bounded) until each
  * core has run its GIC bring-up and reported in.
  *
- * Called from TASK context after the scheduler is running (the app's boot
- * task does it), not from the kernel port: releasing three cores while the
- * boot core is still alone in its pre-ticker window produced freezes with no
- * evidence on RK3568. This way a straggling core costs one core, not the
- * boot. */
+ * Call site follows the reference SMP line (D33): the kernel port's
+ * xPortStartScheduler invokes StartSecondaryCpuUp() on core 0 BEFORE the
+ * tick is armed, so every core is up and parked in uxPortSecondaryMain
+ * waiting for the scheduler before the first task ever runs. (An earlier
+ * arrangement released secondaries from a post-scheduler task; that was a
+ * workaround from the rounds where the port itself was broken, and is gone
+ * with it.) */
 void board_smp_start_secondaries(void);
 
 /* A secondary core calls this once its redistributor / CPU interface / SGI
@@ -222,23 +230,50 @@ void board_gicv3_send_sgi(uint32_t intid, uint32_t core_mask);
  * different hardware level and trips the port's assertions. Always pass the
  * *_RAW form to IRQ_SetPriority.
  *
- * Any interrupt that calls a FromISR API must be at API_CALL: the port asserts
- * this in vPortValidateInterruptPriority. The tick must be at TICK: the port's
- * FreeRTOS_Tick_Handler asserts the *lowest usable* level, which is one above
- * the absolute lowest, because the port reserves that for itself. Getting
- * either wrong trips an assertion at run time, which is why they are named
- * here rather than written as literals at call sites. */
+ * The three named levels are the reference SMP line's board-validated tick
+ * and SGI values (13 / 11), adopted with the port transplant (D33). The
+ * FromISR ceiling is 14, NOT the reference line's 15 - and this is not a
+ * stylistic choice:
+ *  - 15 (0xf0) is UNSIGNABLE on this GIC: only the top 4 priority bits are
+ *    implemented, ICC_PMR's implemented value therefore maxes out at 0xf,
+ *    and a GIC signals interrupts strictly numerically BELOW the PMR - a
+ *    priority-15 line can never beat the mask. (This is the same fact the
+ *    classic single-core port encoded as "tick at lowest USABLE, not 15".)
+ *    The reference line parks nothing at 15 - its device interrupts all sit
+ *    at 10-13 - so its API=15 costs it nothing; every one of OUR FromISR
+ *    drivers sits AT the API ceiling, and a board boot with API=15 left the
+ *    tick (0xd0) delivering while the console RX, GMAC, the soft-trigger
+ *    probe and every ITS LPI (all 0xf0) were silently starved.
+ *  - 14 (0xe0) is the highest signable level, so it is what FromISR callers
+ *    use; vPortValidateInterruptPriority asserts RPR >= 14 << 4 and every
+ *    driver configured with *_RAW below satisfies it exactly.
+ *  - TICK (13) is the reference line's tick level; the transplanted tick
+ *    handler carries no RPR assertion.
+ *  - SGI (11) arms SGI0 for the cross-core yield.
+ * Getting any of these wrong is silent at build time and a starvation at
+ * run time, which is why they are named here rather than written as
+ * literals at call sites.
+ *
+ * 2026-09-18 board rounds: the SDK values (tick 13 / SGI 11) combined with
+ * a FromISR ceiling of 14 reproduced a fatal board reset at the second GMAC's
+ * PHY bring-up on BOTH the 2-core and the 1-core image, where the M-line's
+ * 14 / 11 / 9 scheme never did. The scheme below is the M-line-accepted
+ * values (tick at the lowest usable level 14 - on this GIC 15 is unsignable,
+ * see the four-bit PMR arithmetic above - FromISR ceiling at 11, yield SGI
+ * above the ceiling at 9); re-derive any move away from it on the board,
+ * one variable at a time, before adopting it. */
 #define BOARD_IRQ_PRIORITY_SHIFT	4U
 #define BOARD_IRQ_PRIORITY_TICK		14U	/* lowest usable, not 15 */
 #define BOARD_IRQ_PRIORITY_API_CALL	11U
 #define BOARD_IRQ_PRIORITY_DEFAULT	10U
 
-/* The cross-core yield SGI. Above API_CALL (numerically lower) on purpose:
- * the SGI must stay deliverable while a core sits in a kernel critical
- * section with ICC_PMR narrowed to API_CALL, or cross-core preemption stalls
- * for the whole critical section. Its handler only sets a per-core "yield
- * requested" flag and never calls a kernel API, so running above the API-call
- * level breaks no port assertion. */
+/* The cross-core yield SGI (see BOARD_SMP_YIELD_INTID). Above API_CALL
+ * (numerically lower) on purpose: the SGI must stay deliverable while a
+ * core sits in a kernel critical section with ICC_PMR narrowed to
+ * API_CALL, or cross-core preemption stalls for the whole critical
+ * section. Its handler only sets a per-core "yield requested" flag and
+ * never calls a kernel API, so running above the API-call level breaks no
+ * port assertion. */
 #define BOARD_IRQ_PRIORITY_SGI		9U
 
 #define BOARD_IRQ_PRIORITY_TICK_RAW \

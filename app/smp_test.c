@@ -45,6 +45,10 @@ static uint32_t sample_count[BOARD_SMP_CORES];
 static uint32_t mismatch_count[BOARD_SMP_CORES];
 static uint32_t mismatch_mpidr[BOARD_SMP_CORES];
 
+/* TEMPORARY bring-up probes: heartbeat counters, no printing involved. */
+static volatile uint32_t task_started[BOARD_SMP_CORES];
+static volatile uint32_t task_iters[BOARD_SMP_CORES];
+
 static inline uint32_t read_mpidr(void)
 {
 	uint64_t mpidr;
@@ -59,6 +63,10 @@ static void smp_test_task(void *argument)
 	uint32_t bad = 0U;
 	uint32_t i;
 
+	task_started[core]++;
+	board_log("smp: task %u first ran on core %u",
+		  (unsigned)core, (unsigned)board_smp_core_id());
+
 	for (i = 0U; i < SMP_TEST_SAMPLES; i++) {
 		uint32_t mpidr = read_mpidr();
 
@@ -72,6 +80,7 @@ static void smp_test_task(void *argument)
 		}
 
 		if ((i & SMP_TEST_YIELD_MASK) == 0U) {
+			task_iters[core] = i;
 			osDelay(1U);
 		}
 	}
@@ -88,6 +97,23 @@ int smp_selftest(void)
 	uint32_t wait_all = 0U;
 	uint32_t core;
 	uint32_t failures = 0U;
+
+	/* TEMPORARY SGI-delivery probe: ping every core, let the handlers
+	 * run, report who answered. Runs BEFORE task creation so it executes
+	 * even if the creation path wedges. */
+	{
+		extern volatile unsigned int uxPortSGIHits[BOARD_SMP_CORES];
+
+		board_log("smp: sending yield SGI to all cores");
+		board_gicv3_send_sgi(BOARD_SMP_YIELD_INTID,
+				     (1U << BOARD_SMP_CORES) - 1U);
+		osDelay(100U);
+		board_log("smp: sgi hits %u/%u/%u/%u",
+			  (unsigned)uxPortSGIHits[0],
+			  (unsigned)uxPortSGIHits[1],
+			  (unsigned)uxPortSGIHits[2],
+			  (unsigned)uxPortSGIHits[3]);
+	}
 
 	done = osEventFlagsNew(NULL);
 	if (done == NULL) {
@@ -119,6 +145,24 @@ int smp_selftest(void)
 	if (failures != 0U) {
 		(void)osEventFlagsDelete(done);
 		return -1;
+	}
+
+	board_log("smp: %u tasks created, waiting for completion",
+		  (unsigned)BOARD_SMP_CORES);
+
+	/* TEMPORARY SGI-delivery probe: ping every core, let the handlers
+	 * run, report who answered. */
+	{
+		extern volatile unsigned int uxPortSGIHits[BOARD_SMP_CORES];
+
+		board_gicv3_send_sgi(BOARD_SMP_YIELD_INTID,
+				     (1U << BOARD_SMP_CORES) - 1U);
+		osDelay(100U);
+		board_log("smp: sgi hits %u/%u/%u/%u",
+			  (unsigned)uxPortSGIHits[0],
+			  (unsigned)uxPortSGIHits[1],
+			  (unsigned)uxPortSGIHits[2],
+			  (unsigned)uxPortSGIHits[3]);
 	}
 
 	{

@@ -223,9 +223,13 @@ static void gicr_probe_self(const char *tag)
 	}
 
 	/* Fallback: frame order. On this SoC the two mappings agree (see the
-	 * sweep above); reaching here means TYPER stopped making sense. */
-	gicr_frames[me] = (volatile uint32_t *)(uintptr_t)BOARD_GICR_BASE +
-			  (uintptr_t)me * BOARD_GICR_STRIDE;
+	 * sweep above); reaching here means TYPER stopped making sense.
+	 * INTEGER arithmetic first, pointer cast last: `ptr + n` on a
+	 * uint32_t * scales n by 4, which turned frame 2 into frame 8 the
+	 * first time this fallback ever ran. */
+	gicr_frames[me] = (volatile uint32_t *)(uintptr_t)
+			  ((uintptr_t)BOARD_GICR_BASE +
+			   (uintptr_t)me * BOARD_GICR_STRIDE);
 	if (tag == boot_tag) {
 		board_log("gicv3: core%u %s: TYPER no match, using frame"
 			  " order",
@@ -953,10 +957,22 @@ void board_gicv3_secondary_init(void)
 /* Raise a software interrupt on the cores in core_mask (bit i = logical
  * core i). This is the kernel port's cross-core yield path.
  *
- * ICC_SGI1R_EL1 (S3_0_C12_C11_6), system-register only - a GICv3 has no
- * MMIO SGI register to write. All four cores share Aff1 = Aff2 = 0 (one
- * cluster), so the TargetList field alone addresses them: bit i of [15:0]
- * is Aff0 = i. IRM = 0 means "target list", not "all PEs".
+ * ICC_SGI1R_EL1 (S3_0_C12_C11_5), system-register only - a GICv3 has no
+ * MMIO SGI register to write. Field layout per ARM IHI 0069:
+ *
+ *   TargetList [3:0]   Aff2 [7:4]   RS [15:12]   Aff1 [23:16]   Aff3 [39:32]
+ *   IRM [40] (1 = all PEs, 0 = target list)
+ *
+ * On THIS board the logical core number lives in MPIDR AFFINITY 1, not
+ * Aff0 - measured MPIDR_EL1 = 0x8100_0N00 (board_conf.h,
+ * BOARD_MPIDR_CORE_SHIFT). An earlier encoding of this function put the
+ * core mask into TargetList alone, which addresses Aff0 - and every core
+ * here has Aff0 = 0 - so an SGI aimed at cores 1..3 targeted non-existent
+ * PEs and the GIC dropped it SILENTLY: no fault, no status bit, the yield
+ * just never arrived (the reference SMP line lost days to the same class
+ * of bug, in its case Aff1 written into the Aff3 field). The encoding that
+ * works: one write per target core, Aff1 = core at bits [23:16],
+ * TargetList = 1 (bit 0 = the single core at that Aff1 value). IRM = 0.
  *
  * The DSB is what makes this correct, not decoration: the yield is often
  * sent because this core just made scheduler state (unblocked a task,
@@ -966,10 +982,23 @@ void board_gicv3_secondary_init(void)
  * before the IPI can be taken. */
 void board_gicv3_send_sgi(uint32_t intid, uint32_t core_mask)
 {
-	uint64_t sgi1r = ((uint64_t)(intid & 0x0fu) << 24) |
-			 (uint64_t)(core_mask & 0xffffu);
+	uint64_t sgi1r = ((uint64_t)(intid & 0x0fu) << 24);
 
 	__asm__ __volatile__("dsb sy" ::: "memory");
-	__asm__ __volatile__("msr s3_0_c12_c11_6, %0" ::"r"(sgi1r));
+
+	for (uint32_t core = 0u; core < 16u && core_mask != 0u; core++) {
+		if ((core_mask & (1u << core)) == 0u) {
+			continue;
+		}
+
+		/* S3_0_C12_C11_5 is ICC_SGI1R_EL1 per ARM IHI 0069 (the
+		 * board-validated standalone reference encodes the same).
+		 * An earlier encoding here used _6 - ICC_ASGI1R, a different
+		 * register with a different targeting semantic. */
+		__asm__ __volatile__("msr s3_0_c12_c11_5, %0"
+				     ::"r"(sgi1r | 0x1ull |
+					   ((uint64_t)(core & 0xffu) << 16)));
+	}
+
 	__asm__ __volatile__("isb" ::: "memory");
 }
