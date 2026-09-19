@@ -67,6 +67,13 @@
  * number. */
 #define BOARD_CONSOLE_INTID	150U
 
+/* Software-pended SPI used as the kernel-test image's IntQueue stress
+ * source (intqueue_timer.c). Same number the main image's boot probe uses
+ * (SPI_PROBE_INTID in app/main.c) for the same reason: a spare SPI in the
+ * 50s with nothing routed to it, and a soft-pend on it is board-proven.
+ * The two images never run the same code, so the number is free in each. */
+#define BOARD_KTEST_INTQ_INTID	60U
+
 /* Tick source, selected by core count.
  *
  * SINGLE-CORE (BOARD_SMP_CORES == 1): the EL1 virtual timer (CNTV), INTID

@@ -79,10 +79,14 @@ SECTIONS
 	__stack_top = .;
 
 	/* FreeRTOS heap (heap_4) grows from here; the kernel's
-	 * configTOTAL_HEAP_SIZE must not exceed __heap_size. */
+	 * configTOTAL_HEAP_SIZE must not exceed __heap_size. 4M covers the
+	 * kernel-test image's suite (~100 resident tasks; the reference line
+	 * ran the same suite with 20M); the main image's ucHeap stays at its
+	 * configured 1M - this region only bounds it, bss is NOLOAD so the
+	 * larger reservation costs nothing in the binary. */
 	. = ALIGN(16);
 	__heap_start = .;
-	. = . + 2M;
+	. = . + 4M;
 	__heap_end = .;
 
 	/DISCARD/ : {

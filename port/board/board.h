@@ -267,6 +267,15 @@ void board_gicv3_send_sgi(uint32_t intid, uint32_t core_mask);
 #define BOARD_IRQ_PRIORITY_API_CALL	11U
 #define BOARD_IRQ_PRIORITY_DEFAULT	10U
 
+/* The kernel-test image's IntQueue stress source (a software-pended SPI,
+ * board_conf.h BOARD_KTEST_INTQ_INTID). Sits between the FromISR ceiling
+ * and the tick on purpose: numerically BELOW the tick level (12 < 14) so it
+ * genuinely preempts the tick handler - the interrupt nesting the IntQueue
+ * test exists to exercise - while staying numerically ABOVE the API-call
+ * ceiling (12 > 11), which is what makes every FromISR call it performs
+ * legal under vPortValidateInterruptPriority. */
+#define BOARD_IRQ_PRIORITY_INTQ_TIMER	12U
+
 /* The cross-core yield SGI (see BOARD_SMP_YIELD_INTID). Above API_CALL
  * (numerically lower) on purpose: the SGI must stay deliverable while a
  * core sits in a kernel critical section with ICC_PMR narrowed to
@@ -284,6 +293,8 @@ void board_gicv3_send_sgi(uint32_t intid, uint32_t core_mask);
 	(BOARD_IRQ_PRIORITY_DEFAULT << BOARD_IRQ_PRIORITY_SHIFT)
 #define BOARD_IRQ_PRIORITY_SGI_RAW \
 	(BOARD_IRQ_PRIORITY_SGI << BOARD_IRQ_PRIORITY_SHIFT)
+#define BOARD_IRQ_PRIORITY_INTQ_TIMER_RAW \
+	(BOARD_IRQ_PRIORITY_INTQ_TIMER << BOARD_IRQ_PRIORITY_SHIFT)
 
 #ifdef __cplusplus
 }

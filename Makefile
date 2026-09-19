@@ -58,7 +58,9 @@ CFLAGS := -O2 -g -std=c11 -Wall -Wextra \
 	-DGUEST -DSMP_CORES=$(SMP_CORES) \
 	-Wno-unused-parameter -Wno-sign-compare
 
-LDFLAGS := -nostdlib -static -T port/board/$(BOARD)/$(BOARD).ld \
+# Recursively expanded so the -Map name follows TARGET when the KTEST=1
+# block below re-points it at the ktest image.
+LDFLAGS = -nostdlib -static -T port/board/$(BOARD)/$(BOARD).ld \
 	-Wl,--build-id=none -Wl,--no-warn-rwx-segments -Wl,-Map=$(TARGET).map
 
 # --- include paths --------------------------------------------------------
@@ -76,6 +78,8 @@ INC_COMMON := -Iinclude -Iport/board -Iport/board/common -Iport/board/$(BOARD)
 # the single-core portmacro.h would silently compile the wrong kernel.
 INC_ADAPTER := -Ithird-party/FreeRTOS-Kernel/include \
 	-Iport/adapters/freertos \
+	-Iport/adapters/freertos/tests \
+	-Iport/adapters/freertos/tests/include \
 	-Iport/adapters/cmsis_rtos2 \
 	-Iport/adapters/cherrysh \
 	-Ithird-party/cherrysh \
@@ -236,6 +240,68 @@ APP_SRCS := \
 	app/main.c \
 	app/smp_test.c
 
+# Kernel test suite (official FreeRTOS TestRunner + Common/Minimal files,
+# see port/adapters/freertos/tests/ and IMPORT-INFO.md). Only the ktest
+# image links these; the main image neither compiles nor links them.
+TEST_SRCS := \
+	port/adapters/freertos/tests/test_runner.c \
+	port/adapters/freertos/tests/intqueue_timer.c \
+	port/adapters/freertos/tests/ktest_support.c \
+	port/adapters/freertos/tests/minimal/BlockQ.c \
+	port/adapters/freertos/tests/minimal/GenQTest.c \
+	port/adapters/freertos/tests/minimal/PollQ.c \
+	port/adapters/freertos/tests/minimal/QPeek.c \
+	port/adapters/freertos/tests/minimal/QueueOverwrite.c \
+	port/adapters/freertos/tests/minimal/QueueSet.c \
+	port/adapters/freertos/tests/minimal/QueueSetPolling.c \
+	port/adapters/freertos/tests/minimal/AbortDelay.c \
+	port/adapters/freertos/tests/minimal/blocktim.c \
+	port/adapters/freertos/tests/minimal/countsem.c \
+	port/adapters/freertos/tests/minimal/death.c \
+	port/adapters/freertos/tests/minimal/dynamic.c \
+	port/adapters/freertos/tests/minimal/integer.c \
+	port/adapters/freertos/tests/minimal/recmutex.c \
+	port/adapters/freertos/tests/minimal/semtest.c \
+	port/adapters/freertos/tests/minimal/EventGroupsDemo.c \
+	port/adapters/freertos/tests/minimal/IntQueue.c \
+	port/adapters/freertos/tests/minimal/IntSemTest.c \
+	port/adapters/freertos/tests/minimal/TaskNotify.c \
+	port/adapters/freertos/tests/minimal/TaskNotifyArray.c \
+	port/adapters/freertos/tests/minimal/TimerDemo.c \
+	port/adapters/freertos/tests/minimal/StaticAllocation.c
+
+# KTEST=1 swaps the app entry and pulls the test suite in. BUILD gets its
+# own directory: the ktest config values (heap, priorities, tick hook)
+# differ, so sharing object files with the main image would mix two
+# different kernels' worth of compiled config into one .o cache.
+ifeq ($(KTEST),1)
+BUILD        := build/$(BOARD)-ktest
+TARGET       := $(BUILD)/freertos-ktest
+CFLAGS       += -DKTEST_BUILD=1
+APP_SRCS     := app/ktest_main.c app/smp_test.c
+ADAPTER_SRCS += $(TEST_SRCS)
+# The AbortDelay test exercises xTaskAbortDelay against a stream buffer, so
+# the ktest image needs the stream buffer API compiled in (the main image
+# does not use it; see configUSE_STREAM_BUFFERS in FreeRTOSConfig.h).
+KERNEL_SRCS  += third-party/FreeRTOS-Kernel/stream_buffer.c
+endif
+
+# The core count changes codegen everywhere (configNUMBER_OF_CORES, the
+# port's per-core arrays, tick source selection) but leaves no trace make's
+# timestamp logic can see: a SMP_CORES=2 build after a =4 build would
+# silently relink =4 objects and the "single-core comparator" would be a
+# lie only the board could expose. Stamp the value into the build directory
+# (per image variant - BUILD above already separates them) and drop the
+# directory entirely on mismatch. Sits after the KTEST block so BUILD_STAMP
+# follows the same BUILD the rules use.
+BUILD_STAMP := $(BUILD)/.smp-cores
+ifeq ($(shell cat $(BUILD_STAMP) 2>/dev/null),$(SMP_CORES))
+else
+$(shell rm -rf $(BUILD))
+endif
+$(BUILD_STAMP):
+	@mkdir -p $(BUILD) && echo '$(SMP_CORES)' > $(BUILD_STAMP)
+
 ASM_SRCS := \
 	port/board/common/startup.S \
 	port/board/common/smp_secondary.S \
@@ -274,7 +340,7 @@ $(BUILD)/%.o: %.S
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INC_COMMON) -MMD -MP -c $< -o $@
 
-$(TARGET).elf: $(OBJS)
+$(TARGET).elf: $(OBJS) $(BUILD_STAMP)
 	$(CC) $(CFLAGS) $(OBJS) $(LDFLAGS) -o $@
 	$(SIZE) $@
 
@@ -289,9 +355,19 @@ $(TARGET).bin: $(TARGET).elf
 # failure on the board.
 .DEFAULT_GOAL := all
 
-.PHONY: all clean deploy gates
+.PHONY: all clean deploy gates ktest ktest-deploy
 
 all: $(TARGET).bin
+
+# Kernel-test image: same tree, test-suite entry, own build directory and
+# config values. Deployed under the same TFTP name (freertos.bin) because
+# that is what the boot profile loads; the banner line on the console
+# ("freewebcamera ktest") tells the images apart.
+ktest:
+	@$(MAKE) KTEST=1 all
+
+ktest-deploy:
+	@$(MAKE) KTEST=1 deploy
 
 # Copy to the TFTP root under the name the freertos boot profile expects.
 # Records the hash before and after so the transfer is verifiable.
@@ -371,6 +447,6 @@ gates: k4
 	./tools/check-deps.sh
 
 clean:
-	rm -rf $(BUILD)
+	rm -rf build/$(BOARD) build/$(BOARD)-ktest
 
 -include $(DEPS)

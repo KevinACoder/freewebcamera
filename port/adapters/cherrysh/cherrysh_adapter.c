@@ -437,8 +437,27 @@ CSH_CMD_EXPORT_ALIAS_FULL(cmd_itsdump, itsdump, "itsdump",
 			  "dump ITS/LPI delivery state");
 CSH_CMD_EXPORT_ALIAS_FULL(cmd_uartint, uartint, "uartint",
 			  "show/move console RX INTID");
-CSH_CMD_EXPORT_ALIAS_FULL(cmd_smp, smp, "smp",
-			  "pin one task per core and verify with MPIDR");
+	CSH_CMD_EXPORT_ALIAS_FULL(cmd_smp, smp, "smp",
+				  "pin one task per core and verify with MPIDR");
+
+#ifdef KTEST_BUILD
+/* Kernel-test image only: the suite is not linked into the main image, so
+ * neither the command nor the support function behind it may exist there.
+ * Body in port/adapters/freertos/tests/ktest_support.c. */
+extern void ktest_report(void);
+
+static int cmd_ktest(int argc, char **argv)
+{
+	chry_shell_t *csh = CSH_FROM_ARGV(argc, argv);
+
+	(void)csh;
+	ktest_report();
+	return 0;
+}
+
+CSH_CMD_EXPORT_ALIAS_FULL(cmd_ktest, ktest, "ktest",
+			  "kernel test suite: live per-suite status");
+#endif
 
 /* cherrysh resolves every command name against a PATH variable from the
  * variable table; with an empty variable table PATH is NULL and every

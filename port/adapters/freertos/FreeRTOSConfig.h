@@ -75,7 +75,14 @@
 
 #define configCPU_CLOCK_HZ			24000000UL
 #define configTICK_RATE_HZ			1000U
+/* The test suite creates ~100 tasks across priorities up to
+ * configMAX_PRIORITIES - 2 (the reference line ran it with 32 levels); the
+ * main image's product tasks need nowhere near that. */
+#ifdef KTEST_BUILD
+#define configMAX_PRIORITIES			16
+#else
 #define configMAX_PRIORITIES			8
+#endif
 #define configMINIMAL_STACK_SIZE		512
 #define configMAX_TASK_NAME_LEN			16
 #define configUSE_16_BIT_TICKS			0
@@ -83,16 +90,37 @@
 
 /* --- memory --------------------------------------------------------------- */
 
-/* heap_4 over the region the link script reserves (__heap_start). */
-#define configSUPPORT_STATIC_ALLOCATION		0
+/* heap_4 over the region the link script reserves (__heap_start). Static
+ * allocation support (and the kernel's own provider for the idle/timer
+ * task storage behind configKERNEL_PROVIDED_STATIC_MEMORY) exists for the
+ * StaticAllocation suite and the static task paths; dynamic allocation
+ * stays the project's working default. */
+#define configSUPPORT_STATIC_ALLOCATION		1
+#define configKERNEL_PROVIDED_STATIC_MEMORY	1
 #define configSUPPORT_DYNAMIC_ALLOCATION	1
+/* The test image needs roughly 4x: the full suite keeps ~100 tasks alive
+ * (each with a configMINIMAL_STACK_SIZE stack) plus queues, timers and
+ * event groups, all out of heap_4. The reference line ran the same suite
+ * with a 20 MiB heap. The main image keeps the bring-up-era 1 MiB. */
+#ifdef KTEST_BUILD
+#define configTOTAL_HEAP_SIZE			(4096U * 1024U)
+#else
 #define configTOTAL_HEAP_SIZE			(1024U * 1024U)
+#endif
 #define configAPPLICATION_ALLOCATED_HEAP	1
 
 /* --- hooks and checks ----------------------------------------------------- */
 
 #define configUSE_IDLE_HOOK			0
+/* The test suite's official TestRunner.c defines vApplicationTickHook() and
+ * drives half of its ISR-side demos from it (task notifications from ISR,
+ * queue overwrite, event-group processing, IntQueue). Only the ktest image
+ * links that file, so only that image enables the hook. */
+#ifdef KTEST_BUILD
+#define configUSE_TICK_HOOK			1
+#else
 #define configUSE_TICK_HOOK			0
+#endif
 /* SMP kernel idle tasks: one per core, each may need the hook slot defined
  * (the kernel #errors without a definition, hook or not). */
 #define configUSE_PASSIVE_IDLE_HOOK		0
@@ -108,17 +136,25 @@
 #define INCLUDE_xTaskGetCurrentTaskHandle	1
 #define INCLUDE_xTaskGetSchedulerState		1
 #define INCLUDE_eTaskGetState			1
-#define INCLUDE_xTimerPendFunctionCall		0
+/* The EventGroupsDemo suite drives the event group from the tick hook via
+ * xEventGroupSetBitsFromISR, which the kernel compiles only behind this
+ * switch (it routes through the timer daemon's pending-function queue). */
+#define INCLUDE_xTimerPendFunctionCall		1
 #define INCLUDE_vTaskDelete			1
 #define INCLUDE_vTaskPrioritySet		1
 #define INCLUDE_vTaskSuspend			1
 #define INCLUDE_vTaskDelay			1
 #define INCLUDE_xTaskDelayUntil			1
-#define INCLUDE_xTaskGetIdleTaskHandle		0
+/* The three below were 0 during bring-up and are needed by the kernel test
+ * suite (death/dynamic use the idle handle and xTaskGetHandle; the
+ * AbortDelay and GenQTest extended tests are behind INCLUDE_xTaskAbortDelay,
+ * whose #error the build would hit). Cost is unused kernel code in the main
+ * image only. */
+#define INCLUDE_xTaskGetIdleTaskHandle		1
 #define INCLUDE_pcTaskGetTaskName		1
 #define INCLUDE_uxTaskPriorityGet		1
-#define INCLUDE_xTaskAbortDelay			0
-#define INCLUDE_xTaskGetHandle			0
+#define INCLUDE_xTaskAbortDelay			1
+#define INCLUDE_xTaskGetHandle			1
 
 /* Disabled during bring-up: a failed assert must be visible, but the
  * FullFreeRTOSConfig asserts fire from interrupt context where the console is
@@ -130,14 +166,30 @@
 #define configUSE_MUTEXES			1
 #define configUSE_RECURSIVE_MUTEXES		1
 #define configUSE_COUNTING_SEMAPHORES		1
-#define configUSE_QUEUE_SETS			0
+/* Queue sets and abort-delay: off during M-line bring-up, on since the
+ * kernel test suite needs them (QueueSet/QueueSetPolling/GenQTest/AbortDelay
+ * suites #error without these). Small code-size cost, no behaviour change
+ * for code that does not use them. */
+#define configUSE_QUEUE_SETS			1
 #define configUSE_TASK_NOTIFICATIONS		1
+/* TaskNotifyArray suite needs at least three indexed notifications. */
+#define configTASK_NOTIFICATION_ARRAY_ENTRIES	3
 #define configUSE_TIMERS			1
-#define configTIMER_TASK_PRIORITY		7
+/* Derived rather than literal so the daemon stays the top priority at any
+ * configMAX_PRIORITIES (the TimerDemo suite assumes it is not starved). */
+#define configTIMER_TASK_PRIORITY		( configMAX_PRIORITIES - 1 )
 #define configTIMER_QUEUE_LENGTH		16
 #define configTIMER_TASK_STACK_DEPTH		512
 #define configUSE_EVENT_GROUPS			1
+/* The ktest image needs the stream buffer API: the upstream AbortDelay test
+ * verifies xTaskAbortDelay against a stream buffer as one of its block
+ * primitives. The StreamBuffer/MessageBuffer DEMOS stay excluded (single-core
+ * assumptions, see tests_config.h) - this only compiles the API in. */
+#ifdef KTEST_BUILD
+#define configUSE_STREAM_BUFFERS		1
+#else
 #define configUSE_STREAM_BUFFERS		0
+#endif
 
 /* --- interrupt priorities (raw hardware values) --------------------------- */
 
@@ -200,5 +252,12 @@ void vApplicationStackOverflowHook(struct tskTaskControlBlock *xTask,
 	do { if ((x) == 0) { board_assert_failed(__FILE__, __LINE__); } } while (0)
 
 void board_assert_failed(const char *file, int line);
+
+/* The test suite's print macro (official ThirdParty-Template convention:
+ * called as configPRINTF(( "fmt", args ))). The board's formatted log is
+ * already spinlock-serialized and safe from any core, which is exactly the
+ * cross-core console discipline the reference line learned the hard way
+ * (raw printf from multiple cores corrupts newlib's stdio state). */
+#define configPRINTF( X )	board_log X
 
 #endif /* FREERTOS_CONFIG_H */
