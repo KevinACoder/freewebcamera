@@ -13,6 +13,9 @@
 #ifndef USBH_PLATFORM_H
 #define USBH_PLATFORM_H
 
+/* Full usb2phy1 domain for the two panel EHCI roots (runs the shared bus
+ * domain first). The xHCI line does NOT use this: its PHY/platform sequence
+ * belongs to U-Boot preboot `usb start` (decision D36). */
 void usbh_rk3568_usb2phy1_domain_init(void);
 
 #endif /* USBH_PLATFORM_H */

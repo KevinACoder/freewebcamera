@@ -77,6 +77,25 @@ static void usbh_list_print(chry_shell_t *csh, bool tree)
 {
 	uint8_t busid;
 
+#ifdef USBH_HCD_XHCI
+	for (busid = 0; busid < USBH_XHCI_NUM; busid++) {
+		struct usbh_bus *bus = &g_usbhost_bus[busid];
+		struct usbh_hub *roothub = &bus->hcd.roothub;
+
+		if (roothub->int_buffer == NULL && roothub->nports == 0U) {
+			csh_printf(csh, "bus%u: not started\r\n", busid);
+			continue;
+		}
+
+		csh_printf(csh, "bus%u: xhci @%08x\r\n", busid,
+			   (uint32_t)USBH_XHCI0_BASE);
+		if (tree) {
+			usbh_tree_print(csh, roothub, 1U);
+		} else {
+			usbh_tree_print(csh, roothub, 0U);
+		}
+	}
+#else
 	for (busid = 0; busid < USBH_EHCI_NUM; busid++) {
 		struct usbh_bus *bus = &g_usbhost_bus[busid];
 		struct usbh_hub *roothub = &bus->hcd.roothub;
@@ -94,6 +113,7 @@ static void usbh_list_print(chry_shell_t *csh, bool tree)
 			usbh_tree_print(csh, roothub, 0U);
 		}
 	}
+#endif
 }
 
 static int cmd_usbh(int argc, char **argv)

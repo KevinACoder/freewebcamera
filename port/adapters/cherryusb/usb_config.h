@@ -28,9 +28,11 @@ void usbh_console_printf(const char *fmt, ...);
 #define CONFIG_USB_PRINTF(...)		usbh_console_printf(__VA_ARGS__)
 
 /* Error-level only: enumeration reporting is the adapter's event handler's
- * job, and the console drops bytes under load. */
+ * job, and the console drops bytes under load. DEBUG: LOG for the xHCI
+ * root-cause round (hub-thread path visibility), revert to ERROR once
+ * enumeration is accepted. */
 #ifndef CONFIG_USB_DBG_LEVEL
-#define CONFIG_USB_DBG_LEVEL		USB_DBG_ERROR
+#define CONFIG_USB_DBG_LEVEL		USB_DBG_LOG
 #endif
 
 /* Cache line is 64B on the A55. CherryUSB contract: every DMA buffer is
@@ -117,5 +119,20 @@ void usbh_console_printf(const char *fmt, ...);
  * maintenance up to cache-line granularity inside the driver. */
 #define CONFIG_USB_DCACHE_ENABLE	1
 #define CONFIG_USB_EHCI_DESC_DCACHE_ENABLE	1
+
+/* --- xHCI (DWC3 usbhost_dwc3 @ 0xFD000000, `make XHCI=1` images) ----------- */
+
+/* Ring sizes the transplanted driver sizes its memory from. The lab values
+ * stand: the event ring only ever held enumeration events with large
+ * margins, and shrinking them is a post-bring-up exercise, not a now one. */
+#ifndef CONFIG_USBHOST_XHCI_EVENT_RING_SIZE
+#define CONFIG_USBHOST_XHCI_EVENT_RING_SIZE	64
+#endif
+#ifndef CONFIG_USBHOST_XHCI_COMMAND_RING_SIZE
+#define CONFIG_USBHOST_XHCI_COMMAND_RING_SIZE	64
+#endif
+#ifndef CONFIG_USBHOST_XHCI_TRANSFER_RING_SIZE
+#define CONFIG_USBHOST_XHCI_TRANSFER_RING_SIZE	256
+#endif
 
 #endif /* FREEWEBCAMERA_USB_CONFIG_H */

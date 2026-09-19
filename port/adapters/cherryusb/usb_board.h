@@ -2,9 +2,9 @@
  * @file   usb_board.h
  * @brief  The CherryUSB adapter's own board facts: the RK3568 USB host
  *         register bases, interrupt IDs and the CRU/PMU/GRF constants the
- *         usb2phy1 domain sequence needs (the fparameters.h equivalents of
- *         the standalone line, cross-checked against DESIGN §10 and the
- *         NetBSD rk_usb2phy / Linux dts values).
+ *         usb2phy1 domain sequence needs (the standalone line's SoC
+ *         parameter-header equivalents, cross-checked against DESIGN §10
+ *         and the NetBSD rk_usb2phy / Linux dts values).
  *
  * Kept here rather than in board_conf.h because only this adapter consumes
  * them. All GRF/PMU writes use the RK3568 "field << 16" write-enable style;
@@ -25,6 +25,23 @@
 #define USBH_EHCI1_BASE			0xFD880000UL
 #define USBH_EHCI1_IRQ			165U
 
+/* --- host controllers (xHCI, DWC3 usbhost_dwc3 @ 0xFD000000: the USB3-A
+ * socket group, direct root port - no onboard hub; dts GIC_SPI 170 ->
+ * INTID +32). xHCI regs sit at +0, DWC3 core globals at +0xC100. The other
+ * DWC3 (0xFCC00000, the OTG instance) stays out of scope for now. HS only:
+ * the SS lane's combphy serves SATA. Compiled in by `make XHCI=1` (the
+ * vendor stack is one-HCD-per-image).
+ *
+ * Firmware/OS division (D36): the PHY, CRU/PMUCRU gates, PD_PIPE island and
+ * VBUS belong to U-Boot, whose preboot runs `usb start` on every cold boot;
+ * the OS owns only the xHCI-level init. The CRU/GRF constants for that
+ * sequence were removed again after board measurements showed our own
+ * writes killing the live controller (config regs answering reset defaults,
+ * xHCI aperture + GHWPARAMS1 reading 0). */
+#define USBH_XHCI_NUM			1U
+#define USBH_XHCI0_BASE			0xFD000000UL
+#define USBH_XHCI0_IRQ			202U
+
 /* --- bus/power/clock blocks --- */
 #define USBH_CRU_BASE			0xFDD20000UL
 #define USBH_PMUCRU_BASE		0xFDD00000UL
@@ -35,6 +52,7 @@
 /* PMU: PD_PIPE power domain (USB3 pipe + the shared USB bus island). */
 #define USBH_PMU_BUS_IDLE_SFTCON0	0x050U
 #define USBH_PMU_BUS_IDLE_ACK		0x060U
+#define USBH_PMU_BUS_IDLE_ST		0x068U
 #define USBH_PMU_PD_PIPE_IDLE_BIT	(1U << 11)
 #define USBH_PMU_PWR_GATE_SFTCON	0x0A0U
 #define USBH_PMU_PWR_DWN_ST		0x098U
@@ -58,6 +76,15 @@
 #define USBH_CRU_SOFTRST_CON28_BITS	0x0800U
 #define USBH_CRU_SOFTRST_CON29		0x474U
 #define USBH_CRU_SOFTRST_CON29_BITS	0x0038U
+
+/* USB3OTG1 (= the 0xFD000000 xHCI) clocks and reset live in the main CRU,
+ * but the OS never touches them (D36: U-Boot preboot `usb start` owns the
+ * whole USB3 platform sequence). */
+
+/* usb2phy0 GRF (0xFDCA0000): the host port of the USB3 socket group hangs
+ * off it. Same field layout as usb2phy1 (HOST_CON1 at +0x004), so the
+ * offsets/values reuse the usb2phy1 definitions; the OS does not write it
+ * (D36). */
 
 /* usb2phy1 GRF port controls (offsets identical to usb2phy0):
  * OTG_CON0 suspend release = 0x0c00, HOST_CON1 host role = 0x1d2

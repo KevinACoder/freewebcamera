@@ -93,6 +93,7 @@ INC_ADAPTER := -Ithird-party/FreeRTOS-Kernel/include \
 	-Iport/adapters/sdmmc/shadow \
 	-Iport/adapters/sdmmc \
 	-Iport/adapters/cherryusb \
+	-Iport/adapters/cherryusb/xhci \
 	-Ithird-party/cherryusb/common \
 	-Ithird-party/cherryusb/core \
 	-Ithird-party/cherryusb/class/hub \
@@ -234,9 +235,23 @@ ADAPTER_SRCS := \
 	port/adapters/sdmmc/sdmmc_cmds.c \
 	port/adapters/periph/periph_cmds.c \
 	port/adapters/cherryusb/usbh_platform.c \
-	port/adapters/cherryusb/usbh_glue.c \
 	port/adapters/cherryusb/usbh_adapter.c \
 	port/adapters/cherryusb/usbh_cmds.c
+
+# Host-controller selection. The vendored stack is one-HCD-per-image (each
+# HCD defines usb_hc_init / usbh_submit_urb / USBH_IRQHandler), so EHCI and
+# xHCI builds are mutually exclusive until a dispatch layer exists. Default
+# stays EHCI (the M6 mainstream image); `make XHCI=1` builds the DWC3/xHCI
+# enumeration image for the USB3 socket group instead.
+XHCI ?= 0
+ifeq ($(XHCI),1)
+CFLAGS         += -DUSBH_HCD_XHCI=1
+CHERRYUSB_SRCS := $(filter-out third-party/cherryusb/port/ehci/usb_hc_ehci.c,$(CHERRYUSB_SRCS))
+ADAPTER_SRCS   += port/adapters/cherryusb/xhci/usb_hc_xhci_dwc3_rk3568.c \
+                  port/adapters/cherryusb/xhci/usbh_xhci_glue.c
+else
+ADAPTER_SRCS   += port/adapters/cherryusb/usbh_glue.c
+endif
 
 DRIVER_SRCS := \
 	drivers/uart_ns16550.c \
@@ -307,21 +322,20 @@ ADAPTER_SRCS += $(TEST_SRCS)
 KERNEL_SRCS  += third-party/FreeRTOS-Kernel/stream_buffer.c
 endif
 
-# The core count changes codegen everywhere (configNUMBER_OF_CORES, the
-# port's per-core arrays, tick source selection) but leaves no trace make's
-# timestamp logic can see: a SMP_CORES=2 build after a =4 build would
-# silently relink =4 objects and the "single-core comparator" would be a
-# lie only the board could expose. Stamp the value into the build directory
-# (per image variant - BUILD above already separates them) and drop the
-# directory entirely on mismatch. Sits after the KTEST block so BUILD_STAMP
-# follows the same BUILD the rules use.
+# The core count and the HCD selection both change codegen everywhere but
+# leave no trace make's timestamp logic can see: a SMP_CORES=2 build after a
+# =4 build (or XHCI=1 after the default) would silently relink stale objects
+# and link two HCDs into one image. Stamp both values into the build
+# directory (per image variant - BUILD above already separates them) and
+# drop the directory entirely on mismatch. Sits after the KTEST block so
+# BUILD_STAMP follows the same BUILD the rules use.
 BUILD_STAMP := $(BUILD)/.smp-cores
-ifeq ($(shell cat $(BUILD_STAMP) 2>/dev/null),$(SMP_CORES))
+ifeq ($(shell cat $(BUILD_STAMP) 2>/dev/null),$(SMP_CORES) $(XHCI))
 else
 $(shell rm -rf $(BUILD))
 endif
 $(BUILD_STAMP):
-	@mkdir -p $(BUILD) && echo '$(SMP_CORES)' > $(BUILD_STAMP)
+	@mkdir -p $(BUILD) && echo '$(SMP_CORES) $(XHCI)' > $(BUILD_STAMP)
 
 ASM_SRCS := \
 	port/board/common/startup.S \

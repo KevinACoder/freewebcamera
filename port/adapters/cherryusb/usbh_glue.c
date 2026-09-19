@@ -8,7 +8,8 @@
  *  - interrupt installation goes through the CMSIS irq_ctrl API instead of
  *    the SDK's finterrupt (handler signature here is void(void), hence the
  *    per-bus trampolines);
- *  - dcache hooks call the board primitives instead of FCache.
+ *  - dcache hooks call the board primitives instead of the SDK's cache
+ *    wrappers.
  *
  * The invalidate stays a bare ivac on purpose: it is only ever called on
  * buffers the CPU is about to read after the device wrote them, and a

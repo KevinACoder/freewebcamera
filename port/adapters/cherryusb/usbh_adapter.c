@@ -29,7 +29,12 @@
 #include "usb.h"
 #include "usbh_core.h"
 #include "usbh_hub.h"
+#ifdef USBH_HCD_XHCI
+#include "usbh_xhci_glue.h"
+#include "usb_hc_xhci.h"
+#else
 #include "usb_hc_ehci.h"
+#endif
 #include "usb_board.h"
 
 /* --- console -------------------------------------------------------------- */
@@ -156,6 +161,7 @@ static void usbh_bus_event(uint8_t busid, uint8_t hub_index, uint8_t hub_port,
 
 /* --- start path ------------------------------------------------------------ */
 
+#ifndef USBH_HCD_XHCI
 /* KI-006: manufacture the connect-change edge for pre-plugged root ports,
  * seed the roothub change bits, and wake the hub thread (which is blocked
  * on its queue with nothing pending right after usb_hc_init). */
@@ -194,10 +200,101 @@ static void usbh_ehci_post_init(struct usbh_bus *bus)
 			    bus->hcd.roothub.int_buffer[0]);
 	usbh_hub_thread_wakeup(&bus->hcd.roothub);
 }
+#endif /* !USBH_HCD_XHCI */
+
+#ifdef USBH_HCD_XHCI
+/* xHCI flavour: no KI-006 power-cycle kick (the driver's own init already
+ * powers the ports with the read-back retry), just seed the roothub change
+ * bits for ports that already carry a device and wake the hub thread. The
+ * real root port count was published by the glue's low-level init, so the
+ * thread enumerates exactly the live ports. */
+static void usbh_xhci_post_init(struct usbh_bus *bus)
+{
+	uint8_t port;
+	uint8_t nports = usbh_xhci_nports(bus->busid);
+
+	for (port = 1U; port <= nports; port++) {
+		uint32_t ps = usbh_xhci_portsc(bus->busid, port);
+
+		usbh_console_printf("usbh: bus%u port%u portsc=%08x\r\n",
+				    bus->busid, port, ps);
+
+		if ((ps & XHCI_PS_CCS) != 0U) {
+			bus->hcd.roothub.int_buffer[port / 8U] |=
+				(uint8_t)(1U << (port % 8U));
+		}
+	}
+
+	usbh_console_printf("usbh: bus%u wake hub thread (intbuf=%02x%02x)\r\n",
+			    bus->busid,
+			    bus->hcd.roothub.int_buffer[1],
+			    bus->hcd.roothub.int_buffer[0]);
+	usbh_hub_thread_wakeup(&bus->hcd.roothub);
+}
+
+/* Hot-plug watchdog (task side, per the D36 division: the ISR only records
+ * events, waking stays a task-context operation). Polls the driver's port
+ * event sequence - NOT the roothub_intbuf, which the stack never clears and
+ * whose leftovers would re-trigger enumeration forever - and wakes the hub
+ * thread whenever a new Port Status Change event has arrived since the last
+ * poll. Runs at BelowNormal so it never competes with real work. */
+static void usbh_xhci_hotplug_watchdog(void)
+{
+	static uint32_t last_seq[USBH_XHCI_NUM];
+	static bool seeded;
+	uint8_t busid;
+
+	for (busid = 0U; busid < USBH_XHCI_NUM; busid++) {
+		uint32_t seq = usbh_xhci_port_evt_seq(busid);
+
+		if (!seeded) {
+			/* First pass: events up to here were already handed to
+			 * the hub thread by usbh_xhci_post_init. */
+			last_seq[busid] = seq;
+		} else if (seq != last_seq[busid]) {
+			last_seq[busid] = seq;
+			usbh_hub_thread_wakeup(&g_usbhost_bus[busid].hcd.roothub);
+		}
+	}
+	seeded = true;
+}
+#endif
 
 /* One bus: initialize the stack, wait for the hub thread's usb_hc_init() to
- * reach the end (interrupt-enable is its last register write), then run the
- * pre-plugged-device kick. Returns 0 when the controller is live. */
+ * reach the end, then run the pre-plugged-device seed. Returns 0 when the
+ * controller is live. */
+#ifdef USBH_HCD_XHCI
+static int usbh_bus_start(uint8_t busid)
+{
+	struct usbh_bus *bus = &g_usbhost_bus[busid];
+	uint32_t i;
+
+	if ((int)busid >= (int)USBH_XHCI_NUM) {
+		return -1;
+	}
+
+	if (usbh_initialize(busid, USBH_XHCI0_BASE, usbh_bus_event) != 0) {
+		return -1;
+	}
+
+	/* The glue gates register access on its own "MMIO alive" flag, so
+	 * this poll is safe from the first iteration on; the controller
+	 * flips USBCMD.RS / clears HCH as the last init step. */
+	for (i = 0U; i < 300U; i++) {
+		if (usbh_xhci_hc_running(busid)) {
+			break;
+		}
+		usb_osal_msleep(10);
+	}
+	if (!usbh_xhci_hc_running(busid)) {
+		usbh_console_printf("usbh: bus%u hc init timeout\r\n", busid);
+		return -1;
+	}
+
+	usbh_xhci_post_init(bus);
+	return 0;
+}
+#else
 static int usbh_bus_start(uint8_t busid)
 {
 	struct usbh_bus *bus = &g_usbhost_bus[busid];
@@ -234,8 +331,9 @@ static int usbh_bus_start(uint8_t busid)
 	usbh_ehci_post_init(bus);
 	return 0;
 }
+#endif
 
-/* Bring up both EHCI buses. Idempotent; returns 0 when every bus started. */
+/* Bring up every compiled-in bus. Idempotent; returns 0 when all started. */
 int usb_start(void)
 {
 	static bool started;
@@ -247,13 +345,31 @@ int usb_start(void)
 	}
 	started = true;
 
+#ifdef USBH_HCD_XHCI
+	for (busid = 0U; busid < USBH_XHCI_NUM; busid++) {
+#else
 	for (busid = 0U; busid < USBH_EHCI_NUM; busid++) {
+#endif
 		if (usbh_bus_start(busid) != 0) {
 			usbh_console_printf("usbh: bus%u start FAIL\r\n",
 					    busid);
 			fails++;
 		}
 	}
+
+#ifdef USBH_HCD_XHCI
+	if (fails == 0) {
+		/* Stay resident as the hot-plug watchdog: the xHCI ISR only
+		 * records port events, so without this loop a device plugged
+		 * in after boot would never reach the hub thread. The EHCI
+		 * flavour returns instead - its ISR wakes the hub thread
+		 * directly. */
+		for (;;) {
+			usbh_xhci_hotplug_watchdog();
+			usb_osal_msleep(100U);
+		}
+	}
+#endif
 
 	return (fails != 0) ? -1 : 0;
 }
