@@ -31,6 +31,7 @@
  */
 
 #include <stdint.h>
+#include <stdio.h>
 
 #include "FreeRTOS.h"
 #include "task.h"
@@ -199,7 +200,16 @@ void uxPortSecondaryMain(void)
 void SynchronousInterrupt(void *frame)
 {
 	(void)frame;
+	char buf[64];
+	unsigned long esr = 0UL, far = 0UL;
+
 	board_early_print("\n[port] FAULT: synchronous exception\n");
+	__asm__ __volatile__("mrs %0, esr_el1" : "=r"(esr));
+	__asm__ __volatile__("mrs %0, far_el1" : "=r"(far));
+	(void)snprintf(buf, sizeof(buf),
+		       "[fault] ESR_EL1=%08lx FAR_EL1=%08lx\n",
+		       esr, far & 0xffffffffUL);
+	board_early_print(buf);
 	taskDISABLE_INTERRUPTS();
 	for (;;) {
 		__asm__ __volatile__("wfe");

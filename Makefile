@@ -92,6 +92,11 @@ INC_ADAPTER := -Ithird-party/FreeRTOS-Kernel/include \
 	-Ithird-party/fatfs \
 	-Iport/adapters/sdmmc/shadow \
 	-Iport/adapters/sdmmc \
+	-Iport/adapters/cherryusb \
+	-Ithird-party/cherryusb/common \
+	-Ithird-party/cherryusb/core \
+	-Ithird-party/cherryusb/class/hub \
+	-Ithird-party/cherryusb/port/ehci \
 	-Idrivers \
 	-Ithird-party/sdmmc/common \
 	-Ithird-party/sdmmc/sd \
@@ -172,6 +177,18 @@ SDMMC_SRCS := \
 	third-party/sdmmc/sd/fsl_sd.c \
 	third-party/sdmmc/sdio/fsl_sdio.c
 
+# CherryUSB (upstream master 0e40349b), vendored. Host-only clean subset:
+# the usbh core, the hub class (both panel roots carry an onboard CH334P),
+# the EHCI HCD for the two usb2host controllers and the FreeRTOS osal. The
+# device-side cores, other classes and the vendor xHCI ports are not
+# vendored; usb_config.h comes from the adapter (see the sdmmc note above -
+# same shadow-header pattern).
+CHERRYUSB_SRCS := \
+	third-party/cherryusb/core/usbh_core.c \
+	third-party/cherryusb/class/hub/usbh_hub.c \
+	third-party/cherryusb/port/ehci/usb_hc_ehci.c \
+	third-party/cherryusb/osal/usb_osal_freertos.c
+
 # Board bring-up, board-agnostic part: the same set builds for every board.
 BOARD_SRCS := \
 	port/board/common/mmu.c \
@@ -215,7 +232,11 @@ ADAPTER_SRCS := \
 	port/adapters/sdmmc/sdmmc_storage.c \
 	port/adapters/sdmmc/sdmmc_adapter.c \
 	port/adapters/sdmmc/sdmmc_cmds.c \
-	port/adapters/periph/periph_cmds.c
+	port/adapters/periph/periph_cmds.c \
+	port/adapters/cherryusb/usbh_platform.c \
+	port/adapters/cherryusb/usbh_glue.c \
+	port/adapters/cherryusb/usbh_adapter.c \
+	port/adapters/cherryusb/usbh_cmds.c
 
 DRIVER_SRCS := \
 	drivers/uart_ns16550.c \
@@ -310,7 +331,7 @@ ASM_SRCS := \
 
 # --- rules ----------------------------------------------------------------
 
-C_SRCS := $(KERNEL_SRCS) $(LWIP_SRCS) $(FATFS_SRCS) $(SDMMC_SRCS) $(BOARD_SRCS) $(ADAPTER_SRCS) $(DRIVER_SRCS) $(APP_SRCS)
+C_SRCS := $(KERNEL_SRCS) $(LWIP_SRCS) $(FATFS_SRCS) $(SDMMC_SRCS) $(CHERRYUSB_SRCS) $(BOARD_SRCS) $(ADAPTER_SRCS) $(DRIVER_SRCS) $(APP_SRCS)
 OBJS := $(addprefix $(BUILD)/,$(C_SRCS:.c=.o)) $(addprefix $(BUILD)/,$(ASM_SRCS:.S=.o))
 DEPS := $(OBJS:.o=.d)
 
@@ -394,6 +415,7 @@ STUB_SRCS := \
 	port/adapters/stub/fs_stub.c \
 	port/adapters/stub/sdio_stub.c \
 	port/adapters/stub/smp_stub.c \
+	port/adapters/stub/usb_stub.c \
 	port/board/common/gicv3.c \
 	port/board/common/gicv3_its.c \
 	port/board/common/gicv3_msi.c \

@@ -64,6 +64,15 @@ SECTIONS
 	.vsymtab : { KEEP(*(VSymTab)) }
 	__vsymtab_end = .;
 
+	/* CherryUSB host class registry. usbh_initialize() brackets the table
+	 * with these symbols; without the KEEP the linker discards the hub
+	 * class entry (nothing calls it directly) and no device is ever
+	 * claimed. */
+	. = ALIGN(8);
+	__usbh_class_info_start__ = .;
+	.usbh_class_info : { KEEP(*(.usbh_class_info)) }
+	__usbh_class_info_end__ = .;
+
 	.bss (NOLOAD) : ALIGN(16) {
 		__bss_start = .;
 		*(.bss .bss.*)

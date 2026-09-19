@@ -30,6 +30,7 @@
 #include "net.h"
 #include "sdio.h"
 #include "shell.h"
+#include "usb.h"
 
 /* Console handle. Taken from the interface, never from the driver's header. */
 extern ARM_DRIVER_USART Driver_USART_Console;
@@ -462,6 +463,26 @@ static void task_sdio_start(void *argument)
 	osThreadTerminate(osThreadGetId());
 }
 
+/* Bring the USB host up (both panel EHCI buses, hub enumeration included).
+ *
+ * A task like the rest: the stack creates its own threads, the PHY domain
+ * sequence takes tens of milliseconds and the pre-plugged-device kick
+ * sleeps - none of it belongs between the banner and the shell prompt. It
+ * runs last, below-normal, so the shell answers while the hubs enumerate;
+ * `usbh list -t` reports the tree either way. */
+static void task_usb_start(void *argument)
+{
+	(void)argument;
+
+	if (usb_start() != 0) {
+		console_print("USB FAIL\n");
+		return;
+	}
+	console_print("USB READY\n");
+
+	osThreadTerminate(osThreadGetId());
+}
+
 /* --- boot ----------------------------------------------------------------- */
 
 void board_main(void)
@@ -545,6 +566,11 @@ void board_main(void)
 	if (osThreadNew(task_sdio_start, 0, &(osThreadAttr_t){ .name = "sdiostart",
 			.stack_size = 2048, .priority = osPriorityBelowNormal }) == 0) {
 		console_print("[fatal] thread sdio\n");
+		return;
+	}
+	if (osThreadNew(task_usb_start, 0, &(osThreadAttr_t){ .name = "usbstart",
+			.stack_size = 2048, .priority = osPriorityBelowNormal }) == 0) {
+		console_print("[fatal] thread usb\n");
 		return;
 	}
 

@@ -4,7 +4,8 @@
  *
  * memops.c covers what the kernel itself calls. This file covers what the shell
  * calls: CherrySH uses strnlen, memchr and a printf-family formatter, and its
- * builtin `shsize` uses atoi. The build is -nostdlib, so without these the shell
+ * builtin `shsize` uses atoi; CherryUSB's builtin `lsusb` parses its option
+ * arguments with strtol. The build is -nostdlib, so without these the shell
  * fails to link - and a shell that cannot format cannot print a prompt, a
  * version string or an error, which makes it useless for bring-up.
  *
@@ -143,6 +144,66 @@ int atoi(const char *s)
 		s++;
 	}
 	return negative ? -value : value;
+}
+
+/* Long form with radix selection, for vendored code that parses option
+ * arguments (CherryUSB's lsusb): base 0 auto-detects 0x/0 prefixes, base 16
+ * takes an optional 0x, base 8/10 are literal. No overflow clamping - the
+ * callers here parse short device IDs, and saturating them silently would
+ * hide malformed input rather than surface it. */
+long strtol(const char *s, char **endptr, int base)
+{
+	const char *begin = s;
+	unsigned long value = 0;
+	int negative = 0;
+	int any = 0;
+
+	if (s == NULL) {
+		if (endptr != NULL) {
+			*endptr = NULL;
+		}
+		return 0;
+	}
+	while (*s == ' ' || *s == '\t') {
+		s++;
+	}
+	if (*s == '-') {
+		negative = 1;
+		s++;
+	} else if (*s == '+') {
+		s++;
+	}
+	if ((base == 0 || base == 16) && s[0] == '0' &&
+	    (s[1] == 'x' || s[1] == 'X')) {
+		s += 2;
+		base = 16;
+	} else if (base == 0) {
+		base = (s[0] == '0') ? 8 : 10;
+	}
+
+	for (;; s++) {
+		int digit;
+
+		if (*s >= '0' && *s <= '9') {
+			digit = *s - '0';
+		} else if (*s >= 'a' && *s <= 'z') {
+			digit = *s - 'a' + 10;
+		} else if (*s >= 'A' && *s <= 'Z') {
+			digit = *s - 'A' + 10;
+		} else {
+			break;
+		}
+		if (digit >= base) {
+			break;
+		}
+		value = value * (unsigned long)base + (unsigned long)digit;
+		any = 1;
+	}
+
+	if (endptr != NULL) {
+		*endptr = (char *)(uintptr_t)(any ? s : begin);
+	}
+	return negative ? -(long)value : (long)value;
 }
 
 /* --- output sink ---------------------------------------------------------- */
