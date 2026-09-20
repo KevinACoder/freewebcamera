@@ -96,10 +96,10 @@ uint32_t board_smp_psci_version(void)
 
 void board_smp_start_secondaries(void)
 {
-	extern char freertos_secondary_entry[];
+	extern char kernel_secondary_entry[];
 	uint32_t core;
 	uint32_t i;
-	uint64_t entry = (uint64_t)(uintptr_t)freertos_secondary_entry;
+	uint64_t entry = (uint64_t)(uintptr_t)kernel_secondary_entry;
 	uint32_t psci_ver = board_smp_psci_version();
 
 	for (core = 1u; core < BOARD_SMP_CORES; core++) {

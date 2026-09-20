@@ -40,7 +40,7 @@ _start:
 	 * the BSS under the running kernel and re-derive state that must only
 	 * exist once - the kind of failure that looks like random memory
 	 * corruption, not a wrong turn. Secondaries enter through PSCI at
-	 * freertos_secondary_entry (smp_secondary.S); if one lands here
+	 * kernel_secondary_entry (smp_secondary.S); if one lands here
 	 * anyway, park it where it cannot do harm. The logical core number
 	 * comes from BOARD_MPIDR_CORE_SHIFT (board_conf.h: Aff1 on RK3568,
 	 * Aff0 on QEMU virt). */

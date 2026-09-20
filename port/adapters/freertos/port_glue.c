@@ -15,7 +15,7 @@
  *          programming, single tick on core 0;
  *   StartSecondaryCpuUp -> board_smp_start_secondaries() (PSCI CPU_ON plus
  *       the per-core report-in flags, smp.c);
- *   InterruptSecondaryInit + SecondaryCoreStartup -> uxPortSecondaryMain()
+ *   InterruptSecondaryInit + SecondaryCoreStartup -> kernel_secondary_main()
  *       (per-core GIC bring-up, report in, wait for the scheduler, enter it);
  *   FExceptionInterruptHandler -> board_gicv3_dispatch();
  *   DbgRawPrint -> board_early_print (polled UART, spinlock, DAIF masked).
@@ -126,7 +126,7 @@ extern volatile uint64_t uxPortSchedularRunning;
 
 /* Called by xPortStartScheduler on core 0, BEFORE the tick is armed - the
  * reference line's order, kept exactly: all secondaries are released and
- * have run their own GIC bring-up (and are parked in uxPortSecondaryMain
+ * have run their own GIC bring-up (and are parked in kernel_secondary_main
  * below, waiting) by the time the first task ever runs. */
 void StartSecondaryCpuUp(void)
 {
@@ -146,7 +146,8 @@ void vInterruptCore(uint32_t ulInterruptID, uint32_t ulCoreID)
 	board_gicv3_send_sgi(ulInterruptID, 1UL << ulCoreID);
 }
 
-/* Secondary-core landing from smp_secondary.S. Does not return.
+/* Secondary-core landing from smp_secondary.S (the board layer's neutral
+ * hand-off symbol). Does not return.
  *
  * Order is the reference line's: (1) this core's own redistributor and CPU
  * interface, (2) report in - the boot core's bounded wait in
@@ -154,7 +155,7 @@ void vInterruptCore(uint32_t ulInterruptID, uint32_t ulCoreID)
  * core 0 has armed the tick and raised uxPortSchedularRunning, (4) enter the
  * scheduler, which installs this core's VBAR and restores the first task
  * with interrupts enabled via the task's initial PSTATE. */
-void uxPortSecondaryMain(void)
+void kernel_secondary_main(void)
 {
 	uint32_t cpu_id = board_smp_core_id();
 
@@ -182,7 +183,7 @@ void uxPortSecondaryMain(void)
 /* smp_secondary.S branches here unconditionally, but a single-core image
  * never releases a secondary (StartSecondaryCpuUp does not exist below
  * configNUMBER_OF_CORES > 1), so this is a never-reached park. */
-void uxPortSecondaryMain(void)
+void kernel_secondary_main(void)
 {
 	for (;;) {
 		__asm__ __volatile__("wfe");

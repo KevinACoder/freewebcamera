@@ -183,7 +183,7 @@ static inline uint32_t board_smp_core_id(void)
  *
  * Call site follows the reference SMP line (D33): the kernel port's
  * xPortStartScheduler invokes StartSecondaryCpuUp() on core 0 BEFORE the
- * tick is armed, so every core is up and parked in uxPortSecondaryMain
+ * tick is armed, so every core is up and parked in kernel_secondary_main
  * waiting for the scheduler before the first task ever runs. (An earlier
  * arrangement released secondaries from a post-scheduler task; that was a
  * workaround from the rounds where the port itself was broken, and is gone

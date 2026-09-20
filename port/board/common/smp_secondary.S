@@ -25,12 +25,13 @@
  *    would zero live kernel state - startup.S parks any nonzero logical
  *    core number for exactly that reason.
  *
- * Hand-off after the MMU is on goes to the kernel port's uxPortSecondaryMain
+ * Hand-off after the MMU is on goes to the kernel side's kernel_secondary_main
  * (GIC bring-up, report-in, wait for the scheduler, first context restore).
  * It lives on the kernel side of the seam because what it does is enter the
  * scheduler - the mirror image of startup.S calling board_main for the boot
  * core. Until that call, everything here is board bring-up identical in kind
- * to the boot path.
+ * to the boot path. The symbol is kernel-neutral on purpose: this file must
+ * not carry any kernel's name (DESIGN §4.4, "换内核板级代码不动").
  */
 
 	.arch	armv8-a
@@ -40,9 +41,9 @@
  * can take it directly - same core-numbering truth as the C side. */
 #include "board_conf.h"
 
-	.globl	freertos_secondary_entry
-	.type	freertos_secondary_entry, %function
-freertos_secondary_entry:
+	.globl	kernel_secondary_entry
+	.type	kernel_secondary_entry, %function
+kernel_secondary_entry:
 	/* Mask everything until EL1 is set up. */
 	msr	daifset, #0xf
 
@@ -138,8 +139,10 @@ sec_el1_entry:
 	 * whatever SP the firmware handoff left behind (round-12 lesson). */
 	bl	uart_early_puts_marker_a
 
-	/* Kernel port: own-GIC bring-up, report in, wait, first context
-	 * restore. Does not return.
+	/* Kernel side: own-GIC bring-up, report in, wait, first context
+	 * restore. Does not return. The symbol is provided by whichever
+	 * kernel adapter the image links (FreeRTOS: port_glue.c; ThreadX:
+	 * tx_glue.c).
 	 *
 	 * NOTE: the whole secondary path up to the scheduler is SILENT on
 	 * purpose. Console output here overlaps OP-TEE's own I/TC release
@@ -147,11 +150,11 @@ sec_el1_entry:
 	 * transmitter mid-line during bring-up (rounds 6-10: output stopped
 	 * half-sentence, entire system mute). A secondary's proof of life is
 	 * its report-in flag, not a print. */
-	bl	uxPortSecondaryMain
+	bl	kernel_secondary_main
 
 1:	wfe
 	b	1b
-	.size	freertos_secondary_entry, . - freertos_secondary_entry
+	.size	kernel_secondary_entry, . - kernel_secondary_entry
 
 	.global uart_early_puts_marker_a
 uart_early_puts_marker_a:
