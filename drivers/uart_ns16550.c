@@ -423,6 +423,7 @@ static uint32_t rx_client_len;
 
 static void usart_rx_drain(void);
 static int32_t usart_rx_start(void);
+static uint32_t console_icfgr_word(uint32_t intid);
 
 static int32_t usart_receive(void *data, uint32_t num)
 {
@@ -499,11 +500,12 @@ static int32_t usart_receive(void *data, uint32_t num)
  * It never moves the console to another INTID. */
 #define CONSOLE_BADHIT_LIMIT	5U
 #define CONSOLE_SPURIOUS_PRINT	3U
-#define CONSOLE_SPURIOUS_LIMIT	1000U
+#define CONSOLE_LINE_LIMIT	1000U
 
 /* Storm-defence state, file scope so the kick path can reset it. */
 static volatile uint8_t console_rx_down;	/* armed off, awaiting re-arm */
 static uint32_t console_spurious;		/* benign re-entries this boot */
+static uint32_t console_line_hits;		/* latch re-set from the line */
 
 /* Armed-off: stop the UART asserting (IER gates ALL 16550 interrupt
  * sources), keep the GIC line enabled, and say so once. */
@@ -548,27 +550,80 @@ void usart_rx_irq_handler(void)
 	}
 
 	if ((iir & 0x01u) != 0u) {
-		/* Benign spurious re-entry: counted, logged at a bounded
-		 * rate, and NOT charged to the storm defence. RX state is
-		 * untouched - armed stays armed. */
+		/* "No pending" per the part, yet the GIC delivered this
+		 * INTID: the pending state is either a STALE LATCH (software
+		 * visible, line idle) or the LINE is genuinely held (by
+		 * something that is not this UART - the part just denied it).
+		 * The two worlds are told apart in one operation: clear the
+		 * latch, re-read. Stale latch -> this write ends the storm
+		 * (recovery, not just defence). Line held -> ICPENDR re-latches
+		 * from the line, the re-read proves it, and the flood guard
+		 * below eventually falls back to IRQ_Disable so the machine
+		 * stays usable. */
+		uint32_t latch_before = IRQ_GetPending((IRQn_ID_t)intid);
+
+		IRQ_ClearPending((IRQn_ID_t)intid);
+
 		console_spurious++;
-		if (console_spurious <= CONSOLE_SPURIOUS_PRINT ||
-		    (console_spurious & 0x7fu) == 0u) {
-			char line[64];
+		if (console_spurious == 1u) {
+			/* NOTE: ICC_CTLR_EL1 (S3_0_C12_C11_4, would tell
+			 * EOImode for the stuck-ACTIVE question) is NOT
+			 * readable here - the mrs traps as a synchronous
+			 * exception (ESR=0x02000000, EC=0) on this partition,
+			 * same family as the ICC_IAR0 EL3-reset lesson. */
+			char line[96];
 
 			(void)snprintf(line, sizeof(line),
-				       "uart: spurious irq entry (no pending):"
-				       " n=%u iir=%02x lsr=%02x\n",
+				       "uart: first spurious: intid=%u"
+				       " latch=%u ier=%02x lcr=%02x"
+				       " icfgr=%08x\n",
+				       (unsigned)intid,
+				       (unsigned)latch_before,
+				       (unsigned)reg_read(REG_IER),
+				       (unsigned)reg_read(REG_LCR),
+				       (unsigned)console_icfgr_word(intid));
+			board_early_print_raw(line);
+		} else if ((console_spurious & 0x7fu) == 0u) {
+			/* GIC state dump, sampled: is the console line the
+			 * ONLY thing latched, or is a PPI (tick INTID 27/30)
+			 * pending/active behind this - i.e. the storm is a
+			 * mis-delivered tick line that never deactivates?
+			 * SGI/PPI pending/active live in the redistributor's
+			 * SGI_base frame (RD_base + 0x10000); the storm runs
+			 * on core 0, whose frame is BOARD_GICR_BASE. */
+			char line[112];
+			uint32_t gicr_pend = reg_rd32(
+				BOARD_GICR_BASE + 0x10000u + 0x200u);
+			uint32_t gicr_act = reg_rd32(
+				BOARD_GICR_BASE + 0x10000u + 0x300u);
+			uint32_t gicd_act150 = reg_rd32(
+				BOARD_GICD_BASE + 0x300u +
+				4u * (console_intid / 32u));
+
+			(void)snprintf(line, sizeof(line),
+				       "uart: storm n=%u l150=%u"
+				       " gicr_pend=%08x gicr_act=%08x"
+				       " gicd_act150=%08x\n",
 				       (unsigned)console_spurious,
-				       (unsigned)iir,
-				       (unsigned)reg_read(REG_LSR));
+				       (unsigned)IRQ_GetPending(
+					       (IRQn_ID_t)intid),
+				       (unsigned)gicr_pend,
+				       (unsigned)gicr_act,
+				       (unsigned)gicd_act150);
 			board_early_print_raw(line);
 		}
-		if (console_spurious >= CONSOLE_SPURIOUS_LIMIT) {
-			/* A flood of these is itself a fault: apply the same
-			 * armed-off defence so the core cannot livelock. Same
-			 * recovery path as bad hits. */
-			console_rx_arm_off(intid);
+
+		if (IRQ_GetPending((IRQn_ID_t)intid) != 0u) {
+			/* The latch re-set from the line: this is a real line
+			 * storm the part denies owning. Fall back to disabling
+			 * the INTID - the pre-20260920 behaviour - so the core
+			 * cannot livelock; the kick path re-enables. */
+			console_line_hits++;
+			if (console_line_hits >= CONSOLE_LINE_LIMIT) {
+				console_rx_arm_off(intid);
+				(void)IRQ_Disable((IRQn_ID_t)intid);
+				console_line_hits = 0u;
+			}
 		}
 		return;
 	}
@@ -680,12 +735,40 @@ static void usart_rx_drain(void)
  * receiving once there is somewhere for the bytes to go.
  *
  * Idempotent. Returns ARM_DRIVER_OK. */
+/* Word of GICD_ICFGR holding this INTID's trigger configuration (16 INTIDs
+ * per word, 2 bits each). Read-only diagnostic: if the firmware left the
+ * console line EDGE-triggered instead of LEVEL, every level-line theory in
+ * this file is wrong and the ICFGR readback says so directly. */
+static uint32_t console_icfgr_word(uint32_t intid)
+{
+	return reg_rd32(BOARD_GICD_BASE + 0xC00u + 4u * (intid / 16u));
+}
+
 static int32_t usart_rx_start(void)
 {
 	if (usart_power != ARM_POWER_FULL) {
 		return ARM_DRIVER_ERROR;
 	}
 
+	/* Pre-arm snapshot, stamped raw: the boot arm prints the pending
+	 * state BEFORE the line is enabled, which pins down when a held
+	 * assertion started (pend=1 here means the GIC input was already
+	 * high before we had anything armed - the assertor predates the
+	 * console driver entirely). */
+	{
+		char line[96];
+
+		(void)snprintf(line, sizeof(line),
+			       "uart: arm: intid=%u pend=%u ier=%02x"
+			       " lcr=%02x icfgr=%08x\n",
+			       (unsigned)console_intid,
+			       (unsigned)IRQ_GetPending(
+				       (IRQn_ID_t)console_intid),
+			       (unsigned)reg_read(REG_IER),
+			       (unsigned)reg_read(REG_LCR),
+			       (unsigned)console_icfgr_word(console_intid));
+		board_early_print_raw(line);
+	}
 
 	/* Everything that the handler depends on goes FIRST, and the interrupt
 	 * line is enabled LAST.
