@@ -1,7 +1,13 @@
 # Issue：SMP 4 核 shell 无响应 + 控制台 RX 被启动噪声启发式禁用
 
 - 记录日期：2026-09-19（M6-A 验收期间发现，**基线即有**，与 M6-A 代码无关）
-- 状态：待闭环（用户指示先关 SMP 推进 M6-A，本问题后续解决）
+- 状态：**机理已闭环（2026-09-20，见 `20260920-freertos-smp-console-storm.md`）**——
+  症状 B 根因 = 启发式把 16550"无中断挂起"（IIR bit0=1）误分类为坏命中且双重自增，
+  有效阈值 3 击即 `IRQ_Disable(150)` 永久禁用；已改为可恢复语义（armed-off +
+  shell 自动重臂，提交 `e6dac4b`）。症状 A 根因 = 同一 INTID 150 的 GIC 输入线在
+  启动早期被拉高且 SPI 卡死 ACTIVE（EOI 不 deactivate）≈19.5 kHz 重投递，把 tick
+  PPI 永久压在 pending（饿死）→ osDelay 全死 → 静默冻结；**与 SMP 无关（单核同样
+  复发），ThreadX 镜像零复发**。修复待 EOImode/ICC_DIR 归因（open）落地后验收。
 
 ## 症状 A：4 核主镜像 NET READY 后 shell 无响应
 
