@@ -97,6 +97,8 @@ extern ARM_DRIVER_USART Driver_USART_Console;
 extern int its_dump_cmd(int argc, char **argv);
 extern int uart_console_irq_rebind(unsigned int intid);
 extern unsigned int uart_console_irq_id(void);
+extern int uart_console_rx_down(void);
+extern int uart_console_rx_kick(void);
 
 /* Freestanding: minilibc.c provides the definition. */
 extern int atoi(const char *s);
@@ -118,6 +120,11 @@ static osThreadId_t shell_task_id;
 /* Flag bit meaning "there is input waiting". One bit is enough: the ring is the
  * real buffer, this only says "come and look". */
 #define SHELL_INPUT_FLAG	0x1U
+
+/* How often the shell task wakes anyway, in ticks (= ms at 1000 Hz): the
+ * storm-defence poll. Cost when RX is healthy is one timed wait per half
+ * second. */
+#define SHELL_RX_POLL_MS	500U
 
 /* Number of bytes the driver should hand us per reception. Arming the FIFO's
  * full depth (64) means a burst that arrives as one FIFO fill is handed over
@@ -220,14 +227,36 @@ extern const chry_sysvar_t __vsymtab_end;
 
 static void shell_task(void *argument)
 {
+	static uint8_t rearm_reported;
 	(void)argument;
 
 	for (;;) {
 		/* Block until the RX interrupt says there is something to read.
 		 * This is the whole reason the shell does not starve the system:
-		 * while idle it is genuinely asleep, not spinning. */
+		 * while idle it is genuinely asleep, not spinning. The timeout
+		 * exists only for the storm-defence poll below - when RX is
+		 * healthy this wake costs one flag call and goes straight back
+		 * to sleep. */
 		(void)osThreadFlagsWait(SHELL_INPUT_FLAG, osFlagsWaitAny,
-					osWaitForever);
+					SHELL_RX_POLL_MS);
+
+		/* Auto-recovery for the uart driver's storm defence: when the
+		 * heuristic has armed RX off (real line-status storm, not the
+		 * benign no-pending re-entries), re-arm from here instead of
+		 * waiting for a human to type `uartint` on a console that
+		 * cannot hear them. The driver counts bad hits afresh, so a
+		 * line that is STILL storming re-disarms after one more hit -
+		 * bounded flipping, each episode logged. */
+		if (uart_console_rx_down()) {
+			if (rearm_reported == 0U) {
+				rearm_reported = 1U;
+				board_log("shell: console RX in storm defence,"
+					  " re-arming");
+			}
+			(void)uart_console_rx_kick();
+		} else {
+			rearm_reported = 0U;
+		}
 
 		/* With noblock enabled this returns 1 immediately when no complete
 		 * line has been assembled yet, so a single byte of input costs one
@@ -429,9 +458,11 @@ static int cmd_gicdiag(int argc, char **argv)
 	uint32_t rpr = 0U;
 
 	board_gicv3_diag(&pmr, &rpr);
-	csh_printf(csh, "gicdiag: PMR=%02x RPR=%02x console-intid=%u\r\n",
+	csh_printf(csh,
+		   "gicdiag: PMR=%02x RPR=%02x console-intid=%u rx-down=%d\r\n",
 		   (unsigned)pmr, (unsigned)rpr,
-		   (unsigned)BOARD_CONSOLE_INTID);
+		   (unsigned)BOARD_CONSOLE_INTID,
+		   uart_console_rx_down());
 	return 0;
 }
 

@@ -413,6 +413,14 @@ static volatile uint32_t rx_remaining;
 static volatile uint32_t rx_completed;
 static volatile uint8_t  rx_active;
 
+/* The buffer the CMSIS client last armed with Receive(). A full re-arm
+ * (boot, storm-defence kick, uartint rebind) resumes THAT buffer, not the
+ * driver-internal one: the completion callback delivers whatever rx_buf
+ * holds, and the client reads what it armed - they must agree even when
+ * the re-arm was not client-initiated. */
+static volatile uint8_t *rx_client_buf;
+static uint32_t rx_client_len;
+
 static void usart_rx_drain(void);
 static int32_t usart_rx_start(void);
 
@@ -443,6 +451,8 @@ static int32_t usart_receive(void *data, uint32_t num)
 	rx_remaining = num;
 	rx_completed = 0u;
 	rx_active = 1u;
+	rx_client_buf = (volatile uint8_t *)data;
+	rx_client_len = num;
 
 	/* Drain anything already sitting in the FIFO before unmasking, so a
 	 * byte that arrived while RX was off is not stranded until the next
@@ -465,21 +475,58 @@ static int32_t usart_receive(void *data, uint32_t num)
  * data - reporting it, bounded, is the difference between "console RX is
  * dead for an unknown reason" and a one-line answer in the boot log.
  *
- * With IER = data-ready only, a CORRECT INTID can only assert for receive
- * data or the FIFO timeout, both handled below. So an unexpected
- * identification means the line we are on belongs to something else, and
- * because that something keeps asserting, returning without clearing would
- * livelock the core. The handler counts the hits and, after a few, disables
- * the console INTID and logs the fact - and that is ALL it does. It never
- * moves the console to another INTID: an earlier revision rebounded to 66,
- * which is dead on this board (board_conf.h), and turned "noisy line" into
- * "deaf console" with nothing but a log line to show for it. */
+ * Classification, per the 2026-09-19 issue (symptom B) and the stamped-log
+ * board sessions of 2026-09-20:
+ *  - IIR bit 0 SET reads as "no interrupt pending" (the boot window's
+ *    iir=0x07/lsr=0x00 signature). That is a level re-entry the part no
+ *    longer backs - a spurious GIC delivery, NOT a line-status event. The
+ *    old heuristic counted these as bad hits (and double-counted them),
+ *    so three phantom re-entries in the first seconds of every boot
+ *    permanently disabled RX and killed the shell on EVERY boot, 4-core
+ *    and single-core alike. They are now counted separately, logged at a
+ *    bounded rate, and ignored by the storm defence.
+ *  - Any other unexpected identification (0x0 modem, 0x2 THR empty, 0x6
+ *    line status) is a real wrong-source signal. After a bounded number,
+ *    the defence arms RX OFF (IER=0, buffer disarmed) and leaves the GIC
+ *    line enabled: IER=0 stops the assertion so the core cannot livelock,
+ *    and a re-arm recovers without touching the GIC. The previous response
+ *    here was a permanent IRQ_Disable() - "noisy line" became "deaf
+ *    console" with no recovery path, which is what the 09-19 issue was.
+ *    (An even earlier revision rebounded RX to the fallback INTID 66 -
+ *    66 is DEAD on this board (board_conf.h) and the rebind silently
+ *    deafened the shell while looking like progress. Console RX stays on
+ *    BOARD_CONSOLE_INTID, full stop.)
+ * It never moves the console to another INTID. */
 #define CONSOLE_BADHIT_LIMIT	5U
+#define CONSOLE_SPURIOUS_PRINT	3U
+#define CONSOLE_SPURIOUS_LIMIT	1000U
+
+/* Storm-defence state, file scope so the kick path can reset it. */
+static volatile uint8_t console_rx_down;	/* armed off, awaiting re-arm */
+static uint32_t console_spurious;		/* benign re-entries this boot */
+
+/* Armed-off: stop the UART asserting (IER gates ALL 16550 interrupt
+ * sources), keep the GIC line enabled, and say so once. */
+static void console_rx_arm_off(uint32_t intid)
+{
+	char line[80];
+
+	reg_write(REG_IER, 0x00u);
+	rx_active = 0u;
+	if (console_rx_down == 0u) {
+		console_rx_down = 1u;
+		(void)snprintf(line, sizeof(line),
+			       "uart: console RX armed off on intid %u"
+			       " (storm defence; re-arm pending)\n",
+			       (unsigned)intid);
+		board_early_print_raw(line);
+	}
+}
 
 void usart_rx_irq_handler(void)
 {
-	static uint8_t unexpected_reports;
-	static uint8_t rebound;
+	static uint32_t unexpected_reports;
+	static uint8_t unexpected_printed;
 	static uint8_t traced_entries;
 	uint32_t guard = 0u;
 	uint32_t intid = console_intid;
@@ -500,11 +547,37 @@ void usart_rx_irq_handler(void)
 		board_early_print_raw(line);
 	}
 
-	if (iir != IIR_ID_RX_AVAILABLE && iir != IIR_ID_RX_TIMEOUT) {
-		if (unexpected_reports < 3U) {
+	if ((iir & 0x01u) != 0u) {
+		/* Benign spurious re-entry: counted, logged at a bounded
+		 * rate, and NOT charged to the storm defence. RX state is
+		 * untouched - armed stays armed. */
+		console_spurious++;
+		if (console_spurious <= CONSOLE_SPURIOUS_PRINT ||
+		    (console_spurious & 0x7fu) == 0u) {
 			char line[64];
 
-			unexpected_reports++;
+			(void)snprintf(line, sizeof(line),
+				       "uart: spurious irq entry (no pending):"
+				       " n=%u iir=%02x lsr=%02x\n",
+				       (unsigned)console_spurious,
+				       (unsigned)iir,
+				       (unsigned)reg_read(REG_LSR));
+			board_early_print_raw(line);
+		}
+		if (console_spurious >= CONSOLE_SPURIOUS_LIMIT) {
+			/* A flood of these is itself a fault: apply the same
+			 * armed-off defence so the core cannot livelock. Same
+			 * recovery path as bad hits. */
+			console_rx_arm_off(intid);
+		}
+		return;
+	}
+
+	if (iir != IIR_ID_RX_AVAILABLE && iir != IIR_ID_RX_TIMEOUT) {
+		if (unexpected_printed < 3U) {
+			char line[64];
+
+			unexpected_printed++;
 			(void)snprintf(line, sizeof(line),
 				       "uart: interrupt without RX data:"
 				       " intid=%u iir=%02x lsr=%02x\n",
@@ -513,26 +586,11 @@ void usart_rx_irq_handler(void)
 			board_early_print_raw(line);
 		}
 
+		/* Counted ONCE per entry (the old code double-counted the
+		 * first three, making the effective limit 3). */
 		if ((++unexpected_reports >= CONSOLE_BADHIT_LIMIT) &&
-		    (rebound == 0U)) {
-			char line[64];
-
-			rebound = 1U;
-			/* Storm defence, nothing more: disable the asserting
-			 * line so it cannot livelock the core, and leave the
-			 * evidence. An earlier revision rebounded RX to the
-			 * fallback INTID 66 here - 66 is DEAD on this board
-			 * (board_conf.h: a brief earlier attempt at 66
-			 * delivered nothing), so the rebind silently deafened
-			 * the shell while looking like progress. Console RX
-			 * stays on BOARD_CONSOLE_INTID, full stop. */
-			(void)IRQ_Disable((IRQn_ID_t)intid);
-			(void)snprintf(line, sizeof(line),
-				       "uart: line asserts without RX data;"
-				       " console RX disabled on intid %u\n",
-				       (unsigned)intid);
-			board_early_print_raw(line);
-			rx_active = 0u;
+		    (console_rx_down == 0u)) {
+			console_rx_arm_off(intid);
 		}
 		return;
 	}
@@ -650,8 +708,15 @@ static int32_t usart_rx_start(void)
 
 	rx_active = 1u;
 	rx_completed = 0u;
-	rx_buf = rx_first_byte;
-	rx_remaining = SHELL_RX_ARM_COUNT;
+	if (rx_client_buf != NULL) {
+		/* Resume the client's Receive so completions keep delivering
+		 * into the buffer the client actually reads. */
+		rx_buf = rx_client_buf;
+		rx_remaining = rx_client_len;
+	} else {
+		rx_buf = rx_first_byte;
+		rx_remaining = SHELL_RX_ARM_COUNT;
+	}
 
 	/* Unmask the source, then clear anything that was pending from before
 	 * the line was ours. Draining the FIFO is what actually drops a
@@ -659,6 +724,11 @@ static int32_t usart_rx_start(void)
 	 * re-assert the moment the line is enabled. */
 	reg_write(REG_IER, IER_RX_AVAILABLE);
 	usart_rx_drain();
+
+	/* A successful full arm clears the storm defence: this is the
+	 * recovery path (shell auto-kick, uartint rebind) as well as the
+	 * boot arm. */
+	console_rx_down = 0u;
 
 	(void)IRQ_Enable((IRQn_ID_t)console_intid);
 	return ARM_DRIVER_OK;
@@ -700,6 +770,23 @@ int uart_console_irq_rebind(unsigned int intid)
 unsigned int uart_console_irq_id(void)
 {
 	return console_intid;
+}
+
+/* 1 when the storm defence has armed RX off and a re-arm is pending. The
+ * shell adapter polls this (kernel-free driver: it exposes state and
+ * primitives, the kernel-aware adapter owns any timing). */
+int uart_console_rx_down(void)
+{
+	return (console_rx_down != 0u) ? 1 : 0;
+}
+
+/* Re-arm console RX after a storm defence - the same full
+ * handler -> priority -> state -> drain -> IER -> enable sequence as the
+ * boot arm, which also clears the down state. This is what `uartint` and
+ * the shell adapter's auto-recovery both land on. Returns 0 on success. */
+int uart_console_rx_kick(void)
+{
+	return (usart_rx_start() == ARM_DRIVER_OK) ? 0 : -1;
 }
 
 /* --- M0 console RX bring-up probe ------------------------------------------
