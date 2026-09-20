@@ -104,8 +104,15 @@ void tx_irq_handler(void)
 
 	if (id == (uint32_t)BOARD_TICK_INTID) {
 		/* Tick: expirations + per-core time slice, under the kernel's
-		 * own SMP protection inside _tx_timer_interrupt. */
+		 * own SMP protection inside _tx_timer_interrupt, then the
+		 * rearm. The rearm (OS_Tick_AcknowledgeIRQ reloads TVAL) is
+		 * what deasserts the level-triggered line - the first boot
+		 * skipped it here and core 0 sat in a tick storm (the line
+		 * re-pended the moment EOI landed) while the other cores
+		 * carried the shell. The FreeRTOS equivalent is
+		 * configCLEAR_TICK_INTERRUPT inside FreeRTOS_Tick_Handler. */
 		_tx_timer_interrupt();
+		OS_Tick_AcknowledgeIRQ();
 	} else if (id == TX_PREEMPT_SGI_INTID) {
 		/* Preempt IPI: deliberately empty. The IRQ exit path
 		 * (_tx_thread_context_restore) re-reads _tx_thread_execute_ptr
@@ -156,9 +163,14 @@ static void tx_smp_ipi_setup(void)
 
 /* --- tick ------------------------------------------------------------------ */
 
+/* Registered with OS_Tick_Setup to satisfy its handler parameter, but
+ * NEVER CALLED: the ThreadX dispatch path (tx_irq_handler) routes the tick
+ * INTID directly - see the storm note there. The FreeRTOS image has the
+ * same shape (its registered handler is also not who runs it). */
 static void tx_tick_wrapper(void)
 {
 	_tx_timer_interrupt();
+	OS_Tick_AcknowledgeIRQ();
 }
 
 /* Arms the tick on core 0, mirroring the FreeRTOS glue's

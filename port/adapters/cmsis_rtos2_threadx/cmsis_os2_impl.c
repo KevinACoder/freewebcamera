@@ -247,7 +247,8 @@ static void thread_slot_init_flags(thread_slot_t *slot)
 }
 
 static void thread_create_into_slot(thread_slot_t *slot, osThreadFunc_t func,
-				    void *argument, UINT priority)
+				    void *argument, UINT priority,
+				    uint32_t affinity_mask)
 {
 	slot->func = func;
 	slot->arg = argument;
@@ -263,6 +264,19 @@ static void thread_create_into_slot(thread_slot_t *slot, osThreadFunc_t func,
 	}
 	slot->state = SLOT_LIVE;
 	thread_slot_init_flags(slot);
+
+	/* CMSIS affinity_mask (bit i = core i allowed) maps onto ThreadX's
+	 * EXCLUSION bitmap (bit i = core i forbidden) - the complement. A
+	 * zero or full mask means "no constraint". smp_test's per-core
+	 * pinning rides on this; dropping it silently would break the
+	 * comparison workload's core-binding contract. */
+	if (affinity_mask != 0U &&
+	    (affinity_mask & (uint32_t)TX_THREAD_SMP_CORE_MASK) !=
+		    (uint32_t)TX_THREAD_SMP_CORE_MASK) {
+		(void)tx_thread_smp_core_exclude(&slot->thread,
+						 (ULONG)~affinity_mask &
+						 (ULONG)TX_THREAD_SMP_CORE_MASK);
+	}
 }
 
 osThreadId_t osThreadNew(osThreadFunc_t func, void *argument,
@@ -270,6 +284,7 @@ osThreadId_t osThreadNew(osThreadFunc_t func, void *argument,
 {
 	thread_slot_t *slot;
 	UINT priority = to_tx_priority(osPriorityNormal);
+	uint32_t affinity_mask = 0U;
 
 	if (func == NULL) {
 		return NULL;
@@ -290,6 +305,7 @@ osThreadId_t osThreadNew(osThreadFunc_t func, void *argument,
 		if (attr->priority != osPriorityNone) {
 			priority = to_tx_priority(attr->priority);
 		}
+		affinity_mask = attr->affinity_mask;
 		/* attr->stack_size is noted but the slot's stack is fixed at
 		 * THREAD_STACK_WORDS; smaller requests are served from the
 		 * same pool. Every in-tree thread fits. */
@@ -297,7 +313,8 @@ osThreadId_t osThreadNew(osThreadFunc_t func, void *argument,
 
 	if (kernel_objects_live) {
 		/* Kernel running: create now, from a thread context. */
-		thread_create_into_slot(slot, func, argument, priority);
+		thread_create_into_slot(slot, func, argument, priority,
+					affinity_mask);
 		if (slot->state != SLOT_LIVE) {
 			return NULL;
 		}
@@ -310,7 +327,7 @@ osThreadId_t osThreadNew(osThreadFunc_t func, void *argument,
 	slot->state = SLOT_PENDING;
 	if (!defer(DEF_THREAD, slot,
 		   (uintptr_t)func, (uintptr_t)argument,
-		   (uintptr_t)priority, (uintptr_t)THREAD_STACK_WORDS)) {
+		   (uintptr_t)priority, (uintptr_t)affinity_mask)) {
 		slot->state = SLOT_FREE;
 		return NULL;
 	}
@@ -1295,7 +1312,8 @@ void tx_cmsis_application_define(void *first_unused_memory)
 
 			thread_create_into_slot(slot,
 						(osThreadFunc_t)d->a0,
-						(void *)d->a1, (UINT)d->a2);
+						(void *)d->a1, (UINT)d->a2,
+						(uint32_t)d->a3);
 			break;
 		}
 		case DEF_EVENT_FLAGS: {
