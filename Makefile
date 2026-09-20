@@ -247,7 +247,7 @@ XHCI ?= 0
 ifeq ($(XHCI),1)
 CFLAGS         += -DUSBH_HCD_XHCI=1
 CHERRYUSB_SRCS := $(filter-out third-party/cherryusb/port/ehci/usb_hc_ehci.c,$(CHERRYUSB_SRCS))
-ADAPTER_SRCS   += port/adapters/cherryusb/xhci/usb_hc_xhci_dwc3_rk3568.c \
+ADAPTER_SRCS   += port/adapters/cherryusb/xhci/usb_hc_xhci_netbsd.c \
                   port/adapters/cherryusb/xhci/usbh_xhci_glue.c
 else
 ADAPTER_SRCS   += port/adapters/cherryusb/usbh_glue.c

@@ -32,12 +32,12 @@
  * the SS lane's combphy serves SATA. Compiled in by `make XHCI=1` (the
  * vendor stack is one-HCD-per-image).
  *
- * Firmware/OS division (D36): the PHY, CRU/PMUCRU gates, PD_PIPE island and
- * VBUS belong to U-Boot, whose preboot runs `usb start` on every cold boot;
- * the OS owns only the xHCI-level init. The CRU/GRF constants for that
- * sequence were removed again after board measurements showed our own
- * writes killing the live controller (config regs answering reset defaults,
- * xHCI aperture + GHWPARAMS1 reading 0). */
+ * Firmware/OS division (D38, revising D36): the OS owns the whole USB
+ * domain bring-up - the NetBSD rk_usb2phy + dwc3_fdt sequence that is
+ * board-proven on this SoC (2026-09-03, USB3 socket group enumerating from
+ * a cold USB domain). U-Boot's preboot `usb start` state is wiped by the
+ * CRU SRST pulse at the head of that sequence, so the image boots into a
+ * known controller state regardless of what U-Boot left behind. */
 #define USBH_XHCI_NUM			1U
 #define USBH_XHCI0_BASE			0xFD000000UL
 #define USBH_XHCI0_IRQ			202U
@@ -47,6 +47,7 @@
 #define USBH_PMUCRU_BASE		0xFDD00000UL
 #define USBH_PMU_BASE			0xFDD90000UL
 #define USBH_GPIO3_BASE			0xFE760000UL
+#define USBH_USB2PHY0_GRF_BASE		0xFDCA0000UL	/* SYSCON, hi-word WE */
 #define USBH_USB2PHY1_GRF_BASE		0xFDCA8000UL	/* SYSCON, hi-word WE */
 
 /* PMU: PD_PIPE power domain (USB3 pipe + the shared USB bus island). */
@@ -66,10 +67,12 @@
 #define USBH_PMUCRU_CLKGATE_CON2	0x188U
 #define USBH_PMUCRU_USBPHY_GATES	0x00000007U
 
-/* CRU soft resets. con14 bits4-9: H_USB2HOST0/ARB/UTMI + H_USB2HOST1/ARB/
- * UTMI (assert + release); con28 bit11: P_USB2PHY1_GRF pclk (release only);
- * con29 bits3-5: usb2phy1 POR / port reset (release only). HCLK_USB2HOST0/1
- * gates are on by default - no clock-id exists for them. */
+/* CRU clock gates / soft resets (CRU clkgate region at +0x300, softrst at
+ * +0x400, "conN" = offset 4*N into the region; hi-word write-enable).
+ * con14 bits4-9: H_USB2HOST0/ARB/UTMI + H_USB2HOST1/ARB/UTMI (assert +
+ * release); con28 bit11: P_USB2PHY1_GRF pclk (release only); con29 bits3-5:
+ * usb2phy1 POR / port reset (release only). HCLK_USB2HOST0/1 gates are on
+ * by default - no clock-id exists for them. */
 #define USBH_CRU_SOFTRST_CON14		0x438U
 #define USBH_CRU_SOFTRST_CON14_BITS	0x03F0U
 #define USBH_CRU_SOFTRST_CON28		0x470U
@@ -77,14 +80,19 @@
 #define USBH_CRU_SOFTRST_CON29		0x474U
 #define USBH_CRU_SOFTRST_CON29_BITS	0x0038U
 
-/* USB3OTG1 (= the 0xFD000000 xHCI) clocks and reset live in the main CRU,
- * but the OS never touches them (D36: U-Boot preboot `usb start` owns the
- * whole USB3 platform sequence). */
+/* USB3OTG clock gates (con10: bits 8-10 otg0, 12-14 otg1; bits 0-1 opened
+ * too in case the SATA combphy line has not run yet - NetBSD rk_usb2phy
+ * does the same) and the DWC3 core soft resets (con9: bit4 SRST_USB3OTG0,
+ * bit5 SRST_USB3OTG1). ATF leaves both cores held in reset after cold
+ * power-on; without the assert+release pulse GSNPSID reads 0. */
+#define USBH_CRU_CLKGATE_CON10		0x328U
+#define USBH_CRU_CLKGATE_CON10_BITS	0x7303U
+#define USBH_CRU_SOFTRST_CON9		0x424U
+#define USBH_CRU_SOFTRST_CON9_BITS	0x0030U
 
-/* usb2phy0 GRF (0xFDCA0000): the host port of the USB3 socket group hangs
- * off it. Same field layout as usb2phy1 (HOST_CON1 at +0x004), so the
- * offsets/values reuse the usb2phy1 definitions; the OS does not write it
- * (D36). */
+/* usb2phy0 GRF (0xFDCA0000): the USB3 socket group's two lanes hang off it
+ * (otg-port = 0xFCC00000, host-port = 0xFD000000). Same field layout as
+ * usb2phy1, same measured working values. */
 
 /* usb2phy1 GRF port controls (offsets identical to usb2phy0):
  * OTG_CON0 suspend release = 0x0c00, HOST_CON1 host role = 0x1d2

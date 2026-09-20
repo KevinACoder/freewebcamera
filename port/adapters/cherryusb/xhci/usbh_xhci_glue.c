@@ -1,25 +1,26 @@
 /*
  * @file   usbh_xhci_glue.c
  * @brief  RK3568 xHCI (DWC3 usbhost_dwc3 @ 0xFD000000) glue for CherryUSB:
- *         the strong low-level hooks the transplanted usb_hc_xhci driver
- *         expects, the aligned allocator the driver's rings/contexts live
- *         on, and the interrupt install. Nothing else.
+ *         the strong low-level hooks the usb_hc_xhci driver expects, the
+ *         aligned allocator the driver's rings/contexts live on, and the
+ *         interrupt install.
  *
- * Firmware/OS division (the M3-A SATA precedent, applied to USB by
- * decision D36): the PHY, CRU/PMUCRU gates, PD_PIPE power island and VBUS
- * enables belong to U-Boot, whose preboot runs `usb start` on every cold
- * boot. The OS inherits a live controller - measured 2026-09-19: at image
- * entry the xHCI aperture reads 0x01100020 and GHWPARAMS1 0x0160c93b with
- * zero platform writes of our own - and only initializes the controller
- * (xHCI-level HCRST + rings). The lab glue's own CRU/PHY sequence was
- * removed after it measurably killed the controller (config registers
- * answered reset defaults, xHCI aperture and param block read 0).
+ * Platform ownership (decision D38, revising D36): the OS runs the whole
+ * USB domain bring-up before touching the xHCI registers - usbh_platform.c's
+ * usbh_rk3568_usb3otg_domain_init() is the register-exact NetBSD
+ * rk_usb2phy.c + dwc3_fdt.c sequence (PD_PIPE ensure, clock gates, the
+ * SRST_USB3OTG pulse that wipes whatever U-Boot's preboot `usb start` left
+ * behind, VBUS, usb2phy0 GRF, dwc3 soft reset + PHY quirks + PRTCAP=host).
+ * That stack is the only xHCI reference board-proven on this SoC from a
+ * cold USB domain (2026-09-03); the D36 inherit-only model could never get
+ * past Address Device (Parameter Error 17, see evidence 20260920).
  *
- * Register access is gated on s_xhci_regs_alive (set at entry - the
- * aperture is live before us); usbh_bus_start() polls from task context.
+ * Register access is gated on s_xhci_regs_alive (set after the platform
+ * sequence - the SRST pulse briefly kills the aperture); usbh_bus_start()
+ * polls from task context.
  *
  * @author zhugengyu
- * @date   19.09.2026
+ * @date   20.09.2026
  */
 
 #include <stdbool.h>
@@ -32,6 +33,7 @@
 #include "usbh_core.h"
 #include "usb_osal.h"
 #include "usb_board.h"
+#include "usbh_platform.h"
 #include "usb_hc_xhci.h"
 
 static volatile bool s_xhci_regs_alive;
@@ -113,6 +115,9 @@ bool usbh_xhci_hc_running(uint8_t busid)
 	if (!s_xhci_regs_alive) {
 		return false;
 	}
+	/* 在平台序列把 xHCI 环复位出来之前(RUN 已写)轮询就绪; 平台序列期间
+	 * SRST 脉冲会让孔径短暂不可读, s_xhci_regs_alive 置位顺序保证读不到
+	 * 半初始化状态。 */
 	cmd = *(volatile uint32_t *)(usbh_xhci_opbase() + XHCI_USBCMD);
 	sts = *(volatile uint32_t *)(usbh_xhci_opbase() + XHCI_USBSTS);
 	return ((cmd & XHCI_CMD_RS) != 0U) && ((sts & XHCI_STS_HCH) == 0U);
@@ -171,12 +176,14 @@ static void usbh_xhci0_isr(void)
 
 void usb_hc_low_level_init(struct usbh_bus *bus)
 {
-	/* The aperture is live at image entry (U-Boot preboot ran usb start
-	 * on every cold boot): publish the real root port count into the
-	 * roothub - this driver has no post-HCRESET hook like the EHCI one,
-	 * and the hub thread would otherwise enumerate
-	 * CONFIG_USBHOST_MAX_RHPORTS phantom ports. */
+	/* D38: OS 侧全序平台 bring-up(NetBSD rk_usb2phy + dwc3_fdt 序列,
+	 * once-guard 在内)。跑完之后 xHCI 孔径才是已知的干净状态。 */
+	usbh_rk3568_usb3otg_domain_init();
+
 	s_xhci_regs_alive = true;
+	/* publish the real root port count into the roothub - this driver has
+	 * no post-HCRESET hook like the EHCI one, and the hub thread would
+	 * otherwise enumerate CONFIG_USBHOST_MAX_RHPORTS phantom ports. */
 	bus->hcd.roothub.nports = usbh_xhci_nports(bus->busid);
 
 	/* Handler + priority here, enable only when the driver finishes
