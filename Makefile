@@ -322,6 +322,89 @@ ADAPTER_SRCS += $(TEST_SRCS)
 KERNEL_SRCS  += third-party/FreeRTOS-Kernel/stream_buffer.c
 endif
 
+# THREADX=1 builds the ThreadX SMP comparison image (D39): same app, same
+# board layer, same cherrysh - but the kernel is Eclipse ThreadX
+# (common_smp + the cortex_a55_smp GNU port, vendored under
+# third-party/threadx/) and the CMSIS-RTOS2 implementation is the
+# cmsis_rtos2_threadx twin. Its purpose is to bisect the "4-core shell
+# unresponsive" problem: if the identical console/shell path stays live on
+# a different SMP kernel, the fault is in the FreeRTOS SMP port, not in the
+# board layer.
+#
+# Own BUILD directory, same reason as ktest: a different kernel's objects
+# must never mix into the FreeRTOS image's cache.
+#
+# Defines, all global (the -DGUEST precedent):
+#   -DTHREADX_BUILD=1            image identity: the app banner keys on it
+#   -DTX_INCLUDE_USER_DEFINE_FILE  kernel reads the adapter's tx_user.h
+#   -DTX_ARMV8_2                 port extracts the core ID from MPIDR Aff1
+#                                (RK3568 numbers its cores there, Aff0=0);
+#                                see tx_glue.c for the preempt-SGI side of
+#                                this story
+#   -DEL1                        port targets EL1 (SPSR/ELR selection in
+#                                the context-switch assembly)
+ifeq ($(THREADX),1)
+BUILD  := build/$(BOARD)-threadx
+TARGET := $(BUILD)/threadx-smp
+CFLAGS += -DTHREADX_BUILD=1 -DTX_INCLUDE_USER_DEFINE_FILE -DTX_ARMV8_2 -DEL1
+
+# The whole SMP kernel source set (194 files; the UP common/ set is a
+# different source selection and is not vendored at all).
+THREADX_KERNEL_SRCS := $(wildcard third-party/threadx/common_smp/src/*.c)
+
+# The port assembly, minus tx_thread_smp_core_preempt.S: its ICC_SGI1R
+# encoding targets the Aff0 field, which is always 0 on this SoC, so a
+# preempt IPI would reach no core and be silently dropped. The adapter
+# (port/adapters/threadx/tx_glue.c) provides _tx_thread_smp_core_preempt
+# via the board's Aff1-correct SGI sender; registered in IMPORT-INFO.md.
+THREADX_PORT_SRCS := $(filter-out \
+	third-party/threadx/ports_smp/cortex_a55_smp/gnu/src/tx_thread_smp_core_preempt.S, \
+	$(wildcard third-party/threadx/ports_smp/cortex_a55_smp/gnu/src/*.S))
+
+KERNEL_SRCS := $(THREADX_KERNEL_SRCS) port/adapters/threadx/tx_glue.c
+
+# The vendored middleware lists (lwIP/FatFs/sdmmc/CherryUSB) are emptied:
+# their OSALs are FreeRTOS-coupled upstream code, and the drivers behind
+# them stay linked (kernel-agnostic) but are only ever initialized through
+# the stubbed subsystem starts.
+LWIP_SRCS     :=
+FATFS_SRCS    :=
+SDMMC_SRCS    :=
+CHERRYUSB_SRCS :=
+
+ADAPTER_SRCS := \
+	port/adapters/cmsis_rtos2_threadx/cmsis_os2_impl.c \
+	port/adapters/cherrysh/cherrysh_adapter.c \
+	third-party/cherrysh/chry_shell.c \
+	third-party/cherrysh/builtin/help.c \
+	third-party/cherrysh/builtin/clear.c \
+	third-party/cherrysh/builtin/shsize.c \
+	third-party/cherrysh/cherryrl/chry_readline.c \
+	third-party/cherryrb/chry_ringbuffer.c \
+	port/adapters/stub/net_stub.c \
+	port/adapters/stub/fs_stub.c \
+	port/adapters/stub/sdio_stub.c \
+	port/adapters/stub/usb_stub.c
+
+# ThreadX's include paths replace the FreeRTOS ones wholesale: the FreeRTOS
+# INC_ADAPTER must not leak into this image, or a stray FreeRTOS.h would
+# compile against the wrong kernel. The one path kept from the FreeRTOS
+# adapter's directory list is cmsis_rtos2/ itself, and only for the shared,
+# kernel-free extension header cmsis_os2_ext.h (osThreadFlagsSetFromISR,
+# consumed by the cherrysh adapter and implemented by both CMSIS twins).
+INC_ADAPTER := -Ithird-party/threadx/common_smp/inc \
+	-Ithird-party/threadx/ports_smp/cortex_a55_smp/gnu/inc \
+	-Iport/adapters/threadx \
+	-Iport/adapters/cmsis_rtos2_threadx \
+	-Iport/adapters/cmsis_rtos2 \
+	-Iport/adapters/cherrysh \
+	-Ithird-party/cherrysh \
+	-Ithird-party/cherrysh/cherryrl \
+	-Ithird-party/cherryrb \
+	-Iport/adapters/stub \
+	-Idrivers
+endif
+
 # The core count and the HCD selection both change codegen everywhere but
 # leave no trace make's timestamp logic can see: a SMP_CORES=2 build after a
 # =4 build (or XHCI=1 after the default) would silently relink stale objects
@@ -337,11 +420,24 @@ endif
 $(BUILD_STAMP):
 	@mkdir -p $(BUILD) && echo '$(SMP_CORES) $(XHCI)' > $(BUILD_STAMP)
 
+# Board assembly is shared; the kernel-side assembly is the seam itself and
+# therefore per-kernel: the FreeRTOS image links portasm_smp.S (context
+# switch, IRQ entry, yield) + port_vectors.S, the ThreadX image links
+# tx_vectors.S (its runtime vector table + SPSel entry stubs) plus the
+# port's own assembly, minus the preempt-SGI file the adapter replaces.
+ifeq ($(THREADX),1)
+ASM_SRCS := \
+	port/board/common/startup.S \
+	port/board/common/smp_secondary.S \
+	port/adapters/threadx/tx_vectors.S \
+	$(THREADX_PORT_SRCS)
+else
 ASM_SRCS := \
 	port/board/common/startup.S \
 	port/board/common/smp_secondary.S \
 	port/adapters/freertos/portasm_smp.S \
 	port/adapters/freertos/port_vectors.S
+endif
 
 # --- rules ----------------------------------------------------------------
 
@@ -375,6 +471,14 @@ $(BUILD)/%.o: %.S
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INC_COMMON) -MMD -MP -c $< -o $@
 
+# The ThreadX port assembly includes tx_user.h (-DTX_INCLUDE_USER_DEFINE_FILE),
+# so these objects need the adapter include path - unlike the generic .S rule
+# above, which keeps board assembly on the kernel-free paths. The longer
+# pattern wins make's shortest-stem match over $(BUILD)/%.o.
+$(BUILD)/third-party/threadx/%.o: third-party/threadx/%.S
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) -MMD -MP -c $< -o $@
+
 $(TARGET).elf: $(OBJS) $(BUILD_STAMP)
 	$(CC) $(CFLAGS) $(OBJS) $(LDFLAGS) -o $@
 	$(SIZE) $@
@@ -390,7 +494,7 @@ $(TARGET).bin: $(TARGET).elf
 # failure on the board.
 .DEFAULT_GOAL := all
 
-.PHONY: all clean deploy gates ktest ktest-deploy
+.PHONY: all clean deploy gates ktest ktest-deploy threadx threadx-deploy
 
 all: $(TARGET).bin
 
@@ -403,6 +507,15 @@ ktest:
 
 ktest-deploy:
 	@$(MAKE) KTEST=1 deploy
+
+# ThreadX SMP comparison image (D39): built, deployed and booted exactly
+# like the FreeRTOS one (same TFTP name, banner tells them apart -
+# "freewebcamera M0 - RK3568 ThreadX SMP carrier").
+threadx:
+	@$(MAKE) THREADX=1 all
+
+threadx-deploy:
+	@$(MAKE) THREADX=1 deploy
 
 # Copy to the TFTP root under the name the freertos boot profile expects.
 # Records the hash before and after so the transfer is verifiable.
@@ -483,6 +596,6 @@ gates: k4
 	./tools/check-deps.sh
 
 clean:
-	rm -rf build/$(BOARD) build/$(BOARD)-ktest
+	rm -rf build/$(BOARD) build/$(BOARD)-ktest build/$(BOARD)-threadx
 
 -include $(DEPS)

@@ -98,6 +98,13 @@ SECTIONS
 	. = . + 4M;
 	__heap_end = .;
 
+	/* First byte past everything the image statically reserves. Kernel-
+	 * neutral name: the ThreadX port's _tx_initialize_low_level reads it
+	 * into _tx_initialize_unused_memory (the "start allocating here"
+	 * pointer handed to tx_application_define). Nothing references it in
+	 * the FreeRTOS image; PROVIDE keeps it free unless asked for. */
+	PROVIDE(__top_of_ram = __heap_end);
+
 	/DISCARD/ : {
 		*(.comment)
 		*(.note*)

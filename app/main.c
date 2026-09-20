@@ -32,6 +32,15 @@
 #include "shell.h"
 #include "usb.h"
 
+/* Image identity: same app builds against either kernel (D39 comparison
+ * line). The banner is how the two images are told apart on the console and
+ * in the TFTP staging log - both deploy as freertos.bin. */
+#ifdef THREADX_BUILD
+#define IMAGE_BANNER	"\nfreewebcamera M0 - RK3568 ThreadX SMP carrier\n"
+#else
+#define IMAGE_BANNER	"\nfreewebcamera M0 - RK3568 FreeRTOS carrier\n"
+#endif
+
 /* Console handle. Taken from the interface, never from the driver's header. */
 extern ARM_DRIVER_USART Driver_USART_Console;
 
@@ -493,7 +502,7 @@ void board_main(void)
 	(void)Driver_USART_Console.Initialize(console_event);
 	(void)Driver_USART_Console.PowerControl(ARM_POWER_FULL);
 
-	console_print("\nfreewebcamera M0 - RK3568 FreeRTOS carrier\n");
+	console_print(IMAGE_BANNER);
 
 	/* Report the counter frequency: proves CNTV/CNTFRQ are reachable from
 	 * EL1, which is the precondition for the tick working at all. */
