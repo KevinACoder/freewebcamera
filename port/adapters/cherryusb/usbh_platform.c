@@ -302,7 +302,7 @@ void usbh_rk3568_usb3otg_domain_init(void)
 
 	/* The KI-012 comparison window (NetBSD prints the same four). */
 	usbh_console_printf(
-		"[USBH] usb3otg domain up: GCTL=0x%08x GUCTL1=0x%08x GUSB2PHYCFG0=0x%08x GUSB3PIPECTL0=0x%08x\r\n",
+		"xhci: usb3otg domain up: GCTL=0x%08x GUCTL1=0x%08x GUSB2PHYCFG0=0x%08x GUSB3PIPECTL0=0x%08x\r\n",
 		dwc3[DWC3_GCTL / 4U], dwc3[DWC3_GUCTL1 / 4U],
 		dwc3[DWC3_GUSB2PHYCFG / 4U], dwc3[DWC3_GUSB3PIPECTL / 4U]);
 

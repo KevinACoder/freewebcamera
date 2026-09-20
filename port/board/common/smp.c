@@ -22,6 +22,7 @@
  */
 
 #include <stdint.h>
+#include <stdio.h>
 
 #include "board.h"
 
@@ -81,6 +82,15 @@ void board_smp_mark_core_up(uint32_t core)
 	}
 }
 
+/* Secondary descent marker, called from smp_secondary.S after that core's
+ * MMU and stack are live. Stamped but raw (no print lock): the descent
+ * window must not spin on a lock the boot core may hold mid-line, and it
+ * overlaps OP-TEE's own console traffic (see the file comment there). */
+void board_smp_descent_marker(void)
+{
+	board_early_print_raw("smp: descent-a\n");
+}
+
 /* Returns the BCD-ish PSCI version (0x10001 = 1.1) or 0 when the conduit is
  * dead. Reported at boot: it is the cheapest possible probe of "is BL31
  * listening on SMC" before any core is released. */
@@ -127,20 +137,18 @@ void board_smp_start_secondaries(void)
 	}
 
 	{
-		extern void uart_early_puts(const char *s);
-
-		uart_early_puts("[rel]\r\n");
+		board_early_print_raw("smp: rel\n");
 	}
 
 	/* Wait for the secondaries' report-in. Plain spin with a generous
 	 * iteration bound: WFE here is a lost-event hang waiting to happen
 	 * (the SEV from a reporting core can land before this core's WFE,
 	 * and with no tick yet there is nothing to wake it). Progress leaks
-	 * to the raw UART - bypassing the print lock - so a wedge here shows
+	 * to the stamped raw writer - bypassing the print lock, which this
+	 * pre-scheduler window must not spin on - so a wedge here shows
 	 * exactly how far the reports got. */
 	{
-		extern void uart_early_puts(const char *s);
-		extern void uart_early_put_hex32(unsigned int value);
+		char line[32];
 
 		for (i = 0u; i < SMP_UP_WAIT_LIMIT; i++) {
 			if (board_smp_up_count() ==
@@ -148,9 +156,10 @@ void board_smp_start_secondaries(void)
 				break;
 			}
 			if ((i & 0x3ffffffu) == 0u) {
-				uart_early_puts("[wait up=");
-				uart_early_put_hex32(board_smp_up_count());
-				uart_early_puts("]\r\n");
+				(void)snprintf(line, sizeof(line),
+					       "smp: wait up=%u\n",
+					       (unsigned)board_smp_up_count());
+				board_early_print_raw(line);
 			}
 			__asm__ __volatile__("yield" ::: "memory");
 		}

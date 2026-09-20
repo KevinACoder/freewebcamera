@@ -64,24 +64,6 @@ static uint32_t rtos_check_failures;
 static void rtos_primitives_check(void);
 static void its_check(void);
 
-/* --- console -------------------------------------------------------------- */
-
-/* No libc: a local length keeps the image freestanding. */
-static uint32_t text_len(const char *s)
-{
-	uint32_t n = 0;
-
-	while (s[n] != '\0') {
-		n++;
-	}
-	return n;
-}
-
-static void console_print(const char *s)
-{
-	(void)Driver_USART_Console.Send(s, text_len(s));
-}
-
 /* --- SPI soft-trigger probe ---------------------------------------------- */
 
 static void spi_probe_handler(void)
@@ -124,23 +106,23 @@ static void task_report(void *argument)
 		seen = osKernelGetTickCount();
 
 		if (seen >= 500U && task_a_wakes > 0U && task_b_wakes > 0U) {
-			console_print("SWITCH OK\n");
-			console_print("TICK OK\n");
+			board_log("app: SWITCH OK\n");
+			board_log("app: TICK OK\n");
 
 			if (spi_hits == 0U) {
-				console_print("SPI SOFTTRIG FAIL (no handler entry)\n");
+				board_log("app: SPI SOFTTRIG FAIL (no handler entry)\n");
 			} else {
-				console_print("SPI SOFTTRIG OK\n");
+				board_log("app: SPI SOFTTRIG OK\n");
 			}
 
 			rtos_primitives_check();
 			if (rtos_check_failures == 0U) {
-				console_print("CMSIS RTOS2 OK\n");
+				board_log("app: CMSIS RTOS2 OK\n");
 			}
 
 			its_check();
 
-			console_print("M0 ANCHORS DONE\n");
+			board_log("app: M0 ANCHORS DONE\n");
 
 			/* Report once, then idle. */
 			for (;;) {
@@ -185,9 +167,7 @@ static void timer_cb(void *argument)
 static void fail(const char *what)
 {
 	rtos_check_failures++;
-	console_print("RTOS CHECK FAIL: ");
-	console_print(what);
-	console_print("\n");
+	board_log("app: RTOS CHECK FAIL: %s\n", what);
 }
 
 static void rtos_primitives_check(void)
@@ -347,7 +327,7 @@ static void rtos_primitives_check(void)
 		fail("osThreadFlagsClear did not clear");
 	}
 
-	console_print("CMSIS RTOS2 DONE\n");
+	board_log("app: CMSIS RTOS2 DONE\n");
 }
 
 /* --- ITS / LPI ------------------------------------------------------------
@@ -362,24 +342,10 @@ static void its_check(void)
 	uint32_t delivered = 0U;
 
 	if (its_selftest(&delivered) != 0) {
-		console_print("ITS LPI FAIL\n");
+		board_log("its: LPI FAIL\n");
 		return;
 	}
-	console_print("ITS LPI OK (n=");
-	{
-		char buf[4];
-		int i = 0;
-		uint32_t v = delivered;
-
-		if (v >= 10U) {
-			buf[i++] = (char)('0' + (v / 10U));
-		}
-		buf[i++] = (char)('0' + (v % 10U));
-		buf[i++] = ')';
-		buf[i] = '\0';
-		console_print(buf);
-	}
-	console_print("\n");
+	board_log("its: LPI OK (n=%u)\n", (unsigned)delivered);
 }
 
 /* Start the interactive shell.
@@ -396,10 +362,10 @@ static void task_shell_start(void *argument)
 	(void)argument;
 
 	if (shell_start() != 0) {
-		console_print("SHELL FAIL\n");
+		board_log("shell: FAIL\n");
 		return;
 	}
-	console_print("SHELL READY\n");
+	board_log("shell: READY\n");
 
 	/* Nothing left to do: the shell owns its own task from here. Terminating
 	 * rather than idling keeps the stack and the slot free. */
@@ -422,10 +388,10 @@ static void task_net_start(void *argument)
 	(void)argument;
 
 	if (net_start() != 0) {
-		console_print("NET FAIL\n");
+		board_log("net: FAIL\n");
 		return;
 	}
-	console_print("NET READY\n");
+	board_log("net: READY\n");
 
 	osThreadTerminate(osThreadGetId());
 }
@@ -442,10 +408,10 @@ static void task_fs_start(void *argument)
 	(void)argument;
 
 	if (fs_start() != 0) {
-		console_print("FS FAIL\n");
+		board_log("fs: FAIL\n");
 		return;
 	}
-	console_print("FS READY\n");
+	board_log("fs: READY\n");
 
 	osThreadTerminate(osThreadGetId());
 }
@@ -464,10 +430,10 @@ static void task_sdio_start(void *argument)
 	(void)argument;
 
 	if (sdio_start() != 0) {
-		console_print("SDIO FAIL\n");
+		board_log("sdio: FAIL\n");
 		return;
 	}
-	console_print("SDIO READY\n");
+	board_log("sdio: READY\n");
 
 	osThreadTerminate(osThreadGetId());
 }
@@ -484,10 +450,10 @@ static void task_usb_start(void *argument)
 	(void)argument;
 
 	if (usb_start() != 0) {
-		console_print("USB FAIL\n");
+		board_log("usb: FAIL\n");
 		return;
 	}
-	console_print("USB READY\n");
+	board_log("usb: READY\n");
 
 	osThreadTerminate(osThreadGetId());
 }
@@ -502,37 +468,25 @@ void board_main(void)
 	(void)Driver_USART_Console.Initialize(console_event);
 	(void)Driver_USART_Console.PowerControl(ARM_POWER_FULL);
 
-	console_print(IMAGE_BANNER);
+	board_early_print(IMAGE_BANNER);
 
 	/* Report the counter frequency: proves CNTV/CNTFRQ are reachable from
 	 * EL1, which is the precondition for the tick working at all. */
 	__asm__ __volatile__("mrs %0, cntfrq_el0" : "=r"(cntfrq));
-	console_print("cntfrq=");
-	{
-		char buf[12];
-		int i = (int)sizeof(buf) - 1;
-
-		buf[i] = '\0';
-		do {
-			buf[--i] = (char)('0' + (cntfrq % 10U));
-			cntfrq /= 10U;
-		} while (cntfrq != 0U && i > 0);
-		console_print(&buf[i]);
-	}
-	console_print("\n");
+	board_log("board: cntfrq=%u\n", (unsigned)cntfrq);
 
 	/* Interrupt controller, through the CMSIS interface. */
 	(void)IRQ_Initialize();
 
 	if (IRQ_SetHandler((IRQn_ID_t)SPI_PROBE_INTID, spi_probe_handler) != 0) {
-		console_print("SPI handler install FAIL\n");
+		board_log("app: SPI handler install FAIL\n");
 	}
 	(void)IRQ_SetPriority((IRQn_ID_t)SPI_PROBE_INTID, SPI_PROBE_PRIORITY);
 	(void)IRQ_Enable((IRQn_ID_t)SPI_PROBE_INTID);
 
 	/* Kernel init through CMSIS-RTOS2. */
 	if (osKernelInitialize() != osOK) {
-		console_print("[fatal] osKernelInitialize failed\n");
+		board_log("fatal: osKernelInitialize failed\n");
 		return;
 	}
 	state = osKernelGetState();
@@ -540,27 +494,27 @@ void board_main(void)
 
 	if (osThreadNew(task_a, 0, &(osThreadAttr_t){ .name = "a",
 			.stack_size = 1024, .priority = osPriorityNormal }) == 0) {
-		console_print("[fatal] thread a\n");
+		board_log("fatal: thread a\n");
 		return;
 	}
 	if (osThreadNew(task_b, 0, &(osThreadAttr_t){ .name = "b",
 			.stack_size = 1024, .priority = osPriorityNormal }) == 0) {
-		console_print("[fatal] thread b\n");
+		board_log("fatal: thread b\n");
 		return;
 	}
 	if (osThreadNew(task_report, 0, &(osThreadAttr_t){ .name = "report",
 			.stack_size = 1024, .priority = osPriorityAboveNormal }) == 0) {
-		console_print("[fatal] thread report\n");
+		board_log("fatal: thread report\n");
 		return;
 	}
 	if (osThreadNew(task_shell_start, 0, &(osThreadAttr_t){ .name = "shstart",
 			.stack_size = 1024, .priority = osPriorityHigh }) == 0) {
-		console_print("[fatal] thread shell\n");
+		board_log("fatal: thread shell\n");
 		return;
 	}
 	if (osThreadNew(task_net_start, 0, &(osThreadAttr_t){ .name = "netstart",
 			.stack_size = 1536, .priority = osPriorityNormal }) == 0) {
-		console_print("[fatal] thread net\n");
+		board_log("fatal: thread net\n");
 		return;
 	}
 	/* Stack and priority: mounting descends into FatFs (a few hundred bytes
@@ -569,17 +523,17 @@ void board_main(void)
 	 * during bring-up is not kept waiting. */
 	if (osThreadNew(task_fs_start, 0, &(osThreadAttr_t){ .name = "fsstart",
 			.stack_size = 2048, .priority = osPriorityBelowNormal }) == 0) {
-		console_print("[fatal] thread fs\n");
+		board_log("fatal: thread fs\n");
 		return;
 	}
 	if (osThreadNew(task_sdio_start, 0, &(osThreadAttr_t){ .name = "sdiostart",
 			.stack_size = 2048, .priority = osPriorityBelowNormal }) == 0) {
-		console_print("[fatal] thread sdio\n");
+		board_log("fatal: thread sdio\n");
 		return;
 	}
 	if (osThreadNew(task_usb_start, 0, &(osThreadAttr_t){ .name = "usbstart",
 			.stack_size = 2048, .priority = osPriorityBelowNormal }) == 0) {
-		console_print("[fatal] thread usb\n");
+		board_log("fatal: thread usb\n");
 		return;
 	}
 
@@ -594,7 +548,7 @@ void board_main(void)
 	/* Never returns. */
 	(void)osKernelStart();
 
-	console_print("[fatal] kernel returned\n");
+	board_log("fatal: kernel returned\n");
 	for (;;) {
 		__asm__ __volatile__("wfe");
 	}

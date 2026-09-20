@@ -31,6 +31,7 @@
  */
 
 #include <stdint.h>
+#include <stdio.h>
 
 #include "Driver_USART.h"
 #include "board.h"
@@ -266,7 +267,7 @@ void uart_early_panic(const char *message)
 	 * board. */
 	(void)program_uart();
 	uart_early_puts((char *)(uintptr_t)message);
-	uart_early_puts("[board] parked; power-cycle to recover\n");
+	board_early_print_raw("uart: parked; power-cycle to recover\n");
 }
 
 /* --- CMSIS ARM_DRIVER_USART ----------------------------------------------- */
@@ -485,33 +486,37 @@ void usart_rx_irq_handler(void)
 	uint32_t iir = reg_read(REG_IIR) & IIR_ID_MASK;
 
 	/* M0 bring-up trace: make ISR activity observable even when the
-	 * reason turns out to be benign. Three entries, then silence. */
+	 * reason turns out to be benign. Three entries, then silence.
+	 * Stamped raw writer: this is ISR context and must not spin on the
+	 * print lock. */
 	if (traced_entries < 3U) {
+		char line[64];
+
 		traced_entries++;
-		uart_early_puts("[uart] rx irq entry: intid=");
-		uart_early_put_u32(intid);
-		uart_early_puts(" iir=");
-		uart_early_put_hex32(iir);
-		uart_early_puts(" lsr=");
-		uart_early_put_hex32(reg_read(REG_LSR));
-		uart_early_puts("\n");
+		(void)snprintf(line, sizeof(line),
+			       "uart: rx irq entry: intid=%u iir=%02x lsr=%02x\n",
+			       (unsigned)intid, (unsigned)iir,
+			       (unsigned)reg_read(REG_LSR));
+		board_early_print_raw(line);
 	}
 
 	if (iir != IIR_ID_RX_AVAILABLE && iir != IIR_ID_RX_TIMEOUT) {
 		if (unexpected_reports < 3U) {
+			char line[64];
+
 			unexpected_reports++;
-			uart_early_puts("[uart] interrupt without RX data:"
-					" intid=");
-			uart_early_put_u32(intid);
-			uart_early_puts(" iir=");
-			uart_early_put_hex32(iir);
-			uart_early_puts(" lsr=");
-			uart_early_put_hex32(reg_read(REG_LSR));
-			uart_early_puts("\n");
+			(void)snprintf(line, sizeof(line),
+				       "uart: interrupt without RX data:"
+				       " intid=%u iir=%02x lsr=%02x\n",
+				       (unsigned)intid, (unsigned)iir,
+				       (unsigned)reg_read(REG_LSR));
+			board_early_print_raw(line);
 		}
 
 		if ((++unexpected_reports >= CONSOLE_BADHIT_LIMIT) &&
 		    (rebound == 0U)) {
+			char line[64];
+
 			rebound = 1U;
 			/* Storm defence, nothing more: disable the asserting
 			 * line so it cannot livelock the core, and leave the
@@ -522,10 +527,11 @@ void usart_rx_irq_handler(void)
 			 * the shell while looking like progress. Console RX
 			 * stays on BOARD_CONSOLE_INTID, full stop. */
 			(void)IRQ_Disable((IRQn_ID_t)intid);
-			uart_early_puts("[uart] line asserts without RX data;"
-					" console RX disabled on intid ");
-			uart_early_put_u32(intid);
-			uart_early_puts("\n");
+			(void)snprintf(line, sizeof(line),
+				       "uart: line asserts without RX data;"
+				       " console RX disabled on intid %u\n",
+				       (unsigned)intid);
+			board_early_print_raw(line);
 			rx_active = 0u;
 		}
 		return;
@@ -723,19 +729,15 @@ void uart_rx_probe(void)
 	int w;
 	int b;
 
-	uart_early_puts("[rxprobe] console intid=");
-	uart_early_put_u32(console_intid);
-	uart_early_puts(" ier=");
-	uart_early_put_hex32(reg_read(REG_IER));
-	uart_early_puts(" lcr=");
-	uart_early_put_hex32(reg_read(REG_LCR));
-	uart_early_puts(" mcr=");
-	uart_early_put_hex32(reg_read(REG_MCR));
-	uart_early_puts(" iir=");
-	uart_early_put_hex32(reg_read(REG_IIR));
-	uart_early_puts(" lsr=");
-	uart_early_put_hex32(reg_read(REG_LSR));
-	uart_early_puts("\n[rxprobe] type now (3s window)\n");
+	board_log("uart: rxprobe: console intid=%u ier=%02x lcr=%02x"
+		  " mcr=%02x iir=%02x lsr=%02x",
+		  (unsigned)console_intid,
+		  (unsigned)reg_read(REG_IER),
+		  (unsigned)reg_read(REG_LCR),
+		  (unsigned)reg_read(REG_MCR),
+		  (unsigned)reg_read(REG_IIR),
+		  (unsigned)reg_read(REG_LSR));
+	board_log("uart: rxprobe: type now (3s window)");
 
 	for (w = 0; w < 12; w++) {
 		before[w] = reg_rd32(BOARD_GICD_BASE + 0x200u +
@@ -756,29 +758,35 @@ void uart_rx_probe(void)
 				    4u * (uint32_t)w);
 	}
 
-	uart_early_puts("[rxprobe] bytes-arrived=");
-	uart_early_put_u32(polls);
-	uart_early_puts(" iir=");
-	uart_early_put_hex32(reg_read(REG_IIR));
-	uart_early_puts(" lsr=");
-	uart_early_put_hex32(reg_read(REG_LSR));
-	uart_early_puts(" pending:");
-	for (w = 0; w < 12; w++) {
-		uint32_t set = after[w] & ~before[w];
+	{
+		char line[128];
+		int off;
 
-		if (after[w] != 0u) {
-			uart_early_puts(" w");
-			uart_early_put_u32((uint32_t)w);
-			uart_early_puts("=");
-			uart_early_put_hex32(after[w]);
-		}
-		for (b = 0; b < 32; b++) {
-			if (((set & (1u << b)) != 0u) && (candidate < 0)) {
-				candidate = (w * 32) + b;
+		off = snprintf(line, sizeof(line),
+			       "uart: rxprobe: bytes-arrived=%u iir=%02x"
+			       " lsr=%02x pending:",
+			       (unsigned)polls,
+			       (unsigned)reg_read(REG_IIR),
+			       (unsigned)reg_read(REG_LSR));
+		for (w = 0; w < 12 && off > 0 &&
+		     off < (int)sizeof(line) - 1; w++) {
+			uint32_t set = after[w] & ~before[w];
+
+			if (after[w] != 0u) {
+				off += snprintf(line + off,
+						sizeof(line) - (size_t)off,
+						" w%u=%02x", (unsigned)w,
+						(unsigned)after[w]);
+			}
+			for (b = 0; b < 32; b++) {
+				if (((set & (1u << b)) != 0u) &&
+				    (candidate < 0)) {
+					candidate = (w * 32) + b;
+				}
 			}
 		}
+		board_log("%s", line);
 	}
-	uart_early_puts("\n");
 
 	/* Drain whatever the window left, so a level condition cannot stay
 	 * held on a line we are about to rebind. */
@@ -788,18 +796,16 @@ void uart_rx_probe(void)
 
 	if (candidate > 31) {
 		if ((unsigned int)candidate == console_intid) {
-			uart_early_puts("[rxprobe] uart asserts on the armed"
-					" intid; irq delivery path is the"
-					" suspect\n");
+			board_log("uart: rxprobe: uart asserts on the armed"
+				  " intid; irq delivery path is the suspect");
 		} else if (candidate <= 1019) {
-			uart_early_puts("[rxprobe] uart asserts on intid ");
-			uart_early_put_u32((uint32_t)candidate);
-			uart_early_puts("; rebinding console\n");
+			board_log("uart: rxprobe: uart asserts on intid %u;"
+				  " rebinding console", (unsigned)candidate);
 			(void)uart_console_irq_rebind((unsigned int)candidate);
 		}
 	} else {
-		uart_early_puts("[rxprobe] no new distributor pending bit;"
-				" the uart irq is not reaching the gic\n");
+		board_log("uart: rxprobe: no new distributor pending bit;"
+			  " the uart irq is not reaching the gic");
 	}
 }
 

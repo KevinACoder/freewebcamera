@@ -38,6 +38,113 @@
  * HERE - not through the console driver (see the lock comment below). */
 extern void uart_early_puts(const char *s);
 
+/* --- boot-relative timestamp ----------------------------------------------- */
+
+/* NetBSD-shaped dmesg stamp: seconds since the first stamped print,
+ * right-aligned in width 4, three fractional digits ("[   1.234] "). The
+ * fractional precision is deliberately fixed at milliseconds - the console
+ * renders about one character per 87 us, so finer digits would be fake
+ * precision on the wire. */
+#define BOARD_TS_STAMP_LEN 16u
+
+/* Counter value at the first stamped print; 0 means "not captured yet".
+ * Captured lazily because there is no single "C start" call before the
+ * earliest board_log callers (GIC bring-up runs before board_main). Two
+ * cores racing on the first call store near-identical values; the u64 store
+ * is a single aligned STR, so the worst case is a one-tick offset in t0. */
+static uint64_t log_t0;
+
+static uint64_t read_cntvct(void)
+{
+	uint64_t v;
+
+	__asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(v));
+	return v;
+}
+
+static uint64_t read_cntfrq(void)
+{
+	uint64_t v;
+
+	__asm__ __volatile__("mrs %0, cntfrq_el0" : "=r"(v));
+	return v;
+}
+
+/* 64/32 restoring division. This image links no libgcc, and a runtime
+ * divisor (cntfrq comes from a register) cannot be constant-folded into the
+ * compiler's umulh reciprocal trick the way minilibc's literal bases are.
+ * 64 iterations is far below the per-line cost of a 115200 console. */
+static uint64_t udiv64(uint64_t n, uint32_t d)
+{
+	uint64_t q = 0u;
+	uint64_t r = 0u;
+	int i;
+
+	for (i = 63; i >= 0; i--) {
+		r = (r << 1) | ((n >> i) & 1u);
+		if (r >= (uint64_t)d) {
+			r -= (uint64_t)d;
+			q |= (1ULL << i);
+		}
+	}
+	return q;
+}
+
+/* Render the stamp for "now" into buf (BOARD_TS_STAMP_LEN capacity) and
+ * return its length. */
+int board_uptime_stamp(char buf[BOARD_TS_STAMP_LEN])
+{
+	uint64_t delta, freq, sec;
+	uint32_t frac;
+
+	if (log_t0 == 0u) {
+		log_t0 = read_cntvct();
+		if (log_t0 == 0u) {
+			log_t0 = 1u;	/* counter really was 0: don't re-capture */
+		}
+	}
+
+	delta = read_cntvct() - log_t0;
+	freq = read_cntfrq();
+	if (freq == 0u) {
+		freq = 1u;
+	}
+	sec = udiv64(delta, (uint32_t)freq);
+	frac = (uint32_t)udiv64((delta - sec * freq) * 1000u,
+				(uint32_t)freq);
+
+	return snprintf(buf, BOARD_TS_STAMP_LEN, "[%4u.%03u] ",
+			(unsigned int)sec, frac);
+}
+
+/* Boot-relative uptime split out for callers that want the numbers (the
+ * shell's uptime command cross-checks this clock against the OS tick). */
+void board_uptime_parts(uint32_t *sec, uint32_t *ms)
+{
+	uint64_t delta, freq, s;
+
+	if (log_t0 == 0u) {
+		log_t0 = read_cntvct();
+		if (log_t0 == 0u) {
+			log_t0 = 1u;
+		}
+	}
+
+	delta = read_cntvct() - log_t0;
+	freq = read_cntfrq();
+	if (freq == 0u) {
+		freq = 1u;
+	}
+	s = udiv64(delta, (uint32_t)freq);
+	if (sec != NULL) {
+		*sec = (uint32_t)s;
+	}
+	if (ms != NULL) {
+		*ms = (uint32_t)udiv64((delta - s * freq) * 1000u,
+				       (uint32_t)freq);
+	}
+}
+
 /* --- one-line print lock --------------------------------------------------- */
 
 static volatile unsigned int print_lock_held;
@@ -97,25 +204,46 @@ static void print_lock_give(uint64_t saved_daif)
 void board_early_print(const char *message)
 {
 	uint64_t saved_daif;
+	char ts[BOARD_TS_STAMP_LEN];
 
+	(void)board_uptime_stamp(ts);
 	print_lock_take(&saved_daif);
+	uart_early_puts(ts);
 	uart_early_puts(message);
 	print_lock_give(saved_daif);
 }
 
+/* Same sink and stamp, WITHOUT the print lock: for contexts that must not
+ * spin on it. The lock is taken with IRQs masked, so a non-fatal print from
+ * an ISR could deadlock against the very context it interrupted (the holder
+ * would never run to release); the SMP bring-up window and the secondary
+ * descent have the same shape. Lines from here may interleave mid-line with
+ * locked output - the accepted cost of being callable from anywhere. */
+void board_early_print_raw(const char *message)
+{
+	char ts[BOARD_TS_STAMP_LEN];
+
+	(void)board_uptime_stamp(ts);
+	uart_early_puts(ts);
+	uart_early_puts(message);
+}
+
 /* Same sink, with numbers: drivers that report what they found (register
  * versions, PHY ids, negotiated speed) would otherwise each carry their own
- * formatter. The buffer is deliberately small - this is bring-up output on a
- * polled 115200 console, not a logging system, and a driver that wants to
+ * formatter. The stamp is composed first so the message budget shrinks by
+ * its length. The buffer is deliberately small - this is bring-up output on
+ * a polled 115200 console, not a logging system, and a driver that wants to
  * print per packet has picked the wrong mechanism. */
 void board_log(const char *fmt, ...)
 {
 	char line[128];
 	va_list ap;
 	uint64_t saved_daif;
+	int off;
 
+	off = board_uptime_stamp(line);
 	va_start(ap, fmt);
-	(void)vsnprintf(line, sizeof(line), fmt, ap);
+	(void)vsnprintf(line + off, sizeof(line) - (size_t)off, fmt, ap);
 	va_end(ap);
 
 	print_lock_take(&saved_daif);

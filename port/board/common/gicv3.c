@@ -252,7 +252,7 @@ static void gicd_wait_rwp(void)
 			return;
 		}
 	}
-	board_early_print("[gicv3] distributor RWP stuck\n");
+	board_early_print("gicv3: distributor RWP stuck\n");
 }
 
 static void gicr_wait_rwp(void)
@@ -268,7 +268,7 @@ static void gicr_wait_rwp(void)
 			return;
 		}
 	}
-	board_early_print("[gicv3] redistributor RWP stuck\n");
+	board_early_print("gicv3: redistributor RWP stuck\n");
 }
 
 static void set_enabled_bit(uint32_t intid)
@@ -401,7 +401,7 @@ static void gic_redistributor_init(void)
 		}
 	}
 	if (i == GIC_WAIT_LIMIT) {
-		board_early_print("[gicv3] redistributor never woke\n");
+		board_early_print("gicv3: redistributor never woke\n");
 	}
 
 	gicr_wait_rwp();
@@ -427,7 +427,7 @@ static void gic_cpu_interface_sre_enable(void)
 	sre = 0;
 	__asm__ __volatile__("mrs %0, s3_0_c12_c12_5" : "=r"(sre));
 	if ((sre & 0x1u) == 0u) {
-		board_early_print("[gicv3] ICC_SRE will not set\n");
+		board_early_print("gicv3: ICC_SRE will not set\n");
 	}
 }
 
@@ -1001,4 +1001,27 @@ void board_gicv3_send_sgi(uint32_t intid, uint32_t core_mask)
 	}
 
 	__asm__ __volatile__("isb" ::: "memory");
+}
+
+/* Run-time interrupt-path diagnostics, for the shell's gicdiag command.
+ * Read-only, on the CALLING core: PMR is this core's priority mask (a value
+ * parked below the console priority starves exactly those lines while tick
+ * and SGI keep delivering - the "anchors green, shell deaf" split) and RPR
+ * is the running priority (non-idle means the GIC still sees a claimed
+ * interrupt on this core).
+ *
+ * ICC_RPR_EL1 is S3_0_C12_C11_3. NEVER touch S3_0_C12_C8_0 in a diagnostic
+ * like this - that is ICC_IAR0_EL1, and reading it at EL1 in this
+ * configuration resets through EL3 (the D33 lesson). */
+void board_gicv3_diag(uint32_t *pmr, uint32_t *rpr)
+{
+	uint32_t v;
+
+	__asm__ __volatile__("mrs %0, s3_0_c12_c11_3" : "=r"(v));
+	if (rpr != NULL) {
+		*rpr = v & 0xffu;
+	}
+	if (pmr != NULL) {
+		*pmr = IRQ_GetPriorityMask();
+	}
 }

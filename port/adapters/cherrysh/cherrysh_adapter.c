@@ -249,30 +249,43 @@ static void shell_task(void *argument)
 
 static int cmd_version(int argc, char **argv)
 {
+	chry_shell_t *csh = CSH_FROM_ARGV(argc, argv);
+#ifdef THREADX_BUILD
+	const char *kernel = "Eclipse ThreadX 6.5.1 (cortex_a55_smp)";
+#else
+	const char *kernel = "FreeRTOS V11.3.1 (ARM_AARCH64_SRE)";
+#endif
 	(void)argc;
 	(void)argv;
-	csh_printf(CSH_FROM_ARGV(argc, argv),
+	csh_printf(csh,
 		   "freewebcamera\r\n"
 		   "  repo      freewebcamera (BSD-2)\r\n"
 		   "  target    RK3568 E4AP5G1-ITX, cortex-a55\r\n"
-		   "  kernel    FreeRTOS V11.3.1 (ARM_AARCH64_SRE)\r\n"
-		   "  api       CMSIS-RTOS2\r\n");
+		   "  kernel    %s\r\n"
+		   "  api       CMSIS-RTOS2\r\n",
+		   kernel);
 	return 0;
 }
 
-/* Uptime straight from the kernel tick count, so it is also a live check that
- * the tick is still running. */
+/* Uptime from TWO clocks, deliberately: CNTVCT (board_uptime_parts - the
+ * same clock the "[   s.mmm]" log stamps use) and the kernel tick. The boot
+ * log and the shell therefore always agree on "when", and a divergence
+ * between the two numbers is direct evidence of a dead or racing tick. */
 static int cmd_uptime(int argc, char **argv)
 {
 	chry_shell_t *csh = CSH_FROM_ARGV(argc, argv);
 	uint32_t ticks = osKernelGetTickCount();
 	uint32_t hz = osKernelGetTickFreq();
-	uint32_t secs = (hz != 0U) ? (ticks / hz) : 0U;
+	uint32_t usec = 0U;
+	uint32_t ums = 0U;
 
-	csh_printf(csh, "uptime: %u.%03u s (%u ticks at %u Hz)\r\n",
-		   (unsigned)secs,
-		   (unsigned)((hz != 0U) ? ((ticks % hz) * 1000U / hz) : 0U),
-		   (unsigned)ticks, (unsigned)hz);
+	board_uptime_parts(&usec, &ums);
+	csh_printf(csh,
+		   "uptime: %u.%03u s (cntvct); tick %u at %u Hz = %u.%03u s\r\n",
+		   (unsigned)usec, (unsigned)ums,
+		   (unsigned)ticks, (unsigned)hz,
+		   (unsigned)((hz != 0U) ? (ticks / hz) : 0U),
+		   (unsigned)((hz != 0U) ? ((ticks % hz) * 1000U / hz) : 0U));
 	return 0;
 }
 
@@ -403,6 +416,25 @@ static int cmd_uartint(int argc, char **argv)
 	return 0;
 }
 
+/* Interrupt-path snapshot on the calling core: PMR (this core's priority
+ * mask - a value parked below the console priority starves exactly those
+ * lines while tick/SGI keep delivering: the "anchors green, shell deaf"
+ * split), RPR (the running priority - non-idle means the GIC still sees a
+ * claimed interrupt), and the console RX state. This is the discriminator
+ * between "the line is masked" and "the kernel never ran the handler". */
+static int cmd_gicdiag(int argc, char **argv)
+{
+	chry_shell_t *csh = CSH_FROM_ARGV(argc, argv);
+	uint32_t pmr = 0U;
+	uint32_t rpr = 0U;
+
+	board_gicv3_diag(&pmr, &rpr);
+	csh_printf(csh, "gicdiag: PMR=%02x RPR=%02x console-intid=%u\r\n",
+		   (unsigned)pmr, (unsigned)rpr,
+		   (unsigned)BOARD_CONSOLE_INTID);
+	return 0;
+}
+
 /* The SMP acceptance: four tasks pinned one-per-core, each verifying with
  * MPIDR that it only ever ran on its bound core. Body in app/smp_test.c -
  * the app layer owns the test, this adapter only owns the command shell
@@ -437,6 +469,8 @@ CSH_CMD_EXPORT_ALIAS_FULL(cmd_itsdump, itsdump, "itsdump",
 			  "dump ITS/LPI delivery state");
 CSH_CMD_EXPORT_ALIAS_FULL(cmd_uartint, uartint, "uartint",
 			  "show/move console RX INTID");
+	CSH_CMD_EXPORT_ALIAS_FULL(cmd_gicdiag, gicdiag, "gicdiag",
+				  "interrupt-path snapshot: PMR/RPR/console state");
 	CSH_CMD_EXPORT_ALIAS_FULL(cmd_smp, smp, "smp",
 				  "pin one task per core and verify with MPIDR");
 

@@ -63,7 +63,7 @@ void kernel_tests_boot( void )
 
 	/* vStartTests ends in vTaskStartScheduler(); reaching here means the
 	 * scheduler refused to start. */
-	board_log( "ktest: [fatal] vTaskStartScheduler returned" );
+	board_log( "fatal: vTaskStartScheduler returned" );
 	taskDISABLE_INTERRUPTS();
 	for( ; ; )
 	{

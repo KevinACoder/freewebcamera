@@ -123,10 +123,10 @@ void tx_irq_handler(void)
 		 * - goes through the board's handler table. */
 		board_gicv3_dispatch(id);
 	} else {
-		/* Spurious (IAR=1023): keep the bare-UART marker the FreeRTOS
-		 * glue prints, so both kernels produce comparable logs. No EOI
-		 * for a spurious ack. */
-		board_early_print("  [irq] spurious\r\n");
+		/* Spurious (IAR=1023): same stamped raw marker as the
+		 * FreeRTOS glue, so both kernels produce comparable logs. No
+		 * EOI for a spurious ack. */
+		board_early_print_raw("irq: spurious\n");
 	}
 
 	if (id != 1023U) {
@@ -240,7 +240,7 @@ void tx_fault_park(uint32_t kind)
 {
 	unsigned long esr = 0UL, far = 0UL;
 
-	board_early_print("\n[threadx] FAULT: synchronous exception\n");
+	board_early_print("fatal: synchronous exception\n");
 	__asm__ __volatile__("mrs %0, esr_el1" : "=r"(esr));
 	__asm__ __volatile__("mrs %0, far_el1" : "=r"(far));
 	{
@@ -250,7 +250,7 @@ void tx_fault_park(uint32_t kind)
 		char buf[64];
 
 		(void)snprintf(buf, sizeof(buf),
-			       "[fault] kind=%u ESR_EL1=%08lx FAR_EL1=%08lx\n",
+			       "fatal: kind=%u ESR_EL1=%08lx FAR_EL1=%08lx\n",
 			       (unsigned)kind, esr, far & 0xffffffffUL);
 		board_early_print(buf);
 	}

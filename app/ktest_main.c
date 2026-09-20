@@ -35,22 +35,6 @@ extern ARM_DRIVER_USART Driver_USART_Console;
  * and starts the scheduler; does not return on success. */
 extern void kernel_tests_boot(void);
 
-/* Same shape as app/main.c: no libc, a local length keeps it freestanding. */
-static uint32_t text_len(const char *s)
-{
-	uint32_t n = 0;
-
-	while (s[n] != '\0') {
-		n++;
-	}
-	return n;
-}
-
-static void console_print(const char *s)
-{
-	(void)Driver_USART_Console.Send(s, text_len(s));
-}
-
 /* Copied from app/main.c: a task rather than a direct call because
  * shell_start() arms the console receive interrupt, whose path ends in an
  * ISR-to-thread flag wake - that needs a running scheduler behind it. */
@@ -59,10 +43,10 @@ static void task_shell_start(void *argument)
 	(void)argument;
 
 	if (shell_start() != 0) {
-		console_print("SHELL FAIL\n");
+		board_log("shell: FAIL\n");
 		return;
 	}
-	console_print("SHELL READY\n");
+	board_log("shell: READY\n");
 
 	osThreadTerminate(osThreadGetId());
 }
@@ -72,19 +56,19 @@ void board_main(void)
 	(void)Driver_USART_Console.Initialize(0);
 	(void)Driver_USART_Console.PowerControl(ARM_POWER_FULL);
 
-	console_print("\nfreewebcamera ktest - RK3568 kernel test image\n");
+	board_early_print("\nfreewebcamera ktest - RK3568 kernel test image\n");
 
 	(void)IRQ_Initialize();
 
 	if (osKernelInitialize() != osOK) {
-		console_print("[fatal] osKernelInitialize failed\n");
+		board_log("fatal: osKernelInitialize failed\n");
 		return;
 	}
 
 	if (osThreadNew(task_shell_start, 0, &(osThreadAttr_t){
 			.name = "shstart", .stack_size = 1024,
 			.priority = osPriorityHigh }) == 0) {
-		console_print("[fatal] thread shell\n");
+		board_log("fatal: thread shell\n");
 		return;
 	}
 
@@ -92,7 +76,7 @@ void board_main(void)
 	 * the scheduler (official TestRunner flow). Never returns. */
 	kernel_tests_boot();
 
-	console_print("[fatal] kernel_tests_boot returned\n");
+	board_log("fatal: kernel_tests_boot returned\n");
 	for (;;) {
 		__asm__ __volatile__("wfe");
 	}

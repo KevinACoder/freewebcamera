@@ -245,14 +245,14 @@ boot_fault_common:
 
 	.section .rodata, "a"
 	.globl	msg_sync
-msg_sync:	.asciz	"\n[carrier] FAULT: synchronous exception\n"
+msg_sync:	.asciz	"fatal: synchronous exception\n"
 	.globl	msg_irq
-msg_irq:	.asciz	"\n[carrier] FAULT: IRQ before scheduler\n"
+msg_irq:	.asciz	"fatal: IRQ before scheduler\n"
 	.globl	msg_fiq
-msg_fiq:	.asciz	"\n[carrier] FAULT: FIQ\n"
+msg_fiq:	.asciz	"fatal: FIQ\n"
 	.globl	msg_serr
-msg_serr:	.asciz	"\n[carrier] FAULT: SError\n"
-msg_esr:	.asciz	"[fault] ESR_EL1="
+msg_serr:	.asciz	"fatal: SError\n"
+msg_esr:	.asciz	"fatal: ESR_EL1="
 msg_far:	.asciz	" FAR_EL1="
 msg_elr:	.asciz	" ELR_EL1="
 msg_newline:	.asciz	"\n"

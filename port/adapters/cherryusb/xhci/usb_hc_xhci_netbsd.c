@@ -539,7 +539,7 @@ static int xhci_cmd_address_device(struct xhci_hcd *hcd, struct xhci_dev *dev,
         dw3 = xhci_out_ctx(dev, 0)[3];
         st = (dw3 >> 27) & 0x1FU;
         hw_addr = dw3 & 0xFFU;
-        usbh_console_printf("[USBH] assigned usb addr %u (state=%u)\r\n",
+        usbh_console_printf("xhci: assigned usb addr %u (state=%u)\r\n",
                             hw_addr, st);
         if (st == SLOT_CTX_STATE_ADDRESSED && hw_addr != 0U) {
             ret = 0;
@@ -684,7 +684,7 @@ static int xhci_setup_slot(struct xhci_hcd *hcd, struct usbh_hubport *hport)
         USB_LOG_ERR("Enable slot failed, ret=%d\r\n", ret);
         return ret;
     }
-    usbh_console_printf("[USBH] xHCI slot %u enabled\r\n", slot_id);
+    usbh_console_printf("xhci: xHCI slot %u enabled\r\n", slot_id);
 
     dev = &hcd->devs[slot_id];
     memset(dev, 0, sizeof(*dev));
@@ -795,7 +795,7 @@ static int xhci_controller_init(struct xhci_hcd *hcd)
     hcd->opregs = hcd->capbase + caplen;
     hciver = (cap >> 16) & 0xFFFFU;
     if (hciver < XHCI_HCIVERSION_0_96 || hciver >= 0x0200U) {
-        usbh_console_printf("[USBH] warning: HCIVERSION 0x%04x\r\n", hciver);
+        usbh_console_printf("xhci: warning: HCIVERSION 0x%04x\r\n", hciver);
     }
     hcs1 = xhci_r32_cap(hcd, XHCI_HCSPARAMS1);
     hcs2 = xhci_r32_cap(hcd, XHCI_HCSPARAMS2);
@@ -832,7 +832,7 @@ static int xhci_controller_init(struct xhci_hcd *hcd)
     hcd->pgsz = 1U << (12U + i);
 
     usbh_console_printf(
-        "[USBH] xHCI: %u ports, %u slots, ctxsz=%u pgsz=%u caplen=%u hcs1=0x%08x\r\n",
+        "xhci: xHCI: %u ports, %u slots, ctxsz=%u pgsz=%u caplen=%u hcs1=0x%08x\r\n",
         hcd->num_ports, hcd->max_slots, hcd->ctxsz_cache, hcd->pgsz, caplen,
         hcs1);
 
@@ -949,7 +949,7 @@ static int xhci_controller_init(struct xhci_hcd *hcd)
                 break;
             }
         }
-        usbh_console_printf("[USBH] port %u PORTSC=0x%08x\r\n", i,
+        usbh_console_printf("xhci: port %u PORTSC=0x%08x\r\n", i,
                             xhci_portsc(hcd, i));
     }
 
@@ -978,7 +978,7 @@ int usb_hc_init(struct usbh_bus *bus)
     }
 
     /* 入口期读数(任何平台写之前): 诊断基线 */
-    usbh_console_printf("[USBH] entry: cap[0]=0x%08x GSNPSID=0x%08x\r\n",
+    usbh_console_printf("xhci: entry: cap[0]=0x%08x GSNPSID=0x%08x\r\n",
                         *(volatile uint32_t *)hcd->capbase,
                         *(volatile uint32_t *)(hcd->capbase + DWC3_GSNPSID));
 
@@ -1012,7 +1012,7 @@ int usb_hc_init(struct usbh_bus *bus)
     }
 
     usb_hc_enable_interrupt(busid);
-    usbh_console_printf("[USBH] usb_hc_init done bus%u\r\n", busid);
+    usbh_console_printf("xhci: usb_hc_init done bus%u\r\n", busid);
     return 0;
 }
 
@@ -1479,19 +1479,19 @@ static void xhci_handle_transfer_event(struct xhci_hcd *hcd, struct xhci_trb *ev
         return;
     }
     if (dev == NULL || dci == 0U || dci >= XHCI_MAX_DCI) {
-        usbh_console_printf("[USBH] xfer evt (no dev) slot=%u dci=%u code=%u\r\n",
+        usbh_console_printf("xhci: xfer evt (no dev) slot=%u dci=%u code=%u\r\n",
                             slot_id, dci, code);
         return;
     }
     ring = dev->ep_rings[dci];
     if (ring == NULL) {
-        usbh_console_printf("[USBH] xfer evt (no ring) slot=%u dci=%u\r\n",
+        usbh_console_printf("xhci: xfer evt (no ring) slot=%u dci=%u\r\n",
                             slot_id, dci);
         return;
     }
     if (trb_ptr < (uintptr_t)ring->trbs ||
         trb_ptr >= (uintptr_t)ring->trbs + ring->num_trbs * TRB_SIZE) {
-        usbh_console_printf("[USBH] xfer evt (bad ptr) slot=%u dci=%u ptr=%p\r\n",
+        usbh_console_printf("xhci: xfer evt (bad ptr) slot=%u dci=%u ptr=%p\r\n",
                             slot_id, dci, (void *)trb_ptr);
         return;
     }

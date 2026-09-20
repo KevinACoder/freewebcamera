@@ -81,18 +81,39 @@ void board_main(void);
 
 /* --- early output --------------------------------------------------------- */
 
-/* Fatal bring-up failures and driver probe reports go through
- * board_early_print / board_log, which write on the POLLED early UART
+/* Project log convention (NetBSD dmesg shape): one line, one stamp,
+ * "module: message". Every line through board_early_print / board_log is
+ * prefixed "[   s.mmm] " - boot-relative seconds from CNTVCT, captured at
+ * the first stamped print - and names its module in the message ("uart: ...",
+ * "smp: ...", "fatal: ..."). The shell's interactive echo/response stays on
+ * the CMSIS console driver and is not stamped; the two sinks may interleave
+ * on the wire, which is cosmetic.
+ *
+ * board_early_print / board_log write on the POLLED early UART
  * (startup.S's uart_early_puts) under a per-line spinlock. They never block
- * and are safe from any context, on any core. App console output uses the
- * CMSIS console driver instead (console_print); the two sinks may interleave
- * on the wire, which is cosmetic. */
+ * and are safe from any task context, on any core. */
 void board_early_print(const char *message);
 
 /* Same sink, formatted. Drivers that report what they found (register
  * versions, PHY ids, negotiated link speed) use this instead of each carrying
  * its own formatter. One line per call; not for per-packet output. */
 void board_log(const char *fmt, ...);
+
+/* Stamped but deliberately NOT locked: for contexts that must not spin on
+ * the print lock (ISRs, the SMP bring-up window, the secondary descent -
+ * the lock is taken with IRQs masked, so a non-fatal print from an ISR
+ * could deadlock against the context it interrupted). Lines may interleave
+ * mid-line with locked output. */
+void board_early_print_raw(const char *message);
+
+/* Render the current "[   s.mmm] " stamp into buf (16 bytes capacity);
+ * returns its length. First call captures the boot epoch. */
+int board_uptime_stamp(char buf[16]);
+
+/* Boot-relative uptime as numbers, for callers that cross-check this clock
+ * against the OS tick (the shell's uptime command). Either pointer may be
+ * NULL. */
+void board_uptime_parts(uint32_t *sec, uint32_t *ms);
 
 /* --- GICv3 (implementation of CMSIS irq_ctrl.h) -------------------------- */
 
@@ -124,6 +145,11 @@ void board_gicv3_init(void);
 /* Dispatch entry called by the kernel port's vApplicationIRQHandler with the
  * INTID already acknowledged. Runs in interrupt context. */
 void board_gicv3_dispatch(uint32_t intid);
+
+/* Interrupt-path snapshot on the calling core: *pmr = ICC_PMR_EL1,
+ * *rpr = ICC_RPR_EL1. Either pointer may be NULL. Read-only; see gicv3.c
+ * for why RPR must never be confused with IAR0. */
+void board_gicv3_diag(uint32_t *pmr, uint32_t *rpr);
 
 /* --- tick ----------------------------------------------------------------- */
 
@@ -194,6 +220,10 @@ void board_smp_start_secondaries(void);
  * setup is done. The boot core's bounded wait in
  * board_smp_start_secondaries() is waiting for exactly these reports. */
 void board_smp_mark_core_up(uint32_t core);
+
+/* Secondary descent stage marker, called from smp_secondary.S. Stamped raw
+ * output - see smp.c for why it must not take the print lock. */
+void board_smp_descent_marker(void);
 
 /* How many cores have reported up so far (boot-anchor evidence). */
 uint32_t board_smp_up_count(void);

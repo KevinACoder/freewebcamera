@@ -76,8 +76,9 @@ void vApplicationInterruptHandler(uint32_t ulICCIAR)
 		}
 		else
 		{
-			/* spurious（IAR=1023）是真异常信号，保留裸串口打点 */
-			board_early_print("  [irq] spurious\r\n");
+			/* spurious（IAR=1023）是真异常信号；ISR 上下文走无锁
+			 * raw 汇点（带戳，但绝不自旋在打印锁上） */
+			board_early_print_raw("irq: spurious\n");
 		}
 	}
 	is_in_irq--;
@@ -204,11 +205,11 @@ void SynchronousInterrupt(void *frame)
 	char buf[64];
 	unsigned long esr = 0UL, far = 0UL;
 
-	board_early_print("\n[port] FAULT: synchronous exception\n");
+	board_early_print("fatal: synchronous exception\n");
 	__asm__ __volatile__("mrs %0, esr_el1" : "=r"(esr));
 	__asm__ __volatile__("mrs %0, far_el1" : "=r"(far));
 	(void)snprintf(buf, sizeof(buf),
-		       "[fault] ESR_EL1=%08lx FAR_EL1=%08lx\n",
+		       "fatal: ESR_EL1=%08lx FAR_EL1=%08lx\n",
 		       esr, far & 0xffffffffUL);
 	board_early_print(buf);
 	taskDISABLE_INTERRUPTS();
@@ -221,7 +222,7 @@ void SynchronousInterrupt(void *frame)
 void SErrorInterrupt(void *frame)
 {
 	(void)frame;
-	board_early_print("\n[port] FAULT: SError (bus error)\n");
+	board_early_print("fatal: SError (bus error)\n");
 	taskDISABLE_INTERRUPTS();
 	for (;;) {
 		__asm__ __volatile__("wfe");
@@ -234,7 +235,7 @@ void vApplicationMallocFailedHook(void)
 {
 	/* Out of heap is fatal: the system cannot recover and continuing would
 	 * fail in ways that look unrelated to the real cause. */
-	board_early_print("\n[fatal] FreeRTOS heap exhausted\n");
+	board_early_print("fatal: FreeRTOS heap exhausted\n");
 	taskDISABLE_INTERRUPTS();
 	for (;;) {
 		__asm__ __volatile__("wfe");
@@ -245,7 +246,7 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 {
 	(void)xTask;
 	(void)pcTaskName;
-	board_early_print("\n[fatal] task stack overflow\n");
+	board_early_print("fatal: task stack overflow\n");
 	taskDISABLE_INTERRUPTS();
 	for (;;) {
 		__asm__ __volatile__("wfe");
@@ -259,7 +260,7 @@ void board_assert_failed(const char *file, int line)
 	/* Reporting the file and line would need a formatter; the console has
 	 * only raw string output at this point. The distinct message is enough
 	 * to tell an assertion from a hang when reading the serial log. */
-	board_early_print("\n[fatal] configASSERT failed\n");
+	board_early_print("fatal: configASSERT failed\n");
 	taskDISABLE_INTERRUPTS();
 	for (;;) {
 		__asm__ __volatile__("wfe");

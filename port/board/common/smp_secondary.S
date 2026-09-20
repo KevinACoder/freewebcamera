@@ -136,8 +136,10 @@ sec_el1_entry:
 
 	/* Stage marker: MMU and stacks are live, C is next. MUST sit after
 	 * the SP setup - a marker call before SP is configured pushes to
-	 * whatever SP the firmware handoff left behind (round-12 lesson). */
-	bl	uart_early_puts_marker_a
+	 * whatever SP the firmware handoff left behind (round-12 lesson).
+	 * The marker itself lives in smp.c (board_smp_descent_marker):
+	 * stamped raw output, no print lock. */
+	bl	board_smp_descent_marker
 
 	/* Kernel side: own-GIC bring-up, report in, wait, first context
 	 * restore. Does not return. The symbol is provided by whichever
@@ -155,11 +157,3 @@ sec_el1_entry:
 1:	wfe
 	b	1b
 	.size	kernel_secondary_entry, . - kernel_secondary_entry
-
-	.global uart_early_puts_marker_a
-uart_early_puts_marker_a:
-	adr	x0, mark_a
-	b	uart_early_puts
-
-	.section .rodata, "a"
-mark_a:	.asciz	"[descent-a]\r\n"
