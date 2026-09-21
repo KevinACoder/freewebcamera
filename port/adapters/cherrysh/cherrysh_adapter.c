@@ -638,13 +638,20 @@ int cherrysh_init(void)
 	 * task. Enabling the interrupt before the task exists would have that
 	 * callback run with nothing to wake.
 	 *
-	 * Note this goes through the standard CMSIS control code rather than a
-	 * driver-specific call: the adapter keeps working with any ARM_DRIVER_USART
-	 * that implements ARM_USART_CONTROL_RX, and never needs the driver's
-	 * header.
+	 * Receive() goes BEFORE the RX control code, on purpose: a CMSIS
+	 * reception fills the buffer Receive() was given, and the completion
+	 * callback reads that same buffer (rx_chunk). With the order reversed,
+	 * the boot arm filled the driver's internal scratch instead - the count
+	 * said 5, the bytes were somewhere else, and the first line a person
+	 * typed after every boot silently vanished (board-proven 2026-09-21 on
+	 * both kernels; the D42 session only looked interactive because its
+	 * first command was sacrificed the same way). Arming the client buffer
+	 * first is what makes the Control(RX,1) arm below resume it, so the
+	 * very first keystroke already lands where the callback reads.
 	 *
-	 * The chain is: IRQ -> driver drains FIFO -> shell_usart_event() (us)
-	 * -> ring + wake the shell task. */
+	 * The chain is: IRQ -> driver drains FIFO into rx_chunk ->
+	 * shell_usart_event() (us) -> ring + wake the shell task. */
+	shell_rearm_rx();
 	if (Driver_USART_Console.Control(ARM_USART_CONTROL_RX, 1U) != ARM_DRIVER_OK) {
 		return -1;
 	}

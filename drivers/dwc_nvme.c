@@ -439,7 +439,10 @@ static int32_t nvme_identify(struct nvme_ctrl *c, uint32_t cns)
 	struct nvme_command cmd = {0};
 
 	cmd.opcode = NVME_OPC_IDENTIFY;
-	cmd.nsid = c->nsid;
+	/* NSID belongs to the namespace identify only: the controller-level
+	 * identify (CNS=1) requires NSID=0, and this SSD's firmware rejects
+	 * NSID=1 there (board-proven 2026-09-21, status 5). */
+	cmd.nsid = (cns == NVME_CNS_NAMESPACE) ? c->nsid : 0U;
 	cmd.prp1 = nvme_va2pa(q->ident);
 	cmd.cdw10 = cns;
 
