@@ -5,9 +5,11 @@
   症状 B 根因 = 启发式把 16550"无中断挂起"（IIR bit0=1）误分类为坏命中且双重自增，
   有效阈值 3 击即 `IRQ_Disable(150)` 永久禁用；已改为可恢复语义（armed-off +
   shell 自动重臂，提交 `e6dac4b`）。症状 A 根因 = 同一 INTID 150 的 GIC 输入线在
-  启动早期被拉高且 SPI 卡死 ACTIVE（EOI 不 deactivate）≈19.5 kHz 重投递，把 tick
-  PPI 永久压在 pending（饿死）→ osDelay 全死 → 静默冻结；**与 SMP 无关（单核同样
-  复发），ThreadX 镜像零复发**。修复待 EOImode/ICC_DIR 归因（open）落地后验收。
+  启动早期被拉高 ≈19.5 kHz 重投递，把 tick PPI 永久压在 pending（饿死）→ osDelay
+  全死 → 静默冻结；**与 SMP 无关（单核同样复发），ThreadX 镜像零复发**。第二轮勘误：
+  "卡死 ACTIVE/EOI 失效"为 handler 内采样伪影（post-EOI act=0，EOI 正常）；tick 无关
+  （NOTICK 排除）；首因窗口锁定 shell_start 的 UART 重编程序列（时序敏感，ThreadX 慢
+  → 免疫）。修复 = 写序实验（见 20260920 证据第二轮附录）。
 
 ## 症状 A：4 核主镜像 NET READY 后 shell 无响应
 
