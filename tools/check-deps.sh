@@ -28,7 +28,7 @@ printf 'check-deps\n'
 # longer kernel-independent. The vendored libraries are named the same way, one
 # entry per component that has an interface of its own: the shell (chry_*) and
 # the file system (ff.h/diskio.h) belong to adapters, not to drivers.
-leaky='#include[[:space:]]*[<"](FreeRTOS\.h|FreeRTOSConfig\.h|task\.h|queue\.h|semphr\.h|event_groups\.h|timers\.h|stream_buffer\.h|list\.h|portmacro\.h|chry_ringbuffer\.h|chry_shell\.h|csh\.h|ff\.h|ffconf\.h|diskio\.h)[>"]|#include[[:space:]]*[<"].*third-party'
+leaky='#include[[:space:]]*[<"](FreeRTOS\.h|FreeRTOSConfig\.h|task\.h|queue\.h|semphr\.h|event_groups\.h|timers\.h|stream_buffer\.h|list\.h|portmacro\.h|tx_api\.h|tx_kernel\.h|tx_thread\.h|tx_port\.h|chry_ringbuffer\.h|chry_shell\.h|csh\.h|ff\.h|ffconf\.h|diskio\.h)[>"]|#include[[:space:]]*[<"].*third-party'
 
 # port/board/ is board-level bring-up: it must stay kernel-independent too,
 # because the whole point of doing the tick through the CMSIS OS_Tick_* shape

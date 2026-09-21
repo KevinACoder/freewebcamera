@@ -10,6 +10,8 @@
   "卡死 ACTIVE/EOI 失效"为 handler 内采样伪影（post-EOI act=0，EOI 正常）；tick 无关
   （NOTICK 排除）；首因窗口锁定 shell_start 的 UART 重编程序列（时序敏感，ThreadX 慢
   → 免疫）。修复 = 写序实验（见 20260920 证据第二轮附录）。
+  **2026-09-21 D42：FreeRTOS SMP 支持已移除，症状 A（=4 形态）就此 wontfix 闭环**；
+  症状 B 修复与 =1 风暴写序实验继续有效（FreeRTOS 单核为保留的支持形态）。
 
 ## 症状 A：4 核主镜像 NET READY 后 shell 无响应
 
