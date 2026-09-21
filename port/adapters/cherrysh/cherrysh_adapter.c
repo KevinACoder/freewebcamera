@@ -422,10 +422,12 @@ static int cmd_itsdump(int argc, char **argv)
 	return 0;
 }
 
-/* NVMe bring-up / read diagnostics. The logic lives in the driver tree
- * (nvme_diag.c, same split as its/itsdump); the delivery evidence - the
+#ifndef KTEST_BUILD
+/* NVMe bring-up / read diagnostics. The logic lives in app/nvme_diag.c
+ * (D48: diagnostics are application code); the delivery evidence - the
  * line the whole point hangs on - is printed by dwc_nvme itself on the
- * first completed command. */
+ * first completed command. Not in the ktest image: the kernel-test
+ * image links no app/ sources. */
 static int cmd_nvme(int argc, char **argv)
 {
 	chry_shell_t *csh = CSH_FROM_ARGV(argc, argv);
@@ -434,6 +436,7 @@ static int cmd_nvme(int argc, char **argv)
 	(void)nvme_diag_cmd(argc, argv);
 	return 0;
 }
+#endif
 
 /* Move the console RX interrupt to another INTID without a rebuild: the
  * one board fact this driver cannot establish by itself. */
@@ -523,8 +526,10 @@ CSH_CMD_EXPORT_ALIAS_FULL(cmd_its, its, "its",
 			  "run the ITS/LPI self-test ladder");
 CSH_CMD_EXPORT_ALIAS_FULL(cmd_itsdump, itsdump, "itsdump",
 			  "dump ITS/LPI delivery state");
+#ifndef KTEST_BUILD
 CSH_CMD_EXPORT_ALIAS_FULL(cmd_nvme, nvme, "nvme",
 			  "bring up NVMe; `nvme read <lba>` reads 8 blocks");
+#endif
 CSH_CMD_EXPORT_ALIAS_FULL(cmd_uartint, uartint, "uartint",
 			  "show/move console RX INTID");
 	CSH_CMD_EXPORT_ALIAS_FULL(cmd_gicdiag, gicdiag, "gicdiag",

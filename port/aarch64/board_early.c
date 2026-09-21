@@ -201,6 +201,31 @@ static void print_lock_give(uint64_t saved_daif)
 	__asm__ __volatile__("msr daif, %0" ::"r"(saved_daif) : "memory");
 }
 
+/* Line-ending normalisation for the stamped sinks. Vendored components log
+ * in their own house style and the shadow mappings append their own tail:
+ * fsl_sdmmc's SDMMC_LOG fmts carry "\r\n" while the shadow adds "\n" (so a
+ * single entry would hit the wire as "\n\n" - a blank line per log line),
+ * CherryUSB appends "\r\n", and the CR itself reads as a line break on
+ * terminals that count CR. Rule: CRs are dropped, and a second '\n'
+ * directly after one already emitted is dropped too - every entry ends as
+ * exactly one "\r\n" on the wire, fragment-style logs (no trailing
+ * newline) still concatenate, and nothing else changes. */
+static void puts_strip_cr(const char *s)
+{
+	char prev = 0;
+
+	for (; *s != '\0'; s++) {
+		if (*s == '\r') {
+			continue;
+		}
+		if (*s == '\n' && prev == '\n') {
+			continue;
+		}
+		uart_early_putc(*s);
+		prev = *s;
+	}
+}
+
 void board_early_print(const char *message)
 {
 	uint64_t saved_daif;
@@ -209,7 +234,7 @@ void board_early_print(const char *message)
 	(void)board_uptime_stamp(ts);
 	print_lock_take(&saved_daif);
 	uart_early_puts(ts);
-	uart_early_puts(message);
+	puts_strip_cr(message);
 	print_lock_give(saved_daif);
 }
 
@@ -225,7 +250,7 @@ void board_early_print_raw(const char *message)
 
 	(void)board_uptime_stamp(ts);
 	uart_early_puts(ts);
-	uart_early_puts(message);
+	puts_strip_cr(message);
 }
 
 /* Same sink, with numbers: drivers that report what they found (register
@@ -240,11 +265,27 @@ void board_log(const char *fmt, ...)
 	va_list ap;
 	uint64_t saved_daif;
 	int off;
+	int i;
+	int out;
 
 	off = board_uptime_stamp(line);
 	va_start(ap, fmt);
 	(void)vsnprintf(line + off, sizeof(line) - (size_t)off, fmt, ap);
 	va_end(ap);
+
+	/* Line-ending normalisation - see puts_strip_cr: drop CRs, collapse
+	 * consecutive newlines (the shadow's "\n" plus fsl_sdmmc's own
+	 * "\r\n" would otherwise emit a blank line after every entry). */
+	for (i = off, out = off; line[i] != '\0'; i++) {
+		if (line[i] == '\r') {
+			continue;
+		}
+		if (line[i] == '\n' && out > off && line[out - 1] == '\n') {
+			continue;
+		}
+		line[out++] = line[i];
+	}
+	line[out] = '\0';
 
 	print_lock_take(&saved_daif);
 	uart_early_puts(line);

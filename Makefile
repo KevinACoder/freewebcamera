@@ -65,14 +65,15 @@ LDFLAGS = -nostdlib -static -T port/board/$(BOARD)/$(BOARD).ld \
 
 # --- include paths --------------------------------------------------------
 
-# Interface layer: everything reaches CMSIS through here. -Iport/board and
-# -Iport/board/common resolve board.h and the board-agnostic bring-up
-# headers (gicv3_its.h); -Iport/board/$(BOARD) resolves the selected board's
-# board_conf.h (which board.h includes). -Idrivers lets the platform glue in
-# port/board/$(BOARD) include the IP drivers' internal headers - the board
-# tables feed struct plat data INTO the drivers; the reverse direction
-# (drivers including board headers) stays forbidden.
-INC_COMMON := -Iinclude -Iport/board -Iport/board/common -Iport/board/$(BOARD) -Idrivers
+# Interface layer: everything reaches CMSIS through here. -Iport/board
+# resolves board.h; -Iport/aarch64 is the ARCHITECTURE layer (D46): startup,
+# GICv3/ITS, cache/MMU, early print - everything an aarch64 port needs and an
+# armv7m (STM32) port would supply as its own parallel directory. -Iport/
+# board/$(BOARD) resolves the selected board's board_conf.h (which board.h
+# includes). -Idrivers lets the platform glue in port/board/$(BOARD) include
+# the IP drivers' internal headers - the board tables feed struct plat data
+# INTO the drivers; the reverse direction stays forbidden.
+INC_COMMON := -Iinclude -Iport/board -Iport/aarch64 -Iport/board/$(BOARD) -Idrivers
 # Available only to adapters (they are the only layer allowed to touch
 # vendored code and kernel internals). The port lives in the adapter too:
 # portmacro.h resolves from -Iport/adapters/freertos, and the vendored
@@ -83,7 +84,7 @@ INC_ADAPTER := -Ithird-party/FreeRTOS-Kernel/include \
 	-Iport/adapters/freertos \
 	-Iport/adapters/freertos/tests \
 	-Iport/adapters/freertos/tests/include \
-	-Iport/adapters/cmsis_rtos2 \
+	-Iport/adapters/cmsis_rtos2_freertos \
 	-Iport/adapters/cherrysh \
 	-Ithird-party/cherrysh \
 	-Ithird-party/cherrysh/cherryrl \
@@ -194,24 +195,24 @@ CHERRYUSB_SRCS := \
 	third-party/cherryusb/osal/usb_osal_freertos.c
 
 # Board bring-up, board-agnostic part: the same set builds for every board.
-BOARD_SRCS := \
-	port/board/common/mmu.c \
-	port/board/common/memops.c \
-	port/board/common/minilibc.c \
-	port/board/common/cache.c \
-	port/board/common/board_early.c \
-	port/board/common/smp.c \
-	port/board/common/gicv3.c \
-	port/board/common/gicv3_its.c \
-	port/board/common/gicv3_msi.c \
-	port/board/common/its_test.c \
-	port/board/common/itsdump.c \
-	port/board/common/tick.c
+ARCH_SRCS := \
+	port/aarch64/mmu.c \
+	port/aarch64/memops.c \
+	port/aarch64/minilibc.c \
+	port/aarch64/cache.c \
+	port/aarch64/board_early.c \
+	port/aarch64/smp.c \
+	port/aarch64/gicv3.c \
+	port/aarch64/gicv3_its.c \
+	port/aarch64/gicv3_msi.c \
+	port/aarch64/its_test.c \
+	port/aarch64/itsdump.c \
+	port/aarch64/tick.c
 
 ADAPTER_SRCS := \
 	port/adapters/freertos/port_glue.c \
 	port/adapters/freertos/heap.c \
-	port/adapters/cmsis_rtos2/cmsis_os2_impl.c \
+	port/adapters/cmsis_rtos2_freertos/cmsis_os2_impl.c \
 	port/adapters/cherrysh/cherrysh_adapter.c \
 	third-party/cherrysh/chry_shell.c \
 	third-party/cherrysh/builtin/help.c \
@@ -275,7 +276,6 @@ DRIVER_SRCS := \
 	drivers/dwc_msix.c \
 	drivers/dwc_ahci.c \
 	drivers/dwc_nvme.c \
-	drivers/nvme_diag.c \
 	drivers/dwc_mmc.c \
 	drivers/dwc_mshc.c \
 	drivers/rk_i2c.c \
@@ -293,9 +293,12 @@ PLAT_SRCS := \
 	port/board/rk3568/rk3568_sata.c \
 	port/board/rk3568/rk3568_sdmmc.c
 
+# Diagnostics/tests are application code (D48): they drive frozen interfaces
+# from the app side and never live in drivers/.
 APP_SRCS := \
 	app/main.c \
-	app/smp_test.c
+	app/smp_test.c \
+	app/nvme_diag.c
 
 # Kernel test suite (official FreeRTOS TestRunner + Common/Minimal files,
 # see port/adapters/freertos/tests/ and IMPORT-INFO.md). Only the ktest
@@ -421,14 +424,14 @@ ADAPTER_SRCS := \
 # ThreadX's include paths replace the FreeRTOS ones wholesale: the FreeRTOS
 # INC_ADAPTER must not leak into this image, or a stray FreeRTOS.h would
 # compile against the wrong kernel. The one path kept from the FreeRTOS
-# adapter's directory list is cmsis_rtos2/ itself, and only for the shared,
+# adapter's directory list is cmsis_rtos2_freertos/ itself, and only for the shared,
 # kernel-free extension header cmsis_os2_ext.h (osThreadFlagsSetFromISR,
 # consumed by the cherrysh adapter and implemented by both CMSIS twins).
 INC_ADAPTER := -Ithird-party/threadx/common_smp/inc \
 	-Ithird-party/threadx/ports_smp/cortex_a55_smp/gnu/inc \
 	-Iport/adapters/threadx \
 	-Iport/adapters/cmsis_rtos2_threadx \
-	-Iport/adapters/cmsis_rtos2 \
+	-Iport/adapters/cmsis_rtos2_freertos \
 	-Iport/adapters/cherrysh \
 	-Ithird-party/cherrysh \
 	-Ithird-party/cherrysh/cherryrl \
@@ -459,21 +462,21 @@ $(BUILD_STAMP):
 # port's own assembly, minus the preempt-SGI file the adapter replaces.
 ifeq ($(THREADX),1)
 ASM_SRCS := \
-	port/board/common/startup.S \
-	port/board/common/smp_secondary.S \
+	port/aarch64/startup.S \
+	port/aarch64/smp_secondary.S \
 	port/adapters/threadx/tx_vectors.S \
 	$(THREADX_PORT_SRCS)
 else
 ASM_SRCS := \
-	port/board/common/startup.S \
-	port/board/common/smp_secondary.S \
+	port/aarch64/startup.S \
+	port/aarch64/smp_secondary.S \
 	port/adapters/freertos/portasm.S \
 	port/adapters/freertos/port_vectors.S
 endif
 
 # --- rules ----------------------------------------------------------------
 
-	C_SRCS := $(KERNEL_SRCS) $(LWIP_SRCS) $(FATFS_SRCS) $(SDMMC_SRCS) $(CHERRYUSB_SRCS) $(BOARD_SRCS) $(ADAPTER_SRCS) $(DRIVER_SRCS) $(PLAT_SRCS) $(APP_SRCS)
+	C_SRCS := $(KERNEL_SRCS) $(LWIP_SRCS) $(FATFS_SRCS) $(SDMMC_SRCS) $(CHERRYUSB_SRCS) $(ARCH_SRCS) $(ADAPTER_SRCS) $(DRIVER_SRCS) $(PLAT_SRCS) $(APP_SRCS)
 OBJS := $(addprefix $(BUILD)/,$(C_SRCS:.c=.o)) $(addprefix $(BUILD)/,$(ASM_SRCS:.S=.o))
 DEPS := $(OBJS:.o=.d)
 
@@ -487,6 +490,10 @@ $(BUILD)/port/adapters/%.o: port/adapters/%.c
 	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) -MMD -MP -c $< -o $@
 
 # These three rules deliberately omit INC_ADAPTER.
+$(BUILD)/port/aarch64/%.o: port/aarch64/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) -MMD -MP -c $< -o $@
+
 $(BUILD)/port/board/%.o: port/board/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INC_COMMON) -MMD -MP -c $< -o $@
@@ -582,17 +589,17 @@ STUB_SRCS := \
 	port/adapters/stub/sdio_stub.c \
 	port/adapters/stub/smp_stub.c \
 	port/adapters/stub/usb_stub.c \
-	port/board/common/gicv3.c \
-	port/board/common/gicv3_its.c \
-	port/board/common/gicv3_msi.c \
-	port/board/common/its_test.c \
-	port/board/common/itsdump.c \
-	port/board/common/board_early.c \
-	port/board/common/memops.c \
-	port/board/common/minilibc.c \
-	port/board/common/cache.c \
-	port/board/common/mmu.c \
-	port/board/common/smp.c
+	port/aarch64/gicv3.c \
+	port/aarch64/gicv3_its.c \
+	port/aarch64/gicv3_msi.c \
+	port/aarch64/its_test.c \
+	port/aarch64/itsdump.c \
+	port/aarch64/board_early.c \
+	port/aarch64/memops.c \
+	port/aarch64/minilibc.c \
+	port/aarch64/cache.c \
+	port/aarch64/mmu.c \
+	port/aarch64/smp.c
 
 STUB_OBJS := $(addprefix $(BUILD)/stub/,$(STUB_SRCS:.c=.o)) \
 	     $(addprefix $(BUILD)/stub/,$(DRIVER_SRCS:.c=.o)) \
@@ -601,7 +608,7 @@ STUB_OBJS := $(addprefix $(BUILD)/stub/,$(STUB_SRCS:.c=.o)) \
 
 $(BUILD)/stub/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -Iinclude -Iport/board -Iport/board/common \
+	$(CC) $(CFLAGS) -Iinclude -Iport/board -Iport/aarch64 \
 		-Iport/board/$(BOARD) -Iport/adapters/stub -Idrivers \
 		-MMD -MP -c $< -o $@
 
@@ -613,7 +620,7 @@ k4: $(BUILD)/freertos-stub.elf
 # handlers, so it belongs to the kernel side of the seam, not to the layers
 # this target is testing. What is under test is that app/ and drivers/ link
 # with no kernel; the kernel's own glue is allowed to be absent.
-STUB_ASM := $(BUILD)/stub/port/board/common/startup.o
+STUB_ASM := $(BUILD)/stub/port/aarch64/startup.o
 
 $(BUILD)/freertos-stub.elf: $(STUB_OBJS) $(STUB_ASM)
 	@mkdir -p $(dir $@)
@@ -623,7 +630,7 @@ $(BUILD)/freertos-stub.elf: $(STUB_OBJS) $(STUB_ASM)
 	@printf 'K4 OK: app/ and drivers/ link with no kernel and no shell\n'
 	@printf '        (CMSIS-RTOS2 and include/shell.h are the only interfaces they see)\n'
 
-$(BUILD)/stub/port/board/common/startup.o: port/board/common/startup.S
+$(BUILD)/stub/port/aarch64/startup.o: port/aarch64/startup.S
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Iinclude -Iport/board -Iport/board/$(BOARD) -c $< -o $@
 

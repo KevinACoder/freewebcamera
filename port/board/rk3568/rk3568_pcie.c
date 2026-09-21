@@ -21,7 +21,7 @@
  * WiFi endpoints use MSI/MSI-X through the ITS instead.
  *
  * Two numbers here have a second home that must stay in agreement:
- *   - the DBI frames are mapped Device in port/board/common/mmu.c (they are above
+ *   - the DBI frames are mapped Device in port/aarch64/mmu.c (they are above
  *     4GiB, i.e. outside the identity map's low 4GiB coverage), as L1[15];
  *   - the doorbell window the core programs into the inbound iATU is
  *     BOARD_ITS_TRANSLATER from port/board/board.h, not a value from here:

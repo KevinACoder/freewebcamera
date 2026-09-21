@@ -59,7 +59,7 @@ void board_mmu_enable_secondary(void);
 
 /* Drop the loader's leftover dirty cache lines over our own image, then
  * invalidate the instruction cache. Called by board_mmu_enable() while caches
- * are still off; see port/board/common/cache.c for why skipping it produces
+ * are still off; see port/aarch64/cache.c for why skipping it produces
  * intermittent corruption rather than a clean failure. */
 void board_cache_init(void);
 

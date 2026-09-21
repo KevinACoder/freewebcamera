@@ -2,6 +2,9 @@
  * @file   nvme_diag.c
  * @brief  NVMe bring-up and read diagnostics, callable from any shell.
  *
+ * Lives in app/ (D48): a test/diagnostic is application code. It reaches
+ * the driver only through the frozen include/nvme.h interface.
+ *
  * The driver (dwc_nvme.c) reaches the disk through PCIe + MSI-X, and the
  * first completed I/O command makes it print its message-interrupt
  * delivery evidence from task context - which is the end-to-end ITS LPI
@@ -29,7 +32,6 @@
 
 #include "board.h"
 #include "nvme.h"
-#include "dwc_nvme.h"
 
 /* The instance lives in dwc_nvme.c; consumers declare it locally, same as
  * the FatFs block binding. */
@@ -82,12 +84,12 @@ static void diag_report(uint32_t ctrl)
 
 	if (Driver_NVME.Identify(ctrl, model, sizeof(model)) ==
 	    ARM_DRIVER_OK) {
-		board_log("nvme-diag: ctrl %u model \"%s\"", ctrl, model);
+		board_log("nvme-diag: ctrl %u model \"%s\"\n", ctrl, model);
 	} else {
-		board_log("nvme-diag: ctrl %u identify failed", ctrl);
+		board_log("nvme-diag: ctrl %u identify failed\n", ctrl);
 	}
-	board_log("nvme-diag: ctrl %u %llu blocks x %u bytes, qd %u,"
-		  " max_transfer %u, timeout %u ms",
+	board_log("nvme-diag: ctrl %u %llu blocks x %u bytes, qd %u, "
+		  "max_transfer %u, timeout %u ms\n",
 		  ctrl, (unsigned long long)caps.sector_count,
 		  caps.sector_size, caps.queue_depth, caps.max_transfer,
 		  caps.timeout_ms);
@@ -104,7 +106,7 @@ static int diag_read(int lba)
 	ret = Driver_NVME.ReadBlocks(ctrl, (uint64_t)lba, diag_blocks,
 				     NVME_DIAG_BLOCKS);
 	if (ret != ARM_DRIVER_OK) {
-		board_log("nvme-diag: read lba %d x %u failed: %d", lba,
+		board_log("nvme-diag: read lba %d x %u failed: %d\n", lba,
 			  NVME_DIAG_BLOCKS, ret);
 		return -1;
 	}
@@ -112,34 +114,28 @@ static int diag_read(int lba)
 	for (i = 0; i < sizeof(diag_blocks) / sizeof(diag_blocks[0]); i++) {
 		sum += diag_blocks[i];
 	}
-	board_log("nvme-diag: read lba %d ok: %016llx %016llx sum %016llx",
+	board_log("nvme-diag: read lba %d ok: %016llx %016llx sum %016llx\n",
 		  lba, (unsigned long long)diag_blocks[0],
 		  (unsigned long long)diag_blocks[1],
 		  (unsigned long long)sum);
 
 	done = Driver_NVME.GetTransferStatus(ctrl);
-	board_log("nvme-diag: %u completions since last query", done);
+	board_log("nvme-diag: %u completions since last query\n", done);
 
 	return 0;
 }
 
 int nvme_diag_cmd(int argc, char **argv)
 {
-	uint32_t count;
-	uint32_t i;
-
 	(void)argc;
 
-	dwc_nvme_init();
-	count = dwc_nvme_ctrl_count();
-	if (count == 0U) {
-		board_log("nvme-diag: no NVMe controller came up");
+	/* Bring-up goes through the frozen interface: Initialize() is
+	 * idempotent and brings the PCIe backend up itself. */
+	if (Driver_NVME.Initialize(0U, NULL) != ARM_DRIVER_OK) {
+		board_log("nvme-diag: no NVMe controller came up\n");
 		return -1;
 	}
-
-	for (i = 0U; i < count; i++) {
-		diag_report(i);
-	}
+	diag_report(0U);
 
 	if ((argv != NULL) && (argv[1] != NULL) &&
 	    (strcmp(argv[1], "read") == 0)) {
@@ -148,7 +144,7 @@ int nvme_diag_cmd(int argc, char **argv)
 		if (argv[2] != NULL) {
 			lba = diag_parse_u32(argv[2]);
 			if (lba < 0) {
-				board_log("nvme-diag: bad lba '%s'", argv[2]);
+				board_log("nvme-diag: bad lba '%s'\n", argv[2]);
 				return -1;
 			}
 		}

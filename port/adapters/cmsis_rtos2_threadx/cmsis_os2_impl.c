@@ -63,7 +63,7 @@
 /* asm hand-off stubs (port/adapters/threadx/tx_vectors.S) */
 extern void tx_kernel_enter_spsel0(void);
 
-/* board SMP release (port/board/common/smp.c, kernel-agnostic) */
+/* board SMP release (port/aarch64/smp.c, kernel-agnostic) */
 extern void board_smp_start_secondaries(void);
 
 /* --- priority and timeout translation ------------------------------------ */

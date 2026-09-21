@@ -12,7 +12,7 @@
  * That translation is neither a PCIe concern nor an NVMe concern, so it lives
  * behind this tiny interface: the PCIe driver knows *which* function wants
  * vectors (the Requester ID) and programs the endpoint's MSI-X table with what
- * it is handed here; the board layer (port/board/common/gicv3_msi.c) owns the ITS
+ * it is handed here; the board layer (port/aarch64/gicv3_msi.c) owns the ITS
  * side. Keeping it an interface is also what lets the ITS implementation be
  * replaced (another GIC, another translation scheme) without touching the
  * drivers - the same reason include/pcie.h exists.

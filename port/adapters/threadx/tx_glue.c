@@ -41,6 +41,7 @@
  */
 
 #include <stdint.h>
+#include <stdio.h>
 
 #include "tx_api.h"
 #include "tx_thread.h"
