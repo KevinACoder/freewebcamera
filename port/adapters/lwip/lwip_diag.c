@@ -19,6 +19,7 @@
 
 #include <stdarg.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include "Driver_USART.h"
 

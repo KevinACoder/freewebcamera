@@ -399,11 +399,44 @@ THREADX_PORT_SRCS := $(filter-out \
 KERNEL_SRCS := $(THREADX_KERNEL_SRCS) port/adapters/threadx/tx_glue.c \
 	port/adapters/threadx/heap.c
 
-# The vendored middleware lists. lwIP and CherryUSB stay stubbed for now
-# (their OSALs are the P3/P4 waves); FatFs and the fsl_sdmmc protocol layer
-# are kernel-free C over CMSIS + the adapter heap, so the storage line wires
-# in whole.
-LWIP_SRCS     :=
+# The vendored middleware lists. CherryUSB stays stubbed for now (its OSAL
+# is the P4 wave); lwIP runs the cmsis sys_arch below - same core list as
+# the FreeRTOS branch, contrib's FreeRTOS sys_arch swapped out.
+LWIP_SRCS := \
+	third-party/lwip/src/core/def.c \
+	third-party/lwip/src/core/inet_chksum.c \
+	third-party/lwip/src/core/init.c \
+	third-party/lwip/src/core/ip.c \
+	third-party/lwip/src/core/mem.c \
+	third-party/lwip/src/core/memp.c \
+	third-party/lwip/src/core/netif.c \
+	third-party/lwip/src/core/pbuf.c \
+	third-party/lwip/src/core/raw.c \
+	third-party/lwip/src/core/stats.c \
+	third-party/lwip/src/core/sys.c \
+	third-party/lwip/src/core/tcp.c \
+	third-party/lwip/src/core/tcp_in.c \
+	third-party/lwip/src/core/tcp_out.c \
+	third-party/lwip/src/core/timeouts.c \
+	third-party/lwip/src/core/udp.c \
+	third-party/lwip/src/core/ipv4/acd.c \
+	third-party/lwip/src/core/ipv4/dhcp.c \
+	third-party/lwip/src/core/ipv4/etharp.c \
+	third-party/lwip/src/core/ipv4/icmp.c \
+	third-party/lwip/src/core/ipv4/ip4.c \
+	third-party/lwip/src/core/ipv4/ip4_addr.c \
+	third-party/lwip/src/core/ipv4/ip4_frag.c \
+	third-party/lwip/src/api/api_lib.c \
+	third-party/lwip/src/api/api_msg.c \
+	third-party/lwip/src/api/err.c \
+	third-party/lwip/src/api/netbuf.c \
+	third-party/lwip/src/api/netdb.c \
+	third-party/lwip/src/api/netifapi.c \
+	third-party/lwip/src/api/sockets.c \
+	third-party/lwip/src/api/tcpip.c \
+	third-party/lwip/src/netif/ethernet.c \
+	port/adapters/lwip/cmsis/sys_arch.c
+
 FATFS_SRCS := \
 	third-party/fatfs/ff.c \
 	third-party/fatfs/ffunicode.c
@@ -439,7 +472,10 @@ ADAPTER_SRCS := \
 	port/adapters/sdmmc/sdmmc_storage.c \
 	port/adapters/sdmmc/sdmmc_adapter.c \
 	port/adapters/sdmmc/sdmmc_cmds.c \
-	port/adapters/stub/net_stub.c \
+	port/adapters/lwip/lwip_diag.c \
+	port/adapters/lwip/ethernetif.c \
+	port/adapters/lwip/lwip_adapter.c \
+	port/adapters/lwip/net_cmds.c \
 	port/adapters/stub/usb_stub.c
 
 # ThreadX's include paths replace the FreeRTOS ones wholesale: the FreeRTOS
@@ -457,6 +493,9 @@ INC_ADAPTER := -Ithird-party/threadx/common_smp/inc \
 	-Ithird-party/cherrysh \
 	-Ithird-party/cherrysh/cherryrl \
 	-Ithird-party/cherryrb \
+	-Iport/adapters/lwip/include \
+	-Iport/adapters/lwip/cmsis/include \
+	-Ithird-party/lwip/src/include \
 	-Iport/adapters/fatfs \
 	-Ithird-party/fatfs \
 	-Iport/adapters/sdmmc/shadow \
