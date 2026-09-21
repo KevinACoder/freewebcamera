@@ -68,8 +68,11 @@ LDFLAGS = -nostdlib -static -T port/board/$(BOARD)/$(BOARD).ld \
 # Interface layer: everything reaches CMSIS through here. -Iport/board and
 # -Iport/board/common resolve board.h and the board-agnostic bring-up
 # headers (gicv3_its.h); -Iport/board/$(BOARD) resolves the selected board's
-# board_conf.h (which board.h includes).
-INC_COMMON := -Iinclude -Iport/board -Iport/board/common -Iport/board/$(BOARD)
+# board_conf.h (which board.h includes). -Idrivers lets the platform glue in
+# port/board/$(BOARD) include the IP drivers' internal headers - the board
+# tables feed struct plat data INTO the drivers; the reverse direction
+# (drivers including board headers) stays forbidden.
+INC_COMMON := -Iinclude -Iport/board -Iport/board/common -Iport/board/$(BOARD) -Idrivers
 # Available only to adapters (they are the only layer allowed to touch
 # vendored code and kernel internals). The port lives in the adapter too:
 # portmacro.h resolves from -Iport/adapters/freertos, and the vendored
@@ -267,22 +270,28 @@ endif
 DRIVER_SRCS := \
 	drivers/uart_ns16550.c \
 	drivers/dwc_eqos.c \
-	drivers/dwc_eqos_rk3568.c \
 	drivers/rtl8211f.c \
-	drivers/rk3568_gmac.c \
 	drivers/dwc_pcie.c \
-	drivers/rk3568_pcie.c \
 	drivers/dwc_msix.c \
 	drivers/dwc_ahci.c \
-	drivers/rk3568_sata.c \
 	drivers/dwc_nvme.c \
 	drivers/nvme_diag.c \
 	drivers/dwc_mmc.c \
 	drivers/dwc_mshc.c \
-	drivers/rk3568_sdmmc.c \
 	drivers/rk_i2c.c \
 	drivers/rk_tsadc.c \
 	drivers/rk_sfc.c
+
+# Platform glue (D45): SoC-bound board data and integration code. The IP
+# drivers above are platform-agnostic - they take coordinates and soc hooks
+# through plat structs; everything that knows CRU/GRF/iomux/register
+# addresses lives here, one directory per board under port/board/.
+PLAT_SRCS := \
+	port/board/rk3568/rk3568_gmac.c \
+	port/board/rk3568/dwc_eqos_rk3568.c \
+	port/board/rk3568/rk3568_pcie.c \
+	port/board/rk3568/rk3568_sata.c \
+	port/board/rk3568/rk3568_sdmmc.c
 
 APP_SRCS := \
 	app/main.c \
@@ -464,7 +473,7 @@ endif
 
 # --- rules ----------------------------------------------------------------
 
-C_SRCS := $(KERNEL_SRCS) $(LWIP_SRCS) $(FATFS_SRCS) $(SDMMC_SRCS) $(CHERRYUSB_SRCS) $(BOARD_SRCS) $(ADAPTER_SRCS) $(DRIVER_SRCS) $(APP_SRCS)
+	C_SRCS := $(KERNEL_SRCS) $(LWIP_SRCS) $(FATFS_SRCS) $(SDMMC_SRCS) $(CHERRYUSB_SRCS) $(BOARD_SRCS) $(ADAPTER_SRCS) $(DRIVER_SRCS) $(PLAT_SRCS) $(APP_SRCS)
 OBJS := $(addprefix $(BUILD)/,$(C_SRCS:.c=.o)) $(addprefix $(BUILD)/,$(ASM_SRCS:.S=.o))
 DEPS := $(OBJS:.o=.d)
 
@@ -587,12 +596,13 @@ STUB_SRCS := \
 
 STUB_OBJS := $(addprefix $(BUILD)/stub/,$(STUB_SRCS:.c=.o)) \
 	     $(addprefix $(BUILD)/stub/,$(DRIVER_SRCS:.c=.o)) \
+	     $(addprefix $(BUILD)/stub/,$(PLAT_SRCS:.c=.o)) \
 	     $(addprefix $(BUILD)/stub/,$(APP_SRCS:.c=.o))
 
 $(BUILD)/stub/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Iinclude -Iport/board -Iport/board/common \
-		-Iport/board/$(BOARD) -Iport/adapters/stub \
+		-Iport/board/$(BOARD) -Iport/adapters/stub -Idrivers \
 		-MMD -MP -c $< -o $@
 
 .PHONY: k4

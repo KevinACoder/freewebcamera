@@ -3,9 +3,10 @@
  * @brief  The two PCIe controllers of this board, as coordinates for the
  *         DesignWare root complex backend.
  *
- * Everything here is board data. The core (dwc_pcie.c) knows no addresses, so
- * this file is what makes it an RK3568 driver rather than a generic DWC
- * backend - the same split as dwc_eqos/rk3568_gmac.c on the Ethernet side.
+ * Everything here is board data. The core (dwc_pcie.c) knows no addresses -
+ * this file is the RK3568 half of that split and lives in port/board/rk3568/
+ * with the rest of the platform glue (D45): drivers/ keeps only
+ * platform-agnostic IP code, board data and SoC integration live here.
  *
  *              pcie2x1 (the M.2 slot)   pcie3x2 (the x4 slot)
  *   APB        0xFE260000               0xFE280000

@@ -7,7 +7,8 @@
  * with io routing, and the PHY hard reset GPIO. A port is described by filling
  * a struct rk3568_gmac_soc with its coordinates and hooking
  * rk3568_gmac_soc_init / rk3568_gmac_soc_swr_quirk into struct dwc_eqos_plat
- * (drivers/rk3568_gmac.c does that for both ports).
+ * (rk3568_gmac.c, next to this file in port/board/rk3568/, does that for
+ * both ports).
  *
  * This board is configured statically - there is no device tree or pinctrl
  * layer in the image - so all of the above is per-port data, not lookup.
