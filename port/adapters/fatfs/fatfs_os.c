@@ -29,9 +29,15 @@
 
 #include <stdint.h>
 
-#include "FreeRTOS.h"
 #include "cmsis_os2.h"
 #include "ff.h"
+
+/* The integrator heap. Both kernel lines provide these names: FreeRTOS via
+ * heap_4 over ucHeap, ThreadX via the adapter heap
+ * (port/adapters/threadx/heap.c) - which is why this file stays shared
+ * instead of growing a per-kernel twin. */
+extern void *pvPortMalloc(size_t size);
+extern void vPortFree(void *ptr);
 
 static osMutexId_t volume_mutex[FF_VOLUMES];
 

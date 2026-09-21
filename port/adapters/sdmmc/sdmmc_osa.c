@@ -16,11 +16,14 @@
  */
 
 #include <string.h>
-
-#include "FreeRTOS.h"
-#include "task.h"
+#include <stdint.h>
 
 #include "fsl_sdmmc_osa.h"
+
+/* The integrator heap, same two-kernel story as fatfs_os.c: heap_4 on the
+ * FreeRTOS line, port/adapters/threadx/heap.c on the ThreadX line. */
+extern void *pvPortMalloc(size_t size);
+extern void vPortFree(void *ptr);
 
 /* --- init ------------------------------------------------------------------- */
 

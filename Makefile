@@ -220,7 +220,6 @@ ADAPTER_SRCS := \
 	third-party/cherrysh/builtin/shsize.c \
 	third-party/cherrysh/cherryrl/chry_readline.c \
 	third-party/cherryrb/chry_ringbuffer.c \
-	port/adapters/periph/periph_cmds.c \
 	port/adapters/lwip/lwip_diag.c \
 	port/adapters/lwip/ethernetif.c \
 	port/adapters/lwip/lwip_adapter.c \
@@ -400,13 +399,21 @@ THREADX_PORT_SRCS := $(filter-out \
 KERNEL_SRCS := $(THREADX_KERNEL_SRCS) port/adapters/threadx/tx_glue.c \
 	port/adapters/threadx/heap.c
 
-# The vendored middleware lists (lwIP/FatFs/sdmmc/CherryUSB) are emptied:
-# their OSALs are FreeRTOS-coupled upstream code, and the drivers behind
-# them stay linked (kernel-agnostic) but are only ever initialized through
-# the stubbed subsystem starts.
+# The vendored middleware lists. lwIP and CherryUSB stay stubbed for now
+# (their OSALs are the P3/P4 waves); FatFs and the fsl_sdmmc protocol layer
+# are kernel-free C over CMSIS + the adapter heap, so the storage line wires
+# in whole.
 LWIP_SRCS     :=
-FATFS_SRCS    :=
-SDMMC_SRCS    :=
+FATFS_SRCS := \
+	third-party/fatfs/ff.c \
+	third-party/fatfs/ffunicode.c
+
+SDMMC_SRCS := \
+	third-party/sdmmc/common/fsl_sdmmc_common.c \
+	third-party/sdmmc/mmc/fsl_mmc.c \
+	third-party/sdmmc/sd/fsl_sd.c \
+	third-party/sdmmc/sdio/fsl_sdio.c
+
 CHERRYUSB_SRCS :=
 
 ADAPTER_SRCS := \
@@ -418,9 +425,21 @@ ADAPTER_SRCS := \
 	third-party/cherrysh/builtin/shsize.c \
 	third-party/cherrysh/cherryrl/chry_readline.c \
 	third-party/cherryrb/chry_ringbuffer.c \
+	port/adapters/periph/periph_cmds.c \
+	port/adapters/fatfs/blkdev.c \
+	port/adapters/fatfs/diskio.c \
+	port/adapters/fatfs/fatfs_os.c \
+	port/adapters/fatfs/fatfs_adapter.c \
+	port/adapters/fatfs/fatfs_cmds.c \
+	port/adapters/sdmmc/sdmmc_osa.c \
+	port/adapters/sdmmc/sdmmc_glue_irq.c \
+	port/adapters/sdmmc/sdmmc_dispatch.c \
+	port/adapters/sdmmc/sdmmc_host_dwmmc.c \
+	port/adapters/sdmmc/sdmmc_host_dwmshc.c \
+	port/adapters/sdmmc/sdmmc_storage.c \
+	port/adapters/sdmmc/sdmmc_adapter.c \
+	port/adapters/sdmmc/sdmmc_cmds.c \
 	port/adapters/stub/net_stub.c \
-	port/adapters/stub/fs_stub.c \
-	port/adapters/stub/sdio_stub.c \
 	port/adapters/stub/usb_stub.c
 
 # ThreadX's include paths replace the FreeRTOS ones wholesale: the FreeRTOS
@@ -438,6 +457,15 @@ INC_ADAPTER := -Ithird-party/threadx/common_smp/inc \
 	-Ithird-party/cherrysh \
 	-Ithird-party/cherrysh/cherryrl \
 	-Ithird-party/cherryrb \
+	-Iport/adapters/fatfs \
+	-Ithird-party/fatfs \
+	-Iport/adapters/sdmmc/shadow \
+	-Iport/adapters/sdmmc \
+	-Ithird-party/sdmmc/common \
+	-Ithird-party/sdmmc/sd \
+	-Ithird-party/sdmmc/osa \
+	-Ithird-party/sdmmc/mmc \
+	-Ithird-party/sdmmc/sdio \
 	-Iport/adapters/stub \
 	-Idrivers
 endif
