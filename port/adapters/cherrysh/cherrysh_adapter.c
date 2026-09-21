@@ -102,6 +102,8 @@ extern unsigned int uart_console_irq_id(void);
 extern int uart_console_rx_down(void);
 extern int uart_console_rx_kick(void);
 extern int nvme_diag_cmd(int argc, char **argv);
+/* D41 window probe: GIC/console state at a named point of this bring-up. */
+extern void uart_console_window_probe(const char *tag);
 
 /* Freestanding: minilibc.c provides the definition. */
 extern int atoi(const char *s);
@@ -593,10 +595,12 @@ int cherrysh_init(void)
 	 *
 	 * PowerControl(FULL) after Initialize() restores the state and is what
 	 * installs the console interrupt. */
+	uart_console_window_probe("w0-pre-init");
 	(void)Driver_USART_Console.Initialize(shell_usart_event);
 	if (Driver_USART_Console.PowerControl(ARM_POWER_FULL) != ARM_DRIVER_OK) {
 		return -1;
 	}
+	uart_console_window_probe("w1-post-pwr");
 
 	/* Install the console callbacks and the command tables. */
 	init.sput = shell_sput;
@@ -630,6 +634,7 @@ int cherrysh_init(void)
 	}
 	shell_task_id = id;
 	shell_running = 1;
+	uart_console_window_probe("w2-post-csh");
 
 	/* Start receiving LAST, and only now.
 	 *
@@ -652,6 +657,7 @@ int cherrysh_init(void)
 	 * The chain is: IRQ -> driver drains FIFO into rx_chunk ->
 	 * shell_usart_event() (us) -> ring + wake the shell task. */
 	shell_rearm_rx();
+	uart_console_window_probe("w3-post-recv");
 	if (Driver_USART_Console.Control(ARM_USART_CONTROL_RX, 1U) != ARM_DRIVER_OK) {
 		return -1;
 	}

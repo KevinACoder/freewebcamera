@@ -121,24 +121,73 @@ static bool early_ready;
  * scratch register does not read back, which catches a wrong base address or
  * a gated clock - otherwise a dead UART looks like a working one that prints
  * nothing. */
+/* Shadow of what program_uart last wrote. The driver is the only writer of
+ * these registers, so a match means the part is already programmed exactly
+ * as requested - and the write sequence can be skipped entirely.
+ *
+ * WHY SKIP INSTEAD OF REWRITE (board-proven 2026-09-21, NOTICK probe
+ * round): the divisor latch write itself starts the console storm. With
+ * DLAB=1, offset 0 aliases IER onto DLL, and the interrupt evaluator sees
+ * DLL's bits as interrupt enables: DLL=13 (0x0d) exposes RX|MS enable at
+ * the exact moment the MSR already holds change-of-state bits from this
+ * same sequence's MCR write - the line asserts, the GIC latches INTID 150
+ * (pending latches from the line even while the INTID is disabled), and
+ * the 16 kHz spurious storm follows. The first invocation survives only
+ * because it enters the window with U-Boot's DLL=0 and a clean MSR. A
+ * CMSIS Initialize->PowerControl(FULL) pair therefore rewrites identical
+ * values through the one window that must not be reopened; comparing
+ * against the shadow is what honours PowerControl's contract without it. */
+static bool uart_prog_valid;
+static uint8_t uart_prog_ier;
+static uint8_t uart_prog_lcr;
+static uint8_t uart_prog_dll;
+static uint8_t uart_prog_dlh;
+static uint8_t uart_prog_fcr;
+static uint8_t uart_prog_mcr;
+
 static bool program_uart(void)
 {
 	uint32_t divisor = UART_CONSOLE_CLOCK_HZ / (16u * UART_CONSOLE_BAUD);
+	const uint8_t ier = 0x00u;
+	const uint8_t lcr_dlab = LCR_DLAB;
+	const uint8_t lcr_8n1 = LCR_8N1;
+	const uint8_t dll = divisor & 0xffu;
+	const uint8_t dlh = (divisor >> 8) & 0xffu;
+	const uint8_t fcr = FCR_ENABLE | FCR_CLEAR_RX | FCR_CLEAR_TX |
+			    FCR_TRIGGER_14;
+	const uint8_t mcr = 0x03u;	/* DTR and RTS, what the console expects */
+
+	if (uart_prog_valid && uart_prog_ier == ier &&
+	    uart_prog_lcr == lcr_8n1 && uart_prog_dll == dll &&
+	    uart_prog_dlh == dlh && uart_prog_fcr == fcr &&
+	    uart_prog_mcr == mcr) {
+		/* Already programmed to exactly these values; reopening the
+		 * divisor-latch window would re-arm the line-assertion bug
+		 * documented above for zero gain. */
+		early_ready = true;
+		return true;
+	}
 
 	/* Interrupts stay off: this console is polled, and IER=0 guarantees a
 	 * stray interrupt cannot fire before the GIC is programmed. */
-	reg_write(REG_IER, 0x00);
+	reg_write(REG_IER, ier);
 
-	reg_write(REG_LCR, LCR_DLAB);
-	reg_write(REG_DLL, divisor & 0xffu);
-	reg_write(REG_DLH, (divisor >> 8) & 0xffu);
-	reg_write(REG_LCR, LCR_8N1);
+	reg_write(REG_LCR, lcr_dlab);
+	reg_write(REG_DLL, dll);
+	reg_write(REG_DLH, dlh);
+	reg_write(REG_LCR, lcr_8n1);
 
-	reg_write(REG_FCR, FCR_ENABLE | FCR_CLEAR_RX | FCR_CLEAR_TX |
-			   FCR_TRIGGER_14);
+	reg_write(REG_FCR, fcr);
 
-	/* DTR and RTS asserted, matching what the board's console expects. */
-	reg_write(REG_MCR, 0x03);
+	reg_write(REG_MCR, mcr);
+
+	uart_prog_ier = ier;
+	uart_prog_lcr = lcr_8n1;
+	uart_prog_dll = dll;
+	uart_prog_dlh = dlh;
+	uart_prog_fcr = fcr;
+	uart_prog_mcr = mcr;
+	uart_prog_valid = true;
 
 	/* No self-test here. An earlier revision wrote a pattern to the
 	 * scratch register and refused to transmit if it did not read back -
@@ -744,6 +793,34 @@ static uint32_t console_icfgr_word(uint32_t intid)
 	return reg_rd32(BOARD_GICD_BASE + 0xC00u + 4u * (intid / 16u));
 }
 
+/* Word of GICD_ISENABLER holding this INTID's enable bit (32 INTIDs per
+ * word). Read-only diagnostic companion to the icfgr readback: pend=1 with
+ * the enable bit 0 would mean a software set-pending, not a line the GIC
+ * was ever watching. */
+static uint32_t console_isen_word(uint32_t intid)
+{
+	return reg_rd32(BOARD_GICD_BASE + 0x100u + 4u * (intid / 32u));
+}
+
+/* Boot-sequence window probe: what the GIC and the part think at a named
+ * point of the shell adapter's bring-up. The D41 attribution question is
+ * WHICH bring-up step first shows INTID 150 pending; this is the read that
+ * answers it. No IIR read here on purpose - an IIR read consumes the
+ * pending identification, erasing exactly the evidence a probe is for. */
+void uart_console_window_probe(const char *tag)
+{
+	char line[112];
+
+	(void)snprintf(line, sizeof(line),
+		       "uart: w %s: pend=%u ier=%02x lcr=%02x isen=%08x\n",
+		       tag,
+		       (unsigned)IRQ_GetPending((IRQn_ID_t)console_intid),
+		       (unsigned)reg_read(REG_IER),
+		       (unsigned)reg_read(REG_LCR),
+		       (unsigned)console_isen_word(console_intid));
+	board_early_print_raw(line);
+}
+
 static int32_t usart_rx_start(void)
 {
 	if (usart_power != ARM_POWER_FULL) {
@@ -756,17 +833,18 @@ static int32_t usart_rx_start(void)
 	 * high before we had anything armed - the assertor predates the
 	 * console driver entirely). */
 	{
-		char line[96];
+		char line[112];
 
 		(void)snprintf(line, sizeof(line),
 			       "uart: arm: intid=%u pend=%u ier=%02x"
-			       " lcr=%02x icfgr=%08x\n",
+			       " lcr=%02x icfgr=%08x isen=%08x\n",
 			       (unsigned)console_intid,
 			       (unsigned)IRQ_GetPending(
 				       (IRQn_ID_t)console_intid),
 			       (unsigned)reg_read(REG_IER),
 			       (unsigned)reg_read(REG_LCR),
-			       (unsigned)console_icfgr_word(console_intid));
+			       (unsigned)console_icfgr_word(console_intid),
+			       (unsigned)console_isen_word(console_intid));
 		board_early_print_raw(line);
 	}
 
@@ -801,12 +879,14 @@ static int32_t usart_rx_start(void)
 		rx_remaining = SHELL_RX_ARM_COUNT;
 	}
 
-	/* Unmask the source, then clear anything that was pending from before
-	 * the line was ours. Draining the FIFO is what actually drops a
-	 * level-triggered RX condition; leaving a pre-existing byte in it would
-	 * re-assert the moment the line is enabled. */
-	reg_write(REG_IER, IER_RX_AVAILABLE);
+	/* Drain the FIFO BEFORE unmasking the source. Draining is what actually
+	 * drops a level-triggered RX condition; a byte left in the FIFO would
+	 * re-assert the line the instant IER stops masking it - the same order
+	 * usart_receive() already applies. (Until 2026-09-21 this armed IER
+	 * first and drained second, which is the D41 experiment's write-order
+	 * candidate for the phantom pend=1 at arm.) */
 	usart_rx_drain();
+	reg_write(REG_IER, IER_RX_AVAILABLE);
 
 	/* A successful full arm clears the storm defence: this is the
 	 * recovery path (shell auto-kick, uartint rebind) as well as the
