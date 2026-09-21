@@ -26,11 +26,11 @@
 BOARD ?= rk3568
 
 # Number of cores this image runs on (1..4 on RK3568). Forwarded to the
-# compiler as -D so board_conf.h / board.h and FreeRTOSConfig.h derive the
-# kernel core count, the port arrays, the app fan-out and the tick source
-# selection from ONE number. `make SMP_CORES=1` is the single-core
-# comparator image. An earlier layout had the flag in FreeRTOSConfig.h but
-# never passed it through, so it silently built 4-core every time.
+# compiler as -D so board_conf.h / board.h derive the secondary-core
+# bring-up fan-out and the tick source selection from ONE number.
+# Since D42 the mainline image is ThreadX SMP (THREADX defaults to 1);
+# FreeRTOS support is SINGLE-CORE only - `make freertos` pins SMP_CORES=1,
+# and THREADX=0 with SMP_CORES>1 is a hard error below.
 SMP_CORES ?= 4
 
 # Bare-metal toolchain. Set explicitly rather than inherited: non-interactive
@@ -333,7 +333,18 @@ ADAPTER_SRCS += $(TEST_SRCS)
 KERNEL_SRCS  += third-party/FreeRTOS-Kernel/stream_buffer.c
 endif
 
-# THREADX=1 builds the ThreadX SMP comparison image (D39): same app, same
+# D42: ThreadX SMP is the MAINLINE kernel - THREADX defaults to 1, so
+# `make all` produces the ThreadX SMP image. THREADX=0 selects the
+# FreeRTOS port, which is single-core only.
+THREADX ?= 1
+
+ifneq ($(THREADX),1)
+ifneq ($(SMP_CORES),1)
+$(error FreeRTOS is single-core only since D42 - use `make freertos` (THREADX=0 SMP_CORES=1))
+endif
+endif
+
+# The ThreadX build (default since D42): same app, same
 # board layer, same cherrysh - but the kernel is Eclipse ThreadX
 # (common_smp + the cortex_a55_smp GNU port, vendored under
 # third-party/threadx/) and the CMSIS-RTOS2 implementation is the
@@ -424,12 +435,12 @@ endif
 # drop the directory entirely on mismatch. Sits after the KTEST block so
 # BUILD_STAMP follows the same BUILD the rules use.
 BUILD_STAMP := $(BUILD)/.smp-cores
-ifeq ($(shell cat $(BUILD_STAMP) 2>/dev/null),$(SMP_CORES) $(XHCI))
+ifeq ($(shell cat $(BUILD_STAMP) 2>/dev/null),$(SMP_CORES) $(XHCI) $(THREADX))
 else
 $(shell rm -rf $(BUILD))
 endif
 $(BUILD_STAMP):
-	@mkdir -p $(BUILD) && echo '$(SMP_CORES) $(XHCI)' > $(BUILD_STAMP)
+	@mkdir -p $(BUILD) && echo '$(SMP_CORES) $(XHCI) $(THREADX)' > $(BUILD_STAMP)
 
 # Board assembly is shared; the kernel-side assembly is the seam itself and
 # therefore per-kernel: the FreeRTOS image links portasm_smp.S (context
@@ -505,7 +516,7 @@ $(TARGET).bin: $(TARGET).elf
 # failure on the board.
 .DEFAULT_GOAL := all
 
-.PHONY: all clean deploy gates ktest ktest-deploy threadx threadx-deploy
+.PHONY: all clean deploy gates ktest ktest-deploy threadx threadx-deploy freertos freertos-deploy
 
 all: $(TARGET).bin
 
@@ -514,19 +525,26 @@ all: $(TARGET).bin
 # that is what the boot profile loads; the banner line on the console
 # ("freewebcamera ktest") tells the images apart.
 ktest:
-	@$(MAKE) KTEST=1 all
+	@$(MAKE) THREADX=0 SMP_CORES=1 KTEST=1 all
 
 ktest-deploy:
-	@$(MAKE) KTEST=1 deploy
+	@$(MAKE) THREADX=0 SMP_CORES=1 KTEST=1 deploy
 
-# ThreadX SMP comparison image (D39): built, deployed and booted exactly
-# like the FreeRTOS one (same TFTP name, banner tells them apart -
-# "freewebcamera M0 - RK3568 ThreadX SMP carrier").
+# ThreadX SMP is the MAINLINE image (D42): `make all` builds it; these
+# targets remain as explicit aliases (same TFTP deploy name, the banner
+# tells the kernels apart - "freewebcamera M0 - RK3568 ThreadX SMP carrier").
 threadx:
 	@$(MAKE) THREADX=1 all
 
 threadx-deploy:
 	@$(MAKE) THREADX=1 deploy
+
+# FreeRTOS single-core support/comparator image (D42).
+freertos:
+	@$(MAKE) THREADX=0 SMP_CORES=1 all
+
+freertos-deploy:
+	@$(MAKE) THREADX=0 SMP_CORES=1 deploy
 
 # Copy to the TFTP root under the name the freertos boot profile expects.
 # Records the hash before and after so the transfer is verifiable.
