@@ -127,7 +127,9 @@
 #define IRQ_INTID_SPI_FIRST	32
 #define IRQ_INTID_SPI_MAX	1019
 #define IRQ_INTID_LPI_FIRST	8192
-#define IRQ_INTID_LPI_MAX	(IRQ_INTID_LPI_FIRST + 255)	/* 208..463 window */
+/* Dispatch window 8192..8447 (IRQ_LPI_TABLE_SIZE entries below); the ITS
+ * itself hands out only ITS_LPI_QUANTITY slots above IRQ_LPI_INTID_FIRST. */
+#define IRQ_INTID_LPI_MAX	(IRQ_INTID_LPI_FIRST + 255)
 #define IRQ_INTID_SPURIOUS	1023
 
 /* Table spans SGI/PPI + SPI; LPIs get their own window (see gicv3_its.c). */

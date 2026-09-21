@@ -100,7 +100,19 @@ static void vbar_install(void)
 void tx_irq_handler(void)
 {
 	uint32_t raw = icc_iar1_read();
-	uint32_t id = raw & 0x3ffU;
+	uint32_t id;
+
+	/* LPI INTIDs start at 8192 and do not fit the 10-bit SGI/PPI/SPI field:
+	 * masking them truncates 8192 to 0 - which is the preempt SGI - so an
+	 * LPI delivery vanished into the deliberately-empty IPI branch and the
+	 * handler never ran (board-proven 2026-09-21: `its` FAIL with itsdump
+	 * showing every table healthy). Pass the LPI window through intact,
+	 * same guard as the FreeRTOS glue's vApplicationInterruptHandler. */
+	if (raw < 8192U) {
+		id = raw & 0x3ffU;
+	} else {
+		id = raw;
+	}
 
 	if (id == (uint32_t)BOARD_TICK_INTID) {
 		/* Tick: expirations + per-core time slice, under the kernel's
