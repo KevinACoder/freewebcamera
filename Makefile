@@ -447,7 +447,13 @@ SDMMC_SRCS := \
 	third-party/sdmmc/sd/fsl_sd.c \
 	third-party/sdmmc/sdio/fsl_sdio.c
 
-CHERRYUSB_SRCS :=
+# CherryUSB host subset, with the adapted ThreadX osal from the adapter
+# (see usb_osal_threadx.c and imports.md).
+CHERRYUSB_SRCS := \
+	third-party/cherryusb/core/usbh_core.c \
+	third-party/cherryusb/class/hub/usbh_hub.c \
+	third-party/cherryusb/port/ehci/usb_hc_ehci.c \
+	port/adapters/cherryusb/usb_osal_threadx.c
 
 ADAPTER_SRCS := \
 	port/adapters/cmsis_rtos2_threadx/cmsis_os2_impl.c \
@@ -476,7 +482,10 @@ ADAPTER_SRCS := \
 	port/adapters/lwip/ethernetif.c \
 	port/adapters/lwip/lwip_adapter.c \
 	port/adapters/lwip/net_cmds.c \
-	port/adapters/stub/usb_stub.c
+	port/adapters/cherryusb/usbh_platform.c \
+	port/adapters/cherryusb/usbh_adapter.c \
+	port/adapters/cherryusb/usbh_glue.c \
+	port/adapters/cherryusb/usbh_cmds.c
 
 # ThreadX's include paths replace the FreeRTOS ones wholesale: the FreeRTOS
 # INC_ADAPTER must not leak into this image, or a stray FreeRTOS.h would
@@ -496,6 +505,12 @@ INC_ADAPTER := -Ithird-party/threadx/common_smp/inc \
 	-Iport/adapters/lwip/include \
 	-Iport/adapters/lwip/cmsis/include \
 	-Ithird-party/lwip/src/include \
+	-Iport/adapters/cherryusb \
+	-Iport/adapters/cherryusb/xhci \
+	-Ithird-party/cherryusb/common \
+	-Ithird-party/cherryusb/core \
+	-Ithird-party/cherryusb/class/hub \
+	-Ithird-party/cherryusb/port/ehci \
 	-Iport/adapters/fatfs \
 	-Ithird-party/fatfs \
 	-Iport/adapters/sdmmc/shadow \

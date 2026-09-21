@@ -35,6 +35,11 @@
  * slot table on every ISR flag-set would add a scan to the console wake-up
  * path, so the pointer rides in the TCB instead. The kernel itself never
  * touches the extension field. */
+/* The board's tick glue arms a 1000 Hz timer (tx_glue.c TX_TICK_RATE_HZ);
+ * CherryUSB's osal refuses to compile against any other claim, and every
+ * ms-based osal timeout rides on this being true. */
+#define TX_TIMER_TICKS_PER_SECOND			1000
+
 #define TX_THREAD_USER_EXTENSION	VOID	*tx_thread_cmsis_slot;
 
 #endif /* TX_USER_H */

@@ -345,6 +345,17 @@ int usb_start(void)
 	}
 	started = true;
 
+#ifdef THREADX_BUILD
+	/* The ThreadX osal carries its own byte pool and self-delete reaper;
+	 * they must exist before the first usb_osal_* allocation below. The
+	 * FreeRTOS osal has no init step. Same kernel-boundary ifdef as the
+	 * banner in main.c. Upstream declares no prototype for this - it is
+	 * the integrator's side of the osal. */
+	extern void usb_osal_init(uint8_t *mem, uint32_t mem_size);
+
+	usb_osal_init(NULL, 0U);
+#endif
+
 #ifdef USBH_HCD_XHCI
 	for (busid = 0U; busid < USBH_XHCI_NUM; busid++) {
 #else
