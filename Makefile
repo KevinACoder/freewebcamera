@@ -276,6 +276,7 @@ DRIVER_SRCS := \
 	drivers/dwc_ahci.c \
 	drivers/rk3568_sata.c \
 	drivers/dwc_nvme.c \
+	drivers/nvme_diag.c \
 	drivers/dwc_mmc.c \
 	drivers/dwc_mshc.c \
 	drivers/rk3568_sdmmc.c \

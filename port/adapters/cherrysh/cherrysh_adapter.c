@@ -92,13 +92,16 @@ extern ARM_DRIVER_USART Driver_USART_Console;
 /* Post-mortem and debug entry points. its_dump_cmd lives next to the ITS
  * driver (port/board/itsdump.c); the console rebind lives in the UART
  * driver and is how a wrong-INTID hypothesis gets tested at runtime
- * instead of with a rebuild. Both are declared here, like the console
- * handle above, rather than reaching into driver headers. */
+ * instead of with a rebuild; nvme_diag_cmd brings the NVMe up and reads
+ * blocks so the driver's own message-interrupt delivery print becomes the
+ * end-to-end LPI evidence. All declared here, like the console handle
+ * above, rather than reaching into driver headers. */
 extern int its_dump_cmd(int argc, char **argv);
 extern int uart_console_irq_rebind(unsigned int intid);
 extern unsigned int uart_console_irq_id(void);
 extern int uart_console_rx_down(void);
 extern int uart_console_rx_kick(void);
+extern int nvme_diag_cmd(int argc, char **argv);
 
 /* Freestanding: minilibc.c provides the definition. */
 extern int atoi(const char *s);
@@ -417,6 +420,19 @@ static int cmd_itsdump(int argc, char **argv)
 	return 0;
 }
 
+/* NVMe bring-up / read diagnostics. The logic lives in the driver tree
+ * (nvme_diag.c, same split as its/itsdump); the delivery evidence - the
+ * line the whole point hangs on - is printed by dwc_nvme itself on the
+ * first completed command. */
+static int cmd_nvme(int argc, char **argv)
+{
+	chry_shell_t *csh = CSH_FROM_ARGV(argc, argv);
+
+	csh_printf(csh, "nvme:\r\n");
+	(void)nvme_diag_cmd(argc, argv);
+	return 0;
+}
+
 /* Move the console RX interrupt to another INTID without a rebuild: the
  * one board fact this driver cannot establish by itself. */
 static int cmd_uartint(int argc, char **argv)
@@ -505,6 +521,8 @@ CSH_CMD_EXPORT_ALIAS_FULL(cmd_its, its, "its",
 			  "run the ITS/LPI self-test ladder");
 CSH_CMD_EXPORT_ALIAS_FULL(cmd_itsdump, itsdump, "itsdump",
 			  "dump ITS/LPI delivery state");
+CSH_CMD_EXPORT_ALIAS_FULL(cmd_nvme, nvme, "nvme",
+			  "bring up NVMe; `nvme read <lba>` reads 8 blocks");
 CSH_CMD_EXPORT_ALIAS_FULL(cmd_uartint, uartint, "uartint",
 			  "show/move console RX INTID");
 	CSH_CMD_EXPORT_ALIAS_FULL(cmd_gicdiag, gicdiag, "gicdiag",
