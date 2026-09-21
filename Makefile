@@ -396,7 +396,8 @@ THREADX_PORT_SRCS := $(filter-out \
 	third-party/threadx/ports_smp/cortex_a55_smp/gnu/src/tx_thread_smp_core_preempt.S, \
 	$(wildcard third-party/threadx/ports_smp/cortex_a55_smp/gnu/src/*.S))
 
-KERNEL_SRCS := $(THREADX_KERNEL_SRCS) port/adapters/threadx/tx_glue.c
+KERNEL_SRCS := $(THREADX_KERNEL_SRCS) port/adapters/threadx/tx_glue.c \
+	port/adapters/threadx/heap.c
 
 # The vendored middleware lists (lwIP/FatFs/sdmmc/CherryUSB) are emptied:
 # their OSALs are FreeRTOS-coupled upstream code, and the drivers behind
