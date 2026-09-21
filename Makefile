@@ -220,6 +220,7 @@ ADAPTER_SRCS := \
 	third-party/cherrysh/builtin/shsize.c \
 	third-party/cherrysh/cherryrl/chry_readline.c \
 	third-party/cherryrb/chry_ringbuffer.c \
+	port/adapters/periph/periph_cmds.c \
 	port/adapters/lwip/lwip_diag.c \
 	port/adapters/lwip/ethernetif.c \
 	port/adapters/lwip/lwip_adapter.c \
