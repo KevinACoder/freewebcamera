@@ -87,7 +87,6 @@ typedef uint64_t         TickType_t;
 #define portPOINTER_SIZE_TYPE    uint64_t
 
 /*-----------------------------------------------------------*/
-#if( configNUMBER_OF_CORES == 1 )
 
 #define portEND_SWITCHING_ISR( xSwitchRequired ) \
     {                                            \
@@ -98,22 +97,6 @@ typedef uint64_t         TickType_t;
             ullPortYieldRequired = pdTRUE;       \
         }                                        \
     }
-
-#else
-
-/* Task utilities. */
-extern uint64_t ullPortYieldRequired[];
-/* Called at the end of an ISR that can cause a context switch. */
-#define portEND_SWITCHING_ISR( xSwitchRequired ) \
-    {                                            \
-                                                 \
-        if( xSwitchRequired != pdFALSE )         \
-        {                                        \
-            ullPortYieldRequired[portGET_CORE_ID()] = pdTRUE;       \
-        }                                        \
-    }
-
-#endif
 
 #define portYIELD_FROM_ISR( x )    portEND_SWITCHING_ISR( x )
 
@@ -143,39 +126,8 @@ extern void vPortInstallFreeRTOSVectorTable( void );
     __asm volatile ( "ISB SY" );
 
 
-static inline UBaseType_t uxDisableInterrupts()
-{
-    unsigned long flags;
-
-    __asm volatile (
-        "mrs %0, daif\n"
-        "msr daifset, #2\n"
-        : "=r" (flags)
-        :
-        : "memory"
-    );
-
-    return flags;
-}
-
-static inline void vRestoreInterrupts(UBaseType_t flags)
-{
-    __asm volatile (
-        "and x2, %0, #128\n"
-        "mrs x1, daif\n"
-        "bic x1, x1, #128\n"
-        "orr x1, x1, x2\n"
-        "msr daif, x1\n"
-        :
-        : "r" (flags)
-        : "x0","x1","x2","memory"
-    );
-}
-
 #define portSET_INTERRUPT_MASK_FROM_ISR()         uxPortSetInterruptMask()
 #define portCLEAR_INTERRUPT_MASK_FROM_ISR( x )    vPortClearInterruptMask( x )
-
-#if( configNUMBER_OF_CORES == 1 )
 
 extern void vPortEnterCritical( void );
 extern void vPortExitCritical( void );
@@ -184,43 +136,6 @@ extern void vPortExitCritical( void );
  * interrupts that have a priority below configMAX_API_CALL_INTERRUPT_PRIORITY. */
 #define portENTER_CRITICAL()                      vPortEnterCritical();
 #define portEXIT_CRITICAL()                       vPortExitCritical();
-
-
-#else /* #if( configNUMBER_OF_CORES == 1 ) */
-
-#define portENTER_CRITICAL()		            vTaskEnterCritical();
-#define portEXIT_CRITICAL()			            vTaskExitCritical();
-
-#define portSET_INTERRUPT_MASK()                uxDisableInterrupts()
-#define portCLEAR_INTERRUPT_MASK(x)             vRestoreInterrupts(x)
-
-#define portENTER_CRITICAL_FROM_ISR()           vTaskEnterCriticalFromISR()
-#define portEXIT_CRITICAL_FROM_ISR( x )         vTaskExitCriticalFromISR( x )
-
-/*-----------------------------------------------------------
- * Critical section locks
- *----------------------------------------------------------*/
-#define ISR_LOCK                (0u)
-#define TASK_LOCK               (1u)
-
-extern void vPortRecursiveLock(BaseType_t xCoreID, uint32_t ulLockNum, BaseType_t uxAcquire);
-
-/* Per-core lock state initialisation. */
-void vPortLockInit(void);
-
-/* Task lock interface. */
-void vPortTaskLock(BaseType_t coreId, BaseType_t acquire);
-
-/* ISR lock interface. */
-void vPortISRLock(BaseType_t coreId, BaseType_t acquire);
-
-#define portRELEASE_ISR_LOCK( xCoreID )     vPortISRLock(( xCoreID ), pdFALSE)
-#define portGET_ISR_LOCK( xCoreID )         vPortISRLock(( xCoreID ), pdTRUE)
-
-#define portRELEASE_TASK_LOCK( xCoreID )    vPortTaskLock(( xCoreID ), pdFALSE)
-#define portGET_TASK_LOCK( xCoreID )        vPortTaskLock(( xCoreID ), pdTRUE)
-
-#endif
 
 /*-----------------------------------------------------------*/
 
@@ -298,32 +213,7 @@ void vPortTaskUsesFPU( void );
 
 #define portMEMORY_BARRIER()    __asm volatile ( "" ::: "memory" )
 
-/* Symmetric MultiProcessing (SMP) utility */
-#if ( configNUMBER_OF_CORES > 1 )
-
-static inline BaseType_t xPortGetCoreID()
-{
-   register BaseType_t xCoreID;
-   xCoreID = (BaseType_t)board_smp_core_id();
-   return xCoreID;
-}
-
-/* port for SMP */
-#define portGET_CORE_ID()       xPortGetCoreID()
-
-/* Assembly paths need an out-of-line symbol; the static inline above cannot
- * be reached with BL. port.c provides it on top of the same board primitive. */
-extern uint32_t vPortGetCoreID( void );
-
-extern void vInterruptCore(uint32_t ulInterruptID, uint32_t ulCoreID);
-/* Use sgi0 as the yield core interrupt. */
-#define portYIELD_CORE_INT_ID       0
-#define portYIELD_CORE( xCoreID )   vInterruptCore(portYIELD_CORE_INT_ID, (uint32_t)xCoreID)
-
-
 int xPortIsInsideInterrupt( void );
-
-#endif
 
 /* *INDENT-OFF* */
 #ifdef __cplusplus

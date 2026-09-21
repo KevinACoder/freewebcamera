@@ -124,81 +124,19 @@ void board_tick_port_setup(void)
 #endif
 }
 
-/* --- SMP: secondary bring-up and the scheduler handshake ------------------- */
+/* --- secondary landing (single core: never reached) ------------------------ */
 
-#if ( configNUMBER_OF_CORES > 1 )
-
-/* Defined by the port proper (port.c): raised by core 0 right after the tick
- * is armed, which is the signal for the parked secondaries to enter. */
-extern volatile uint64_t uxPortSchedularRunning;
-
-/* Called by xPortStartScheduler on core 0, BEFORE the tick is armed - the
- * reference line's order, kept exactly: all secondaries are released and
- * have run their own GIC bring-up (and are parked in kernel_secondary_main
- * below, waiting) by the time the first task ever runs. */
-void StartSecondaryCpuUp(void)
-{
-	board_smp_start_secondaries();
-}
-
-/* The kernel's cross-core yield (portYIELD_CORE): raise SGI
- * ulInterruptID on exactly the target core. The encoding (Aff1 in
- * ICC_SGI1R_EL1 bits [23:16], TargetList = 1, one write per core - the
- * silently-dropped-affinity lesson is in board_gicv3_send_sgi) lives in the
- * board layer. */
-void vInterruptCore(uint32_t ulInterruptID, uint32_t ulCoreID)
-{
-	configASSERT(ulCoreID < (uint32_t)configNUMBER_OF_CORES);
-	configASSERT(ulInterruptID < 16U);
-
-	board_gicv3_send_sgi(ulInterruptID, 1UL << ulCoreID);
-}
-
-/* Secondary-core landing from smp_secondary.S (the board layer's neutral
- * hand-off symbol). Does not return.
- *
- * Order is the reference line's: (1) this core's own redistributor and CPU
- * interface, (2) report in - the boot core's bounded wait in
- * board_smp_start_secondaries is waiting for exactly this, (3) spin until
- * core 0 has armed the tick and raised uxPortSchedularRunning, (4) enter the
- * scheduler, which installs this core's VBAR and restores the first task
- * with interrupts enabled via the task's initial PSTATE. */
-void kernel_secondary_main(void)
-{
-	uint32_t cpu_id = board_smp_core_id();
-
-	configASSERT(cpu_id < (uint32_t)configNUMBER_OF_CORES);
-
-	board_gicv3_secondary_init();
-
-	board_smp_mark_core_up(cpu_id);
-
-	while (uxPortSchedularRunning == 0)
-	{
-		;
-	}
-
-	(void)xPortStartScheduler();
-
-	/* Not reached: the scheduler ends in vPortRestoreTaskContext. */
-	for (;;) {
-		__asm__ __volatile__("wfe");
-	}
-}
-
-#else /* configNUMBER_OF_CORES == 1 */
-
-/* smp_secondary.S branches here unconditionally, but a single-core image
- * never releases a secondary (StartSecondaryCpuUp does not exist below
- * configNUMBER_OF_CORES > 1), so this is a never-reached park. */
+/* smp_secondary.S branches here unconditionally (the board layer's neutral
+ * hand-off symbol is shared with the ThreadX image, whose own glue provides
+ * the real secondary landing). A single-core FreeRTOS image never releases a
+ * secondary - startup.S parks every nonzero core before the C environment -
+ * so this is a never-reached park that only has to link. */
 void kernel_secondary_main(void)
 {
 	for (;;) {
 		__asm__ __volatile__("wfe");
 	}
 }
-
-#endif /* configNUMBER_OF_CORES > 1 */
 
 /* --- fault parking (reached from the port's vector table) ------------------ */
 

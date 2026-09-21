@@ -319,21 +319,8 @@ osThreadId_t osThreadNew(osThreadFunc_t func, void *argument,
 		}
 	}
 
-	/* A non-zero affinity mask pins the thread; SMP kernel creates it
-	 * with the mask, single-core kernel path is the plain create (the
-	 * affinity APIs do not exist when configNUMBER_OF_CORES == 1 - the
-	 * kernel #errors on that combination). Either way FreeRTOS owns the
-	 * TCB allocation. */
-#if (configNUMBER_OF_CORES > 1)
-	if (attr != NULL && attr->affinity_mask != 0U) {
-		if (xTaskCreateAffinitySet((TaskFunction_t)func, name,
-					   stack_words, argument, priority,
-					   (UBaseType_t)attr->affinity_mask,
-					   &handle) != pdPASS) {
-			return NULL;
-		}
-	} else
-#endif
+	/* Single core (D42): affinity attributes have nothing to pin to and
+	 * are ignored; FreeRTOS owns the TCB allocation. */
 	if (xTaskCreate((TaskFunction_t)func, name, stack_words,
 			argument, priority, &handle) != pdPASS) {
 		return NULL;
@@ -1294,15 +1281,9 @@ osStatus_t osThreadSetAffinityMask(osThreadId_t thread_id, uint32_t affinity_mas
 		return osErrorParameter;
 	}
 
-#if (configNUMBER_OF_CORES > 1)
-	vTaskCoreAffinitySet((TaskHandle_t)thread_id,
-			     (UBaseType_t)affinity_mask);
-	return osOK;
-#else
 	(void)thread_id;
 	(void)affinity_mask;
-	return osErrorResource;		/* no cores to pin to */
-#endif
+	return osErrorResource;		/* single core: no cores to pin to */
 }
 
 uint32_t osThreadGetAffinityMask(osThreadId_t thread_id)
@@ -1311,12 +1292,8 @@ uint32_t osThreadGetAffinityMask(osThreadId_t thread_id)
 		return 0U;
 	}
 
-#if (configNUMBER_OF_CORES > 1)
-	return (uint32_t)vTaskCoreAffinityGet((ConstTaskHandle_t)thread_id);
-#else
 	(void)thread_id;
 	return 1U;			/* the one core */
-#endif
 }
 
 osStatus_t osKernelProtect(uint32_t safety_class)

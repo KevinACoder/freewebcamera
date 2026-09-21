@@ -446,7 +446,7 @@ else
 ASM_SRCS := \
 	port/board/common/startup.S \
 	port/board/common/smp_secondary.S \
-	port/adapters/freertos/portasm_smp.S \
+	port/adapters/freertos/portasm.S \
 	port/adapters/freertos/port_vectors.S
 endif
 

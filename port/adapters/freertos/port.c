@@ -207,7 +207,6 @@ extern void vPortRestoreTaskContext( void );
  */
 static void prvTaskExitError( void );
 
-#if ( configNUMBER_OF_CORES == 1 )
 /*-----------------------------------------------------------*/
 
 /* A variable is used to keep track of the critical section nesting.  This
@@ -228,36 +227,6 @@ uint64_t ullPortYieldRequired = pdFALSE;
  * if the nesting depth is 0. */
 uint64_t ullPortInterruptNesting = 0;
 
-#else /* #if ( configNUMBER_OF_CORES == 1 ) */
-
-
-/* The reference tree seeds these with 9999 and the asm restore path then
- * narrows ICC_PMR to the API level whenever the saved nesting is non-zero.
- * Under the SMP kernel that nesting count is VESTIGIAL - with
- * portCRITICAL_NESTING_IN_TCB the kernel keeps the real count in each TCB,
- * and nothing ever writes this array again - so PMR would sit parked at
- * configMAX_API_CALL_INTERRUPT_PRIORITY << 4 forever after the first context
- * switch. The reference line never noticed because every one of its device
- * interrupts is numerically ABOVE that level; this project's FromISR
- * drivers (console, GMAC, ITS LPIs) sit AT the API level - which is what
- * vPortValidateInterruptPriority requires of them - and a PMR parked at
- * that same level starves exactly those interrupts (board-proven 2026-09-18:
- * tick 0xd0 delivered, every 0xf0 line silent). Zero means "not in a
- * critical section", so the restore writes the unmask value instead. */
-volatile uint64_t ullCriticalNesting[configNUMBER_OF_CORES] = {0};
-
-
-volatile uint64_t ullPortTaskHasFPUContext[configNUMBER_OF_CORES] = { pdFALSE };
-
-/* Set to 1 to pend a context switch from an ISR. */
-uint64_t ullPortYieldRequired[configNUMBER_OF_CORES] = { pdFALSE };
-
-/* Counts the interrupt nesting depth.  A context switch is only performed if
-if the nesting depth is 0. */
-uint64_t ullPortInterruptNesting[configNUMBER_OF_CORES] = { 0 };
-
-#endif
-
 
 /* The space on the stack required to hold the FPU registers.  This is 32 128-bit
  * registers, that means (64 * 8) 64 double words */
@@ -272,7 +241,7 @@ volatile uint8_t ucPriorityConfig = 0;
 
 static void vPortPriorityConfigCheck(void);
 
-/* Out-of-line core id for the assembly paths (portasm_smp.S cannot reach the
+/* Out-of-line core id for the assembly paths (portasm.S cannot reach the
  * static inline in board.h with a BL). */
 uint32_t vPortGetCoreID( void )
 {
@@ -415,29 +384,6 @@ static void prvTaskExitError( void )
 }
 
 /*-----------------------------------------------------------*/
-static void vTaskSwitchContextISR(void)
-{
-    portEND_SWITCHING_ISR(pdTRUE);
-}
-
-#if ( configNUMBER_OF_CORES > 1 )
-void vPortSmpCoreISRSetup(void)
-{
-    /* register intr callback */
-    IRQ_SetHandler((IRQn_ID_t)portYIELD_CORE_INT_ID,
-                   vTaskSwitchContextISR);
-    /* Logical level 11 (board policy BOARD_IRQ_PRIORITY_SGI); IRQ_SetPriority
-     * takes the raw byte, logical N shifted into the top bits. */
-    IRQ_SetPriority((IRQn_ID_t)portYIELD_CORE_INT_ID,
-                    BOARD_IRQ_PRIORITY_SGI_RAW);
-    IRQ_Enable((IRQn_ID_t)portYIELD_CORE_INT_ID);
-}
-
-/* flag to control tick ISR handling, this is made true just before schedular start */
-
-volatile uint64_t uxPortSchedularRunning = pdFALSE;
-extern void StartSecondaryCpuUp(void);
-#endif
 
 BaseType_t xPortStartScheduler(void)
 {
@@ -452,9 +398,6 @@ BaseType_t xPortStartScheduler(void)
     if (portGET_CORE_ID() == 0)
     {
         vPortPriorityConfigCheck();
-        #if ( configNUMBER_OF_CORES > 1 )
-        StartSecondaryCpuUp();
-        #endif
     }
 
     /* At the time of writing, the BSP only supports EL1. */
@@ -489,14 +432,7 @@ BaseType_t xPortStartScheduler(void)
             if (portGET_CORE_ID() == 0)
             {
                 configSETUP_TICK_INTERRUPT();
-                #if ( configNUMBER_OF_CORES > 1 )
-                uxPortSchedularRunning = pdTRUE;/* smp */
-                #endif
             }
-
-            #if ( configNUMBER_OF_CORES > 1 )
-            vPortSmpCoreISRSetup();
-            #endif
 
             /* Start the first task executing. */
             vPortRestoreTaskContext();
@@ -514,9 +450,6 @@ void vPortEndScheduler( void )
     configASSERT( 0 );
 }
 /*-----------------------------------------------------------*/
-/* When configNUMBER_OF_CORES > 1 the functions used to enter/exit
-a critical section are vTaskEnterCritical() and vTaskExitCritical(). */
-#if ( configNUMBER_OF_CORES == 1 )
 
 void vPortEnterCritical( void )
 {
@@ -558,7 +491,6 @@ void vPortExitCritical( void )
         }
     }
 }
-#endif
 /*-----------------------------------------------------------*/
 /*
  * Global counter used for calculation of run time statistics of tasks.
@@ -568,7 +500,6 @@ void vPortExitCritical( void )
 static volatile uint64_t ulHighFrequencyTimerTicks = 0;
 #endif
 
-#if ( configNUMBER_OF_CORES == 1 )
 void FreeRTOS_Tick_Handler( void )
 {
 
@@ -606,38 +537,6 @@ void FreeRTOS_Tick_Handler( void )
     configCLEAR_TICK_INTERRUPT();
 
 }
-#else
-void FreeRTOS_Tick_Handler( void )
-{
-    /* SMP discipline (validated on this board by the reference line, whose
-     * round 15 restored exactly this shape): PMR narrowed, IRQs re-enabled
-     * around the increment, and xTaskIncrementTick inside the kernel's
-     * FromISR critical section (ISR lock). Dropping the ISR lock trips the
-     * kernel's "must be called from a critical section" assertion inside
-     * prvYieldForTask. */
-    portDISABLE_INTERRUPTS();
-    IRQ_SetPriorityMask(configMAX_API_CALL_INTERRUPT_PRIORITY << portPRIORITY_SHIFT);
-
-    __asm volatile("dsb sy		\n"
-                    "isb sy		\n" ::
-                        : "memory");
-    portENABLE_INTERRUPTS();
-
-    UBaseType_t uxInterruptLevel = portENTER_CRITICAL_FROM_ISR();
-    /* Increment the RTOS tick. */
-    if (xTaskIncrementTick() != pdFALSE)
-    {
-        ullPortYieldRequired[0] = pdTRUE;
-    }
-    portEXIT_CRITICAL_FROM_ISR(uxInterruptLevel);
-
-    /* interrupt clear. */
-    configCLEAR_TICK_INTERRUPT();
-
-    /* unmask all interrupt priorities. */
-    IRQ_SetPriorityMask(portUNMASK_VALUE);
-}
-#endif
 /*-----------------------------------------------------------*/
 
 void vPortTaskUsesFPU( void )
@@ -646,16 +545,10 @@ void vPortTaskUsesFPU( void )
      * FPU flag (which is saved as part of the task context). */
     /* Consider initialising the FPSR here - but probably not necessary in
      * AArch64. */
-     #if ( configNUMBER_OF_CORES == 1 )
-        ullPortTaskHasFPUContext = pdTRUE;
-    #else
-        ullPortTaskHasFPUContext[portGET_CORE_ID()] = pdTRUE;
-    #endif
+    ullPortTaskHasFPUContext = pdTRUE;
 }
 /*-----------------------------------------------------------*/
 
-#if ( configNUMBER_OF_CORES == 1 )
-
 void vPortClearInterruptMask( UBaseType_t uxNewMaskValue )
 {
     if( uxNewMaskValue == pdFALSE )
@@ -663,18 +556,6 @@ void vPortClearInterruptMask( UBaseType_t uxNewMaskValue )
         portUMASK_INTERRUPT();
     }
 }
-
-#else
-
-void vPortClearInterruptMask( UBaseType_t uxNewMaskValue )
-{
-    if( uxNewMaskValue == pdFALSE )
-    {
-        portUMASK_INTERRUPT();
-    }
-
-}
-#endif
 
 /*-----------------------------------------------------------*/
 
@@ -764,188 +645,6 @@ __attribute__((weak)) int xPortIsInsideInterrupt( void )
     return vApplicationInIrq();
 }
 
-/* task lock */
-typedef struct TaskMCSNode {
-    volatile uint8_t locked;       // 锁状态：1=等待中，0=已释放
-    volatile struct TaskMCSNode *next; // 下一个等待节点
-} __attribute__((aligned(64))) TaskMCSNode; // 缓存行对齐
-
-static TaskMCSNode taskNodes[configNUMBER_OF_CORES]; // 每个核心的Task锁节点
-static volatile TaskMCSNode *taskTail = NULL;        // Task锁队列尾指针
-
-/* isr lock */
-typedef struct ISRMCSNode {
-    volatile uint8_t locked;       // 锁状态
-    volatile struct ISRMCSNode *next; // 下一个等待节点
-} __attribute__((aligned(64))) ISRMCSNode; // 缓存行对齐
-
-static ISRMCSNode isrNodes[configNUMBER_OF_CORES]; // 每个核心的ISR锁节点
-static volatile ISRMCSNode *isrTail = NULL;        // ISR锁队列尾指针
-
-/* init lock status */
-void vPortLockInit(void) {
-    for (int i = 0; i < configNUMBER_OF_CORES; i++) {
-        taskNodes[i].locked = 0;
-        taskNodes[i].next = NULL;
-        isrNodes[i].locked = 0;
-        isrNodes[i].next = NULL;
-    }
-    taskTail = NULL;
-    isrTail = NULL;
-}
-
-/* acquire task Lock */
-static void task_mcslock_acquire(BaseType_t coreId) {
-    TaskMCSNode *node = &taskNodes[coreId];
-    node->locked = 1;      // 标记为等待状态
-    node->next = NULL;     // 初始化下一个节点
-
-    // 原子交换尾指针，获取前驱节点
-    volatile TaskMCSNode *prev = __atomic_exchange_n(&taskTail, node, __ATOMIC_ACQ_REL);
-
-    // 如果前驱节点存在，链接到队列并自旋等待
-    if (prev != NULL) {
-        uint64_t spin = 0;
-        prev->next = node; // 将前驱节点的next指向自己
-
-        // 内存屏障：确保prev->next对其他核心可见
-        __atomic_thread_fence(__ATOMIC_RELEASE);
-
-        // 等待锁释放（bring-up 轮14: wfe→yield+超时，排除丢唤醒睡死）
-        while (node->locked) {
-            if (++spin > 50000000ULL) {
-                spin = 0;
-                board_early_print("!! tasklock acquire timeout\r\n");
-            }
-            __asm volatile("yield");
-        }
-    }
-}
-
-/* release task Lock */
-static void task_mcslock_release(BaseType_t coreId) {
-    TaskMCSNode *node = &taskNodes[coreId];
-
-    // 检查是否有后续等待者
-    if (node->next == NULL)
-    {
-        // 尝试快速释放（无竞争）
-        volatile TaskMCSNode *expected = node;
-        if (__atomic_compare_exchange_n(&taskTail, &expected, NULL,
-            0, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
-        {
-            return; // 无等待者，直接返回
-        }
-
-        // 等待后续节点链接到队列（bring-up 轮14: 加超时打印）
-        {
-            uint64_t spin = 0;
-            while (node->next == NULL)
-            {
-                if (++spin > 50000000ULL)
-                {
-                    spin = 0;
-                    board_early_print("!! tasklock nextwait timeout\r\n");
-                }
-                __asm volatile("yield");
-            }
-        }
-    }
-
-    // 唤醒下一个等待者
-    node->next->locked = 0;
-
-    // 内存屏障：确保locked=0对其他核心可见
-    __asm volatile("dsb sy");
-
-    // 发送事件唤醒可能处于wfe的核心
-    __asm volatile("sev");
-
-    __asm__ __volatile__ (  "dmb sy" ::: "memory" );
-}
-
-/* task lock recursion */
-void vPortTaskLock(BaseType_t coreId, BaseType_t acquire) {
-    static uint64_t recursionCount[configNUMBER_OF_CORES] = {0};
-
-    if (acquire) {
-        if (recursionCount[coreId]++ == 0) {
-            task_mcslock_acquire(coreId); // 首次获取锁
-        }
-    } else {
-        configASSERT(recursionCount[coreId] > 0);
-        if (--recursionCount[coreId] == 0) {
-            task_mcslock_release(coreId); // 最后一次释放锁
-        }
-    }
-}
-
-
-/* acquire ISR Lock */
-static void isr_mcslock_acquire(BaseType_t coreId) {
-    ISRMCSNode *node = &isrNodes[coreId];
-    node->locked = 1;
-    node->next = NULL;
-    volatile ISRMCSNode *prev = __atomic_exchange_n(&isrTail, node, __ATOMIC_ACQ_REL);
-    if (prev != NULL) {
-        uint64_t spin = 0;
-        prev->next = node;
-        __atomic_thread_fence(__ATOMIC_RELEASE);
-        while (node->locked)
-        {
-            if (++spin > 50000000ULL)
-            {
-                spin = 0;
-                board_early_print("!! isrlock acquire timeout\r\n");
-            }
-            __asm volatile("yield");
-        }
-    }
-}
-
-/* release ISR Lock */
-static void isr_mcslock_release(BaseType_t coreId) {
-    ISRMCSNode *node = &isrNodes[coreId];
-    if (node->next == NULL) {
-        volatile ISRMCSNode *expected = node;
-        if (__atomic_compare_exchange_n(&isrTail, &expected, NULL,
-            0, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
-            return;
-        }
-        {
-            uint64_t spin = 0;
-            while (node->next == NULL)
-            {
-                if (++spin > 50000000ULL)
-                {
-                    spin = 0;
-                    board_early_print("!! isrlock nextwait timeout\r\n");
-                }
-                __asm volatile("yield");
-            }
-        }
-    }
-    node->next->locked = 0;
-    __asm volatile("dsb sy; sev");
-    __asm__ __volatile__ (  "dmb sy" ::: "memory" );
-}
-
-/* isr lock recursion */
-void vPortISRLock(BaseType_t coreId, BaseType_t acquire) {
-    static uint64_t recursionCount[configNUMBER_OF_CORES] = {0};
-
-    if (acquire) {
-        if (recursionCount[coreId]++ == 0) {
-            isr_mcslock_acquire(coreId);
-        }
-    } else {
-        configASSERT(recursionCount[coreId] > 0);
-        if (--recursionCount[coreId] == 0) {
-            isr_mcslock_release(coreId);
-        }
-    }
-}
-
 static void vPortPriorityConfigCheck(void)
 {
     /* The reference tree reads back a measured RPR step here and, when the
@@ -957,6 +656,4 @@ static void vPortPriorityConfigCheck(void)
      * exported for diagnostics) because the assembly constant path exists
      * either way. */
     ucPriorityConfig = 0;
-
-    vPortLockInit();
 }

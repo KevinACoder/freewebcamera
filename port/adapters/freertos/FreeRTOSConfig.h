@@ -39,39 +39,15 @@
 #define configUSE_PORT_OPTIMISED_TASK_SELECTION	0
 #define configUSE_TICKLESS_IDLE			0
 
-/* --- SMP ------------------------------------------------------------------ */
+/* --- core count ----------------------------------------------------------- */
 
-/* Four A55 cores, one cluster. The port (port.c / portmacro.h /
- * portasm_smp.S in this directory, transplanted from the board-validated
- * reference line) implements everything the kernel demands when
- * configNUMBER_OF_CORES > 1: core id, cross-core yield, MCS kernel locks,
- * per-core nesting. SMP_CORES arrives from the Makefile (-DSMP_CORES, the
- * single source of truth is board_conf.h) so `make SMP_CORES=1` builds a
- * real single-core comparator image. */
-#define configNUMBER_OF_CORES			SMP_CORES
-/* V11.3 kernel: affinity APIs exist only when there is more than one core
- * (FreeRTOS.h #errors on the single-core combination). */
-#if SMP_CORES > 1
-#define configUSE_CORE_AFFINITY			1
-#endif
-
-/* Pin each core's idle task to its own core. Without this the idles are
- * created unpinned and migrate: prvYieldCore then marks a FOREIGN core's
- * idle SCHEDULED_TO_YIELD while the scheduler waits for the owning core to
- * switch it, and the per-core bookkeeping (idle on the wrong core, runstate
- * never clearing) wedges the whole machine a few seconds into any multi-core
- * run - observed as "all anchors OK, then every core parks in its idle with
- * the test tasks never scheduled". */
-#define configIDLE_AFFINITY			1
-
-/* Cross-priority co-residency. This MUST be 1 on this board: with 0, a core
- * whose only runnable pinned task sits below the GLOBAL highest ready
- * priority may not schedule anything (not even down to idle under the same
- * rule), never re-selects, and never sends or consumes a cross-core yield -
- * a delay task on such a core never wakes. Proven on the reference SMP line
- * (its "轮 17" fix) with a bound delayed task + busy task pair: 0 deadlocks
- * within seconds, 1 runs stable for hours. */
-#define configRUN_MULTIPLE_PRIORITIES		1
+/* Single core, by decision D42: ThreadX SMP is the mainline kernel; this
+ * FreeRTOS port is the single-core support/comparator image only (the SMP
+ * port that served D32/D33 was removed with it). The BOARD still boots
+ * SMP_CORES cores when the image is the ThreadX one - SMP_CORES here only
+ * selects the board's tick source (CNTV/27 single-core, CNTPNS/30 SMP), and
+ * the FreeRTOS build is pinned to SMP_CORES=1 in the Makefile. */
+#define configNUMBER_OF_CORES			1
 
 #define configCPU_CLOCK_HZ			24000000UL
 #define configTICK_RATE_HZ			1000U
@@ -218,10 +194,6 @@
  * -mgeneral-regs-only, so nothing ever will - the flag just fixes the frame
  * shape). */
 #define configUSE_TASK_FPU_SUPPORT		1
-
-/* The kernel keeps the critical-section nesting count in the TCB (one field
- * per task, indexed through pxCurrentTCBs[core]). */
-#define portCRITICAL_NESTING_IN_TCB		1
 
 /* --- the port's required hooks -------------------------------------------- */
 

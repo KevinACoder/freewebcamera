@@ -476,6 +476,12 @@ static int cmd_smp(int argc, char **argv)
 {
 	chry_shell_t *csh = CSH_FROM_ARGV(argc, argv);
 
+#if BOARD_SMP_CORES == 1
+	(void)argc;
+	(void)argv;
+	csh_printf(csh, "smp: single-core image, nothing to verify\r\n");
+	return 0;
+#else
 	csh_printf(csh, "smp: pinning one task per core, %u samples each...\r\n",
 		   20000u);
 	if (smp_selftest() != 0) {
@@ -484,6 +490,7 @@ static int cmd_smp(int argc, char **argv)
 	}
 	csh_printf(csh, "smp: PASS - every task ran only on its bound core\r\n");
 	return 0;
+#endif
 }
 
 CSH_CMD_EXPORT_ALIAS_FULL(cmd_version, version, "version",

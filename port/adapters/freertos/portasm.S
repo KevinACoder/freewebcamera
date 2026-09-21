@@ -26,9 +26,10 @@
  *
  */
 /* No C headers here: the %.S rule builds without the adapter include path,
- * and this file no longer keys anything off FreeRTOSConfig.h - the
- * single-core pxCurrentTCB branch was flattened to pxCurrentTCBs (the V11.3
- * kernel keeps the array in both configurations; single core is index 0). */
+ * and this file keys nothing off FreeRTOSConfig.h. Single core only since
+ * D42 (ThreadX SMP is the mainline kernel): the per-core arrays this file
+ * indexes degenerate to their element 0, and the current-TCB variable is
+ * the kernel's scalar pxCurrentTCB. */
 #define ICC_EOIR1_EL1 	S3_0_C12_C12_1
 #define ICC_IAR1_EL1 	S3_0_C12_C12_0
 
@@ -53,14 +54,7 @@
 	.global vSErrorInterruptHandler
 	.global vPortRestoreTaskContext
     
-/* The V11.3 kernel keeps one current-TCB variable per configuration: the
- * array (pxCurrentTCBs) under SMP, the scalar (pxCurrentTCB) single-core.
- * SMP_CORES reaches the assembler via -DSMP_CORES (CFLAGS). */
-#if (SMP_CORES == 1)
 .extern pxCurrentTCB
-#else
-.extern pxCurrentTCBs
-#endif
 .extern vPortGetCoreID
 	.extern board_early_print
 
@@ -696,10 +690,6 @@ ullPortInterruptNestingConst: .dword ullPortInterruptNesting
 ullPortYieldRequiredConst: .dword ullPortYieldRequired
 ullPortUnmaskConst: .dword ullPortUnmask
 
-#if (SMP_CORES == 1)
 pxCurrentTCBConst: .dword pxCurrentTCB
-#else
-pxCurrentTCBConst: .dword pxCurrentTCBs
-#endif
 
 .end
