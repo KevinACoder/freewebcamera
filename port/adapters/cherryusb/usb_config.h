@@ -85,9 +85,12 @@ void usbh_console_printf(const char *fmt, ...);
 #define CONFIG_USBHOST_CONTROL_TRANSFER_TIMEOUT	500
 #endif
 
-/* Two buses: EHCI0 @ 0xFD800000, EHCI1 @ 0xFD880000. */
+/* Four buses: EHCI0 @ 0xFD800000, EHCI1 @ 0xFD880000, xHCI(DWC3 host)
+ * @ 0xFD000000, xHCI(DWC3 otg-as-host) @ 0xFCC00000. EHCI-only images
+ * (EHCI_ONLY=1) still size the arrays for four - the per-bus roothub
+ * structures are the bulk of the cost and sit in .bss either way. */
 #ifndef CONFIG_USBHOST_MAX_BUS
-#define CONFIG_USBHOST_MAX_BUS		2
+#define CONFIG_USBHOST_MAX_BUS		4
 #endif
 
 /* --- EHCI (rk3568 usb2host0/1) --------------------------------------------- */
@@ -119,7 +122,7 @@ void usbh_console_printf(const char *fmt, ...);
 #define CONFIG_USB_DCACHE_ENABLE	1
 #define CONFIG_USB_EHCI_DESC_DCACHE_ENABLE	1
 
-/* --- xHCI (DWC3 usbhost_dwc3 @ 0xFD000000, `make XHCI=1` images) ----------- */
+/* --- xHCI (DWC3 usbhost_dwc3 @ 0xFD000000 + otg @ 0xFCC00000) -------------- */
 
 /* Ring sizes (NetBSD xhci.c uses 256/256; the transfer ring matches, the
  * command/event rings are aligned to it now that the driver is the NetBSD

@@ -59,6 +59,38 @@ struct usbh_urb {
 };
 
 /**
+ * @brief USB host controller operations.
+ *
+ * With CONFIG_USBHOST_MULTI_HCD a controller port exposes one of these
+ * tables and binds it per bus through usbh_hcd_register(); core then routes
+ * the plain usb_hc_init / usbh_submit_urb / ... symbols per bus, so several
+ * different HCD ports can link into one image. Without the macro the table
+ * is unused and a port keeps defining those plain symbols directly (the
+ * legacy single-HCD contract, unchanged).
+ */
+struct usbh_hcd_ops {
+    const char *driver_name;
+    int (*hc_init)(struct usbh_bus *bus);
+    int (*hc_deinit)(struct usbh_bus *bus);
+    uint16_t (*get_frame_number)(struct usbh_bus *bus);
+    int (*roothub_control)(struct usbh_bus *bus, struct usb_setup_packet *setup, uint8_t *buf);
+    int (*submit_urb)(struct usbh_urb *urb);
+    int (*kill_urb)(struct usbh_urb *urb);
+    void (*irq)(uint8_t busid);
+};
+
+/**
+ * @brief Bind an HCD operations table to a bus (multi-HCD builds only).
+ *
+ * Must be called after usbh_initialize() and before the hub thread runs
+ * usb_hc_init() on that bus.
+ *
+ * @param busid The bus to bind to.
+ * @param ops The controller's operations table.
+ */
+void usbh_hcd_register(uint8_t busid, const struct usbh_hcd_ops *ops);
+
+/**
  * @brief usb host controller hardware init.
  *
  * @return On success will return 0, and others indicate fail.

@@ -200,6 +200,7 @@ struct usbh_bus {
     usb_slist_t list;
     uint8_t busid;
     struct usbh_hcd hcd;
+    const struct usbh_hcd_ops *hcd_ops; /* multi-HCD: controller routing, set by usbh_hcd_register() */
     struct usbh_devaddr_map devgen;
     usb_osal_thread_t hub_thread;
     usb_osal_mq_t hub_mq;

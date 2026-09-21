@@ -694,6 +694,52 @@ int usbh_deinitialize(uint8_t busid)
     return 0;
 }
 
+#ifdef CONFIG_USBHOST_MULTI_HCD
+/* Multi-HCD routing: several controller ports (e.g. EHCI + xHCI) provide
+ * their entry points under prefixed names plus a struct usbh_hcd_ops table,
+ * and the plain symbols below dispatch per bus. Without the macro these
+ * dispatchers do not exist and a port's own plain symbols are called
+ * directly, exactly as before. */
+
+void usbh_hcd_register(uint8_t busid, const struct usbh_hcd_ops *ops)
+{
+    USB_ASSERT_MSG(busid < CONFIG_USBHOST_MAX_BUS, "bus overflow\r\n");
+    USB_ASSERT_MSG(ops != NULL, "hcd ops is NULL\r\n");
+
+    g_usbhost_bus[busid].hcd_ops = ops;
+}
+
+int usb_hc_init(struct usbh_bus *bus)
+{
+    return bus->hcd_ops->hc_init(bus);
+}
+
+int usb_hc_deinit(struct usbh_bus *bus)
+{
+    return bus->hcd_ops->hc_deinit(bus);
+}
+
+uint16_t usbh_get_frame_number(struct usbh_bus *bus)
+{
+    return bus->hcd_ops->get_frame_number(bus);
+}
+
+int usbh_roothub_control(struct usbh_bus *bus, struct usb_setup_packet *setup, uint8_t *buf)
+{
+    return bus->hcd_ops->roothub_control(bus, setup, buf);
+}
+
+int usbh_submit_urb(struct usbh_urb *urb)
+{
+    return urb->hport->bus->hcd_ops->submit_urb(urb);
+}
+
+int usbh_kill_urb(struct usbh_urb *urb)
+{
+    return urb->hport->bus->hcd_ops->kill_urb(urb);
+}
+#endif
+
 int usbh_control_transfer(struct usbh_hubport *hport, struct usb_setup_packet *setup, uint8_t *buffer)
 {
     struct usbh_urb *urb;

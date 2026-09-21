@@ -187,7 +187,9 @@ SDMMC_SRCS := \
 # the EHCI HCD for the two usb2host controllers and the FreeRTOS osal. The
 # device-side cores, other classes and the vendor xHCI ports are not
 # vendored; usb_config.h comes from the adapter (see the sdmmc note above -
-# same shadow-header pattern).
+# same shadow-header pattern). The xHCI HCD is this repo's NetBSD port and
+# sits in port/adapters/cherryusb/xhci/ - added by the HCD selection block
+# below (after both kernel branches, so it applies to either line).
 CHERRYUSB_SRCS := \
 	third-party/cherryusb/core/usbh_core.c \
 	third-party/cherryusb/class/hub/usbh_hub.c \
@@ -242,20 +244,8 @@ ADAPTER_SRCS := \
 	port/adapters/cherryusb/usbh_adapter.c \
 	port/adapters/cherryusb/usbh_cmds.c
 
-# Host-controller selection. The vendored stack is one-HCD-per-image (each
-# HCD defines usb_hc_init / usbh_submit_urb / USBH_IRQHandler), so EHCI and
-# xHCI builds are mutually exclusive until a dispatch layer exists. Default
-# stays EHCI (the M6 mainstream image); `make XHCI=1` builds the DWC3/xHCI
-# enumeration image for the USB3 socket group instead.
-XHCI ?= 0
-ifeq ($(XHCI),1)
-CFLAGS         += -DUSBH_HCD_XHCI=1
-CHERRYUSB_SRCS := $(filter-out third-party/cherryusb/port/ehci/usb_hc_ehci.c,$(CHERRYUSB_SRCS))
-ADAPTER_SRCS   += port/adapters/cherryusb/xhci/usb_hc_xhci_netbsd.c \
-                  port/adapters/cherryusb/xhci/usbh_xhci_glue.c
-else
-ADAPTER_SRCS   += port/adapters/cherryusb/usbh_glue.c
-endif
+# (The HCD selection - EHCI-only vs the four-bus multi-HCD image - sits
+# after both kernel branches below, so one block serves either line.)
 
 # Console-storm attribution experiment: boot WITHOUT arming the tick. The
 # uart driver's pre-arm snapshot then brackets WHEN the INTID 150 line goes
@@ -484,7 +474,6 @@ ADAPTER_SRCS := \
 	port/adapters/lwip/net_cmds.c \
 	port/adapters/cherryusb/usbh_platform.c \
 	port/adapters/cherryusb/usbh_adapter.c \
-	port/adapters/cherryusb/usbh_glue.c \
 	port/adapters/cherryusb/usbh_cmds.c
 
 # ThreadX's include paths replace the FreeRTOS ones wholesale: the FreeRTOS
@@ -524,20 +513,47 @@ INC_ADAPTER := -Ithird-party/threadx/common_smp/inc \
 	-Idrivers
 endif
 
+# Host-controller selection, shared by both kernel lines (hence placed after
+# them - the ThreadX branch reassigns ADAPTER_SRCS wholesale, which is what
+# silently swallowed the old XHCI=1 filter; the HCD files belong after it).
+#
+# Default: the four-bus multi-HCD image. The vendored stack routes per bus
+# through a generic HCD ops table (CONFIG_USBHOST_MULTI_HCD, D50): core's
+# usb_hc_init/usbh_submit_urb/... dispatch via usbh_hcd_register(), each
+# port's entry points are renamed under the same macro (vendored sources
+# stay single-contract when the macro is off), and the adapter registers one
+# ops table per bus - EHCI0/1 (busid 0/1) plus both DWC3 xHCI instances
+# (busid 2/3, the USB3 socket group incl. otg-as-host @ 0xFCC00000).
+#
+# `make EHCI_ONLY=1`: the legacy one-HCD-per-image shape (each HCD defines
+# usb_hc_init / usbh_submit_urb / USBH_IRQHandler directly, no dispatch
+# layer) - the M6 mainstream configuration, kept as the regression
+# comparison. The old XHCI=1 mutually-exclusive xHCI image is gone: the
+# multi-HCD image supersedes it.
+EHCI_ONLY ?= 0
+ifeq ($(EHCI_ONLY),1)
+ADAPTER_SRCS   += port/adapters/cherryusb/usbh_glue.c
+else
+CFLAGS         += -DCONFIG_USBHOST_MULTI_HCD=1
+ADAPTER_SRCS   += port/adapters/cherryusb/usbh_glue.c \
+                  port/adapters/cherryusb/xhci/usb_hc_xhci_netbsd.c \
+                  port/adapters/cherryusb/xhci/usbh_xhci_glue.c
+endif
+
 # The core count and the HCD selection both change codegen everywhere but
 # leave no trace make's timestamp logic can see: a SMP_CORES=2 build after a
-# =4 build (or XHCI=1 after the default) would silently relink stale objects
-# and link two HCDs into one image. Stamp both values into the build
+# =4 build (or EHCI_ONLY=1 after the default) would silently relink stale
+# objects and link two HCDs into one image. Stamp both values into the build
 # directory (per image variant - BUILD above already separates them) and
 # drop the directory entirely on mismatch. Sits after the KTEST block so
 # BUILD_STAMP follows the same BUILD the rules use.
 BUILD_STAMP := $(BUILD)/.smp-cores
-ifeq ($(shell cat $(BUILD_STAMP) 2>/dev/null),$(SMP_CORES) $(XHCI) $(THREADX))
+ifeq ($(shell cat $(BUILD_STAMP) 2>/dev/null),$(SMP_CORES) $(EHCI_ONLY) $(THREADX))
 else
 $(shell rm -rf $(BUILD))
 endif
 $(BUILD_STAMP):
-	@mkdir -p $(BUILD) && echo '$(SMP_CORES) $(XHCI) $(THREADX)' > $(BUILD_STAMP)
+	@mkdir -p $(BUILD) && echo '$(SMP_CORES) $(EHCI_ONLY) $(THREADX)' > $(BUILD_STAMP)
 
 # Board assembly is shared; the kernel-side assembly is the seam itself and
 # therefore per-kernel: the FreeRTOS image links portasm_smp.S (context

@@ -43,6 +43,8 @@
 static bool s_usb_bus_domain_done;
 static bool s_usb2phy1_domain_done;
 static bool s_usb3otg_domain_done;
+/* Per-instance: the DWC3 register-frame reconfig runs once per controller. */
+static bool s_usb3otg_core_done[USBH_XHCI_NUM];
 
 /* Microsecond busy-wait off the ARM generic timer (always on at EL1). */
 static void usb_udelay(uint32_t usec)
@@ -180,64 +182,14 @@ void usbh_rk3568_usb2phy1_domain_init(void)
  * USB3OTG-specific gates and pulses - same net effect, and VBUS asserted
  * early is what U-Boot does too.
  */
-void usbh_rk3568_usb3otg_domain_init(void)
+/* --- dwc3_fdt.c: enable_phy (rk3568 board dts quirk set) --------- */
+/* One DWC3 core's register-frame reconfig: soft reset, PHY quirks,
+ * PRTCAP=host. Runs per instance (0xFD000000 and 0xFCC00000), always after
+ * the shared domain part below has pulsed the SRST line. */
+static void usbh_rk3568_dwc3_host_init(uintptr_t base)
 {
-	volatile uint32_t *cru = (volatile uint32_t *)USBH_CRU_BASE;
-	volatile uint32_t *grf0 =
-		(volatile uint32_t *)USBH_USB2PHY0_GRF_BASE;
-	volatile uint32_t *dwc3 = (volatile uint32_t *)USBH_XHCI0_BASE;
+	volatile uint32_t *dwc3 = (volatile uint32_t *)base;
 	uint32_t gctl, guctl1, g2phy, g3pipe, dcfg, rev;
-
-	if (s_usb3otg_domain_done) {
-		return;
-	}
-
-	if (!s_usb_bus_domain_done) {
-		usb_bus_domain_once();
-	}
-
-	/* USB3OTG clock gates (otg0 + otg1 + the pipe family, in case the
-	 * SATA combphy line has not run yet). Gate polarity: low-bit 1 =
-	 * off, data 0 = enabled. */
-	*(cru + USBH_CRU_CLKGATE_CON10 / 4U) =
-		GRF_WR(USBH_CRU_CLKGATE_CON10_BITS, 0U);
-
-	/* Assert + release SRST_USB3OTG0/1 and the USB2HOST resets (the same
-	 * con14 pulse the usb2phy1 line uses; in this image it bounces
-	 * nothing). ATF leaves the dwc3 cores in reset after cold power-on
-	 * - without this pulse GSNPSID reads 0. */
-	*(cru + USBH_CRU_SOFTRST_CON9 / 4U) =
-		GRF_WR(USBH_CRU_SOFTRST_CON9_BITS, USBH_CRU_SOFTRST_CON9_BITS);
-	*(cru + USBH_CRU_SOFTRST_CON14 / 4U) =
-		GRF_WR(USBH_CRU_SOFTRST_CON14_BITS,
-		       USBH_CRU_SOFTRST_CON14_BITS);
-	usb_udelay(100);
-	*(cru + USBH_CRU_SOFTRST_CON9 / 4U) =
-		GRF_WR(USBH_CRU_SOFTRST_CON9_BITS, 0U);
-	*(cru + USBH_CRU_SOFTRST_CON14 / 4U) =
-		GRF_WR(USBH_CRU_SOFTRST_CON14_BITS, 0U);
-	usb_udelay(100);
-
-	/* Release-only: usb2phy1 POR/port resets + its GRF pclk (the panel
-	 * group; harmless in an xHCI image, NetBSD does it in the same
-	 * shared domain sequence). */
-	*(cru + USBH_CRU_SOFTRST_CON29 / 4U) =
-		GRF_WR(USBH_CRU_SOFTRST_CON29_BITS, 0U);
-	*(cru + USBH_CRU_SOFTRST_CON28 / 4U) =
-		GRF_WR(USBH_CRU_SOFTRST_CON28_BITS, 0U);
-
-	/* usb2phy0 port GRF: 480m clock output, otg-port host role, host-port
-	 * suspend release - the KI-006 measured working values, 2ms settle
-	 * per port write (NetBSD rk_usb2phy_port_write). */
-	*(grf0 + USBH_USB2PHY_GRF_CLKOUT_CON2 / 4U) =
-		GRF_WR(USBH_USB2PHY_CLKOUT_WE, 0U);
-	usb_udelay(100);
-	*(grf0 + USBH_USB2PHY_GRF_OTG_CON0 / 4U) =
-		GRF_WR(USBH_USB2PHY_OTG_SUS_MASK, USBH_USB2PHY_OTG_SUS_VAL);
-	usb_udelay(2000);
-	*(grf0 + USBH_USB2PHY_GRF_HOST_CON1 / 4U) =
-		GRF_WR(USBH_USB2PHY_HOST_SUS_MASK, USBH_USB2PHY_HOST_SUS_VAL);
-	usb_udelay(2000);
 
 	/* --- dwc3_fdt.c: soft_reset ------------------------------------- */
 	/* Put the core, then both PHYs, in reset; settle 100ms each way.
@@ -256,7 +208,6 @@ void usbh_rk3568_usb3otg_domain_init(void)
 	 * 整个 xHCI 孔径留在软复位里读零, 2026-09-20 首板验实测)。 */
 	dwc3[DWC3_GCTL / 4U] &= ~DWC3_GCTL_CORESOFTRESET;
 
-	/* --- dwc3_fdt.c: enable_phy (rk3568 board dts quirk set) --------- */
 	rev = dwc3[DWC3_GSNPSID / 4U] & DWC3_GSNPSID_REV_MASK;
 
 	/* utmi_wide: 16-bit PHYIF + TRDTIM 5; dis_enblslpm / dis-u2-freeclk /
@@ -302,9 +253,78 @@ void usbh_rk3568_usb3otg_domain_init(void)
 
 	/* The KI-012 comparison window (NetBSD prints the same four). */
 	usbh_console_printf(
-		"xhci: usb3otg domain up: GCTL=0x%08x GUCTL1=0x%08x GUSB2PHYCFG0=0x%08x GUSB3PIPECTL0=0x%08x\r\n",
+		"xhci: dwc3 @%08x host mode up: GCTL=0x%08x GUCTL1=0x%08x GUSB2PHYCFG0=0x%08x GUSB3PIPECTL0=0x%08x\r\n",
+		(uint32_t)base,
 		dwc3[DWC3_GCTL / 4U], dwc3[DWC3_GUCTL1 / 4U],
 		dwc3[DWC3_GUSB2PHYCFG / 4U], dwc3[DWC3_GUSB3PIPECTL / 4U]);
+}
 
-	s_usb3otg_domain_done = true;
+void usbh_rk3568_usb3otg_domain_init(uint8_t instance)
+{
+	volatile uint32_t *cru = (volatile uint32_t *)USBH_CRU_BASE;
+	volatile uint32_t *grf0 =
+		(volatile uint32_t *)USBH_USB2PHY0_GRF_BASE;
+
+	if (instance >= USBH_XHCI_NUM) {
+		return;
+	}
+
+	if (!s_usb3otg_domain_done) {
+		if (!s_usb_bus_domain_done) {
+			usb_bus_domain_once();
+		}
+
+		/* USB3OTG clock gates (otg0 + otg1 + the pipe family, in case the
+		 * SATA combphy line has not run yet). Gate polarity: low-bit 1 =
+		 * off, data 0 = enabled. */
+		*(cru + USBH_CRU_CLKGATE_CON10 / 4U) =
+			GRF_WR(USBH_CRU_CLKGATE_CON10_BITS, 0U);
+
+		/* Assert + release SRST_USB3OTG0/1 and the USB2HOST resets (the same
+		 * con14 pulse the usb2phy1 line uses; in this image it bounces
+		 * nothing). ATF leaves the dwc3 cores in reset after cold power-on
+		 * - without this pulse GSNPSID reads 0. */
+		*(cru + USBH_CRU_SOFTRST_CON9 / 4U) =
+			GRF_WR(USBH_CRU_SOFTRST_CON9_BITS, USBH_CRU_SOFTRST_CON9_BITS);
+		*(cru + USBH_CRU_SOFTRST_CON14 / 4U) =
+			GRF_WR(USBH_CRU_SOFTRST_CON14_BITS,
+			       USBH_CRU_SOFTRST_CON14_BITS);
+		usb_udelay(100);
+		*(cru + USBH_CRU_SOFTRST_CON9 / 4U) =
+			GRF_WR(USBH_CRU_SOFTRST_CON9_BITS, 0U);
+		*(cru + USBH_CRU_SOFTRST_CON14 / 4U) =
+			GRF_WR(USBH_CRU_SOFTRST_CON14_BITS, 0U);
+		usb_udelay(100);
+
+		/* Release-only: usb2phy1 POR/port resets + its GRF pclk (the panel
+		 * group; harmless in an xHCI image, NetBSD does it in the same
+		 * shared domain sequence). */
+		*(cru + USBH_CRU_SOFTRST_CON29 / 4U) =
+			GRF_WR(USBH_CRU_SOFTRST_CON29_BITS, 0U);
+		*(cru + USBH_CRU_SOFTRST_CON28 / 4U) =
+			GRF_WR(USBH_CRU_SOFTRST_CON28_BITS, 0U);
+
+		/* usb2phy0 port GRF: 480m clock output, otg-port host role, host-port
+		 * suspend release - the KI-006 measured working values, 2ms settle
+		 * per port write (NetBSD rk_usb2phy_port_write). Both usb2phy0
+		 * lanes are shared domain resources: the otg-port lane feeds the
+		 * 0xFCC00000 instance, the host-port lane the 0xFD000000 one. */
+		*(grf0 + USBH_USB2PHY_GRF_CLKOUT_CON2 / 4U) =
+			GRF_WR(USBH_USB2PHY_CLKOUT_WE, 0U);
+		usb_udelay(100);
+		*(grf0 + USBH_USB2PHY_GRF_OTG_CON0 / 4U) =
+			GRF_WR(USBH_USB2PHY_OTG_SUS_MASK, USBH_USB2PHY_OTG_SUS_VAL);
+		usb_udelay(2000);
+		*(grf0 + USBH_USB2PHY_GRF_HOST_CON1 / 4U) =
+			GRF_WR(USBH_USB2PHY_HOST_SUS_MASK, USBH_USB2PHY_HOST_SUS_VAL);
+		usb_udelay(2000);
+
+		s_usb3otg_domain_done = true;
+	}
+
+	if (!s_usb3otg_core_done[instance]) {
+		usbh_rk3568_dwc3_host_init(
+			USBH_XHCI_BASE(USBH_XHCI0_BUSID + instance));
+		s_usb3otg_core_done[instance] = true;
+	}
 }

@@ -8,6 +8,34 @@
 #include "usb_hc_ohci.h"
 #endif
 
+#ifdef CONFIG_USBHOST_MULTI_HCD
+/* Multi-HCD build: rename this port's global entry points so other HCD
+ * ports can link alongside it; usbh_core.c dispatches per bus through
+ * usbh_ehci_ops. The renames sit after the includes on purpose - the
+ * declarations above then double as prototypes for the new names, and
+ * usbh_core.h's "#ifdef USBH_IRQHandler #error" guard has already been
+ * evaluated. Function bodies below are untouched. */
+#define usb_hc_init            usbh_ehci_hc_init
+#define usb_hc_deinit          usbh_ehci_hc_deinit
+#define usbh_get_frame_number  usbh_ehci_get_frame_number
+#define usbh_roothub_control   usbh_ehci_roothub_control
+#define usbh_submit_urb        usbh_ehci_submit_urb
+#define usbh_kill_urb          usbh_ehci_kill_urb
+#define USBH_IRQHandler        usbh_ehci_irq
+
+/* Prototypes for the renamed names: the declarations in usb_hc.h were
+ * parsed under the old names before these macros existed, and the
+ * self-call in usbh_ehci_submit_urb plus the ops table below need the
+ * real types in scope. */
+int usbh_ehci_hc_init(struct usbh_bus *bus);
+int usbh_ehci_hc_deinit(struct usbh_bus *bus);
+uint16_t usbh_ehci_get_frame_number(struct usbh_bus *bus);
+int usbh_ehci_roothub_control(struct usbh_bus *bus, struct usb_setup_packet *setup, uint8_t *buf);
+int usbh_ehci_submit_urb(struct usbh_urb *urb);
+int usbh_ehci_kill_urb(struct usbh_urb *urb);
+void usbh_ehci_irq(uint8_t busid);
+#endif
+
 #define EHCI_TUNE_CERR    3 /* 0-3 qtd retries; 0 == don't stop */
 #define EHCI_TUNE_RL_HS   4 /* nak throttle; see 4.9 */
 #define EHCI_TUNE_RL_TT   0
@@ -1498,3 +1526,16 @@ void USBH_IRQHandler(uint8_t busid)
     if (usbsts & EHCI_USBSTS_FATAL) {
     }
 }
+
+#ifdef CONFIG_USBHOST_MULTI_HCD
+const struct usbh_hcd_ops usbh_ehci_ops = {
+    .driver_name = "ehci",
+    .hc_init = usbh_ehci_hc_init,
+    .hc_deinit = usbh_ehci_hc_deinit,
+    .get_frame_number = usbh_ehci_get_frame_number,
+    .roothub_control = usbh_ehci_roothub_control,
+    .submit_urb = usbh_ehci_submit_urb,
+    .kill_urb = usbh_ehci_kill_urb,
+    .irq = usbh_ehci_irq,
+};
+#endif
