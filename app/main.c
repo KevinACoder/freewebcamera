@@ -44,6 +44,12 @@
 /* Console handle. Taken from the interface, never from the driver's header. */
 extern ARM_DRIVER_USART Driver_USART_Console;
 
+/* Console-interrupt path probe (drivers/uart_ns16550.c): one stamped line
+ * with the INTID 150 pending/active state. Called twice in board_main to
+ * bracket when the line goes high relative to the tick arm - see the
+ * 20260920 console-storm evidence. */
+extern void uart_console_line_probe(const char *tag);
+
 /* Spare SPI line used as the software-trigger probe. Chosen in the SPI range
  * and not otherwise routed to anything on this board. */
 #define SPI_PROBE_INTID		60U
@@ -477,6 +483,7 @@ void board_main(void)
 
 	/* Interrupt controller, through the CMSIS interface. */
 	(void)IRQ_Initialize();
+	uart_console_line_probe("post-irqinit");
 
 	if (IRQ_SetHandler((IRQn_ID_t)SPI_PROBE_INTID, spi_probe_handler) != 0) {
 		board_log("app: SPI handler install FAIL\n");
@@ -546,6 +553,8 @@ void board_main(void)
 	(void)IRQ_SetPending((IRQn_ID_t)SPI_PROBE_INTID);
 
 	/* Never returns. */
+	uart_console_line_probe("pre-kstart");
+
 	(void)osKernelStart();
 
 	board_log("fatal: kernel returned\n");

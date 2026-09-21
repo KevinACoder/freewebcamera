@@ -180,6 +180,10 @@ static void tx_tick_wrapper(void)
  * until _tx_thread_schedule unmasks them. */
 static void tx_tick_setup(void)
 {
+#ifdef EXPERIMENT_NOTICK
+	/* Console-storm attribution experiment (see port_glue.c). */
+	board_log("tick: SUPPRESSED (NOTICK experiment)");
+#else
 	(void)OS_Tick_Setup(TX_TICK_RATE_HZ, tx_tick_wrapper);
 	OS_Tick_Enable();
 
@@ -191,6 +195,7 @@ static void tx_tick_setup(void)
 		  "cntv"
 #endif
 		  , (unsigned)OS_Tick_GetInterval());
+#endif
 }
 
 /* --- kernel entry points ---------------------------------------------------- */

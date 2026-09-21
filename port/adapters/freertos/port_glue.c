@@ -101,6 +101,12 @@ int vApplicationInIrq(void)
  * OS_Tick_* interface, so this file never touches timer registers itself. */
 void board_tick_port_setup(void)
 {
+#ifdef EXPERIMENT_NOTICK
+	/* Console-storm attribution experiment: skip arming so the uart
+	 * driver's pre-arm snapshot brackets whether the INTID 150 line is
+	 * raised inside the tick arm / first-expiry window. */
+	board_log("tick: SUPPRESSED (NOTICK experiment)");
+#else
 	(void)OS_Tick_Setup(configTICK_RATE_HZ, FreeRTOS_Tick_Handler);
 	OS_Tick_Enable();
 
@@ -115,6 +121,7 @@ void board_tick_port_setup(void)
 		  "cntv"
 #endif
 		  , (unsigned)OS_Tick_GetInterval());
+#endif
 }
 
 /* --- SMP: secondary bring-up and the scheduler handshake ------------------- */

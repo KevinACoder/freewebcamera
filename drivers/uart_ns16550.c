@@ -424,6 +424,7 @@ static uint32_t rx_client_len;
 static void usart_rx_drain(void);
 static int32_t usart_rx_start(void);
 static uint32_t console_icfgr_word(uint32_t intid);
+static uint32_t console_intid_bit(uint32_t word_offset);
 
 static int32_t usart_receive(void *data, uint32_t num)
 {
@@ -596,14 +597,13 @@ void usart_rx_irq_handler(void)
 				BOARD_GICR_BASE + 0x10000u + 0x200u);
 			uint32_t gicr_act = reg_rd32(
 				BOARD_GICR_BASE + 0x10000u + 0x300u);
-			uint32_t gicd_act150 = reg_rd32(
-				BOARD_GICD_BASE + 0x300u +
-				4u * (console_intid / 32u));
+			uint32_t gicd_act150 =
+				console_intid_bit(0x300u);
 
 			(void)snprintf(line, sizeof(line),
 				       "uart: storm n=%u l150=%u"
 				       " gicr_pend=%08x gicr_act=%08x"
-				       " gicd_act150=%08x\n",
+				       " gicd_act150=%u\n",
 				       (unsigned)console_spurious,
 				       (unsigned)IRQ_GetPending(
 					       (IRQn_ID_t)intid),
@@ -863,12 +863,63 @@ int uart_console_rx_down(void)
 	return (console_rx_down != 0u) ? 1 : 0;
 }
 
+/* Pending / active bit of the console INTID from the Distributor (SPIs
+ * live in the GICD_ISPENDR / GICD_ISACTIVER words of 32; word_offset is
+ * 0x200 / 0x300). */
+static uint32_t console_intid_bit(uint32_t word_offset)
+{
+	return (reg_rd32(BOARD_GICD_BASE + word_offset +
+			 4u * (console_intid / 32u)) >>
+		(console_intid % 32u)) & 1u;
+}
+
+/* One-stamped-line snapshot of the console interrupt path, callable from
+ * any task context. The boot path probes before the tick is armed and
+ * again before the kernel starts, bracketing WHEN the INTID 150 line goes
+ * high (see the 20260920 console-storm evidence). */
+void uart_console_line_probe(const char *tag)
+{
+	char line[112];
+
+	(void)snprintf(line, sizeof(line),
+		       "uart: probe %s: intid=%u pend=%u act=%u"
+		       " ier=%02x lsr=%02x iir=%02x\n",
+		       (tag != NULL) ? tag : "?",
+		       (unsigned)console_intid,
+		       (unsigned)console_intid_bit(0x200u),
+		       (unsigned)console_intid_bit(0x300u),
+		       (unsigned)reg_read(REG_IER),
+		       (unsigned)reg_read(REG_LSR),
+		       (unsigned)reg_read(REG_IIR));
+	board_log("%s", line);
+}
+
 /* Re-arm console RX after a storm defence - the same full
  * handler -> priority -> state -> drain -> IER -> enable sequence as the
  * boot arm, which also clears the down state. This is what `uartint` and
  * the shell adapter's auto-recovery both land on. Returns 0 on success. */
 int uart_console_rx_kick(void)
 {
+	static uint8_t kicks;
+
+	/* Post-EOI ACTIVE sample, taken in TASK context: the INTID is
+	 * disabled here and the last storm handler's EOI has long been
+	 * written - the reading the in-handler dump cannot give (there the
+	 * active bit reads 1 trivially, the ack just happened). First
+	 * three kicks only. */
+	if (kicks < 3u) {
+		char line[96];
+
+		kicks++;
+		(void)snprintf(line, sizeof(line),
+			       "uart: pre-kick %u: pend=%u act=%u ier=%02x\n",
+			       (unsigned)kicks,
+			       (unsigned)console_intid_bit(0x200u),
+			       (unsigned)console_intid_bit(0x300u),
+			       (unsigned)reg_read(REG_IER));
+		board_early_print_raw(line);
+	}
+
 	return (usart_rx_start() == ARM_DRIVER_OK) ? 0 : -1;
 }
 

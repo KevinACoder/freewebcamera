@@ -253,6 +253,17 @@ else
 ADAPTER_SRCS   += port/adapters/cherryusb/usbh_glue.c
 endif
 
+# Console-storm attribution experiment: boot WITHOUT arming the tick. The
+# uart driver's pre-arm snapshot then brackets WHEN the INTID 150 line goes
+# high relative to the tick: probe-before-kstart clean but arm-time pend=1
+# pins the first hit onto the tick arm / first-expiry window. The scheduler
+# still starts its first task without a tick; only the first seconds of log
+# are meaningful. `make NOTICK=1 SMP_CORES=1 all`.
+NOTICK ?= 0
+ifeq ($(NOTICK),1)
+CFLAGS         += -DEXPERIMENT_NOTICK=1
+endif
+
 DRIVER_SRCS := \
 	drivers/uart_ns16550.c \
 	drivers/dwc_eqos.c \
