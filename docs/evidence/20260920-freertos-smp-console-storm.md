@@ -96,3 +96,73 @@ ThreadX 4 核全新带戳日志一轮冷启动：锚点全绿（`smp: 4/4` 0.059
 - **今日实测**：§2 全部带戳时间线与状态转储；ThreadX 对照。
 - **构建通过**：四形态 + cleanroom-scan/check-deps PASS（478c36d）。
 - **未验证/未归因**：EOImode 写 ICC_DIR 试效、线拉高首因、修复后的 =4 shell 验收。
+
+---
+
+# 第二轮归因（2026-09-21 追加）：卡-ACTIVE 勘误 + 首因窗口锁定
+
+- 提交：`aec68c9`（NOTICK 旋钮 + boot 探针 + post-EOI 采样）
+- 冷启动：boot-085831（FreeRTOS =1 正常）、boot-233603 同型 NOTICK 轮、ThreadX =4 当前驱动轮；每轮 U-Boot 侧 `md.l` 读线状态
+
+## R1. 勘误："INTID 150 卡死 ACTIVE / EOI 不 deactivate" 是采样伪影
+
+上轮 §2.2 的 `gicd_act150=00400000` 读自 **handler 内部**（uart_ns16550.c 风暴转储），
+位置严格介于 IAR ack（portasm_smp.S:545）与 EOI（:561）之间——此刻 150 被刚 ack，
+Active 位**本来就必为 1**，不构成"EOI 失效"的证据。本轮在 kick 路径（任务态、INTID
+已禁用、上次 EOI 已落）复测：
+
+```
+[   0.786] uart: pre-kick 1: pend=1 act=0 ier=00
+```
+
+**post-EOI `act=0` → EOI 语义正常，EOImode/ICC_DIR 分支关闭**（且 EOImode=1 全局
+解释与旧单核镜像 tick 长期稳定运行矛盾）。`pend=1` 持续为真。
+
+## R2. 线拉高首因：与 tick 无关，窗口锁定在 osKernelStart 后的驱动重编程序列
+
+单核 NOTICK 变体完整干净时间线（无 tick，风暴依旧 → tick 排除）：
+
+```
+[   0.012] uart: probe post-irqinit: intid=150 pend=0 act=0 ier=00 lsr=60 iir=c1
+[   0.019] uart: probe pre-kstart:   intid=150 pend=0 act=0 ier=00 lsr=20 iir=c1
+[   0.026] tick: SUPPRESSED (NOTICK experiment)
+[   0.030] uart: arm: intid=150 pend=1 ier=00 lcr=03 icfgr=00000000
+[   0.036] uart: rx irq entry: intid=150 iir=07 lsr=00
+```
+
+- 两个探针（IRQ_Initialize 后 / osKernelStart 前）均 `pend=0 act=0`；
+- pend=1 首次出现在 **0.019→0.030 的 11ms 窗口** = `osKernelStart` 起首任务
+  （shstart）运行 `shell_start()` 的 **UART 驱动重编程序列**（Initialize →
+  PowerControl(FULL) → Control(RX,1)=usart_rx_start）内；
+- 正常有 tick 的镜像同一窗口同样 pend=1（0.026 tick armed → 0.030 pend=1），时间
+  形态一致。
+
+## R3. E1：固件交接干净；E2：ThreadX 对照 pend=0
+
+- U-Boot 最早提示符读 `md.l`：`fd400210: 00000000`（ISPENDR word4）、
+  `fd400310: 00000000`（ISACTIVER word4）、IER=0、IIR=0xC1——**SPL/TF-A/U-Boot
+  窗口 150 干净**，拉高发生在应用镜像内（R2 窗口）。
+- ThreadX =4 换当前驱动：`[0.081] uart: arm: intid=150 pend=0`，全程零风暴、锚点全绿。
+  同一驱动代码、同一序列，**ThreadX 的 arm 时 pend=0、FreeRTOS 恒 pend=1** ——
+  差异只剩时序：FreeRTOS 在 go 后 ~30ms 即进入该窗口，ThreadX ~80ms+。首因事件
+  高度时间敏感，指向 **U-Boot `go` 跳转后 UART/串口线状态的一次性变化与驱动
+  重编程/ RX 使能时序的交互**（例如 program_uart 的 DLAB/FIFO 重编程窗口撞上
+  RX 线电平变化产生一次假事件并被 level 线锁存）。
+
+## R4. 结论与下一步
+
+- **已闭合**：ACTIVE 语义（EOI 正常）；tick 无关（NOTICK 排除）；固件遗留排除
+  （E1）；首因窗口锁定在驱动重编程序列且时序敏感（R2/R3）。
+- **修复实验（下一轮）**：改 program_uart/usart_rx_start 的写序（保持 RX 路径
+  不在 DLAB/FIFO 清除窗口暴露敏感态；arm 前 IER 恒 0；或延后 FIFO 使能），
+  验证 pend@arm 是否转 0；以及"ThreadX 慢 → 免疫"的时间敏感性可用人为延迟
+  复现/消除验证。
+- 防御层（armed-off + kick + line-fallback）维持不变，与本轮结论一致。
+
+## 冷启动台账（追加）
+
+| 轮次 | 镜像 | 形态 | 判定 |
+|---|---|---|---|
+| E2 轮 | ThreadX =4（aec68c9 构建，14d94fe5） | `arm: pend=0`@0.081，零风暴 | 对照干净 |
+| E3 轮 | FreeRTOS =1 NOTICK（a28ce2e8） | probe 双 0 → arm pend=1，风暴依旧 | tick 排除；窗口=驱动重编程 |
+| E4 轮 | FreeRTOS =1 正常（7c90d024） | `pre-kick 1: pend=1 act=0` | EOI 正常（勘误 R1） |
