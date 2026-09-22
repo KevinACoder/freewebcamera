@@ -267,7 +267,22 @@ static void dwmmc_host_SetCardBusWidth(sdmmchost_t *host, uint32_t dataBusWidth)
 {
     dwmmc_host_dev_t *dev = (dwmmc_host_dev_t *)host->dev;
 
-    dwc_mmc_set_card_bus_width(&dev->hc, dataBusWidth);
+    /* fsl 传 kSDMMC_BusWdith*Bit 枚举(0/1/2), 需映射为实际位宽(1/4/8)。
+     * M11 修复: 直传曾把 4-bit 请求落进 1-bit 分支 -- host CTYPE 1-bit
+     * 对着 4-bit 的卡跑 CMD53 数据, 全部 DCRC。dwmshc 胶水同款映射。 */
+    switch (dataBusWidth)
+    {
+        case kSDMMC_BusWdith8Bit:
+            dwc_mmc_set_card_bus_width(&dev->hc, 8U);
+            break;
+        case kSDMMC_BusWdith4Bit:
+            dwc_mmc_set_card_bus_width(&dev->hc, 4U);
+            break;
+        case kSDMMC_BusWdith1Bit:
+        default:
+            dwc_mmc_set_card_bus_width(&dev->hc, 1U);
+            break;
+    }
 }
 
 static void dwmmc_host_SendCardActive(sdmmchost_t *host)
