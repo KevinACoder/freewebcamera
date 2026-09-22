@@ -204,4 +204,9 @@ void wlan_port_deinit(void);
 void wlan_port_serializer_lock(void);
 void wlan_port_serializer_unlock(void);
 
+/* Monotonic milliseconds, for the usbdi shim's xfer-timeout watchdog
+ * (the stand-in for the NetBSD callout that arms ux_timeout). Wrap
+ * around is tolerated: deadlines are compared as signed deltas. */
+unsigned int wlan_port_now_ms(void);
+
 #endif /* NET80211_PORT_H_ */

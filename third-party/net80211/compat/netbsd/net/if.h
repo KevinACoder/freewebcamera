@@ -72,7 +72,19 @@ struct ifqueue {
 	int ifq_drops;
 };
 
+/* Queue-mutating macros take the port serializer: the imported code
+ * relies on splnet() to keep concurrent transmit and completion
+ * contexts out of each other's queue mutations, and the serializer is
+ * that discipline.  Prototyped directly here (not through port/port.h)
+ * so every translation unit that touches an ifqueue is covered,
+ * verbatim files included - on an SMP kernel the dequeue side runs on
+ * the usbdi worker core while the enqueue side runs on the tcpip
+ * core. */
+extern void wlan_port_serializer_lock(void);
+extern void wlan_port_serializer_unlock(void);
+
 #define IF_DEQUEUE(ifq, m) do { \
+	wlan_port_serializer_lock(); \
 	(m) = (ifq)->ifq_head; \
 	if ((m) != NULL) { \
 		(ifq)->ifq_head = (m)->m_nextpkt; \
@@ -81,6 +93,7 @@ struct ifqueue {
 		(ifq)->ifq_len--; \
 		(m)->m_nextpkt = NULL; \
 	} \
+	wlan_port_serializer_unlock(); \
 } while (0)
 
 #define IF_PURGE(ifq) do { \
@@ -95,7 +108,9 @@ struct ifqueue {
 
 #define IF_QFULL(ifq) ((ifq)->ifq_len >= (ifq)->ifq_maxlen)
 #define IF_DROP(ifq) ((ifq)->ifq_drops++)
+
 #define IF_ENQUEUE(ifq, m) do { \
+	wlan_port_serializer_lock(); \
 	(m)->m_nextpkt = NULL; \
 	if ((ifq)->ifq_tail != NULL) \
 		(ifq)->ifq_tail->m_nextpkt = (m); \
@@ -103,12 +118,14 @@ struct ifqueue {
 		(ifq)->ifq_head = (m); \
 	(ifq)->ifq_tail = (m); \
 	(ifq)->ifq_len++; \
+	wlan_port_serializer_unlock(); \
 } while (0)
 #define IFQ_IS_EMPTY(ifq) ((ifq)->ifq_len == 0)
 #define IF_POLL(ifq, m) ((m) = (ifq)->ifq_head)
 #define IFQ_POLL(ifq, m) IF_POLL((ifq), (m))
 #define IFQ_DEQUEUE(ifq, m) IF_DEQUEUE((ifq), (m))
 #define IFQ_ENQUEUE(ifq, m, err) do { \
+	wlan_port_serializer_lock(); \
 	(m)->m_nextpkt = NULL; \
 	if ((ifq)->ifq_tail != NULL) \
 		(ifq)->ifq_tail->m_nextpkt = (m); \
@@ -117,6 +134,7 @@ struct ifqueue {
 	(ifq)->ifq_tail = (m); \
 	(ifq)->ifq_len++; \
 	(err) = 0; \
+	wlan_port_serializer_unlock(); \
 } while (0)
 
 /* interface output queue alias used by the drivers */

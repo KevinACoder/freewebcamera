@@ -14,6 +14,12 @@
 #include <stdio.h>
 #include <string.h>
 
+#if defined(__EMBOX__)
+#include <kernel/time/ktime.h>
+#else
+#include "cmsis_os2.h"
+#endif
+
 #include <port/port.h>
 
 #define WLAN_PORT_ADAPTER_MAX 2
@@ -87,6 +93,16 @@ int wlan_port_xmit(const uint8_t *frame, size_t len) {
 		return -1;
 	}
 	return ad->xmit(frame, len);
+}
+
+unsigned int wlan_port_now_ms(void) {
+#if defined(__EMBOX__)
+	return (unsigned int) (ktime_get_ns() / 1000000);
+#else
+	/* the kernel tick is 1 ms on the CMSIS image
+	 * (TX_TIMER_TICKS_PER_SECOND) */
+	return (unsigned int) osKernelGetTickCount();
+#endif
 }
 
 int wlan_port_get_hwaddr(uint8_t addr[6]) {

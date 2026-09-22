@@ -64,6 +64,10 @@ struct ehci_qh_hw {
     struct usbh_urb *urb;
     usb_osal_sem_t waitsem;
     uint8_t remove_in_iaad;
+    /* usbh_kill_urb handshake with the IAA pool scan: 1 = killed and
+     * waiting for the scan to acknowledge the unlink, 2 = acknowledged
+     * (the scan then leaves free + complete to the killer) */
+    volatile uint8_t killed;
 } __attribute__((aligned(CONFIG_USB_EHCI_ALIGN_SIZE)));
 
 struct ehci_itd_hw {

@@ -29,6 +29,7 @@
 
 extern void wlan_usbdi_trace_reset(void);
 extern void wlan_usbdi_trace_set(unsigned level);
+extern void wlan_usbdi_stats_dump(void);
 
 static int cmd_wlan(int argc, char **argv)
 {
@@ -66,6 +67,11 @@ static int cmd_wlan(int argc, char **argv)
 		return 0;
 	}
 
+	if (argc >= 2 && strcmp(argv[1], "usbstats") == 0) {
+		wlan_usbdi_stats_dump();
+		return 0;
+	}
+
 	if (argc >= 2 && strcmp(argv[1], "net") == 0) {
 		/* wl netif view: address/gw/lease - the lwip-side state the
 		 * radio-side "status" cannot show */
@@ -92,9 +98,9 @@ static int cmd_wlan(int argc, char **argv)
 
 	csh_printf(csh,
 		   "usage: wlan scan [seconds] | wlan status | wlan net | "
-		   "wlan trace [0|1|2]\r\n");
+		   "wlan trace [0|1|2] | wlan usbstats\r\n");
 	return 0;
 }
 
-CSH_CMD_EXPORT_ALIAS_FULL(cmd_wlan, wlan, "wlan scan [s] | status | trace [n]",
+CSH_CMD_EXPORT_ALIAS_FULL(cmd_wlan, wlan, "wlan scan [s] | status | trace [n] | usbstats",
 			  "net80211 adapter: bring up the radio and scan");

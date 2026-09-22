@@ -283,6 +283,10 @@ int wlan_port_xmit_urtwn(const uint8_t *frame, size_t len) {
 	m->m_len = m->m_pkthdr.len = (int) len;
 	memcpy(mtod(m, void *), frame, len);
 
+	/* IFQ_ENQUEUE takes the port serializer (see compat net/if.h):
+	 * the driver completion path dequeues from this same queue on
+	 * the usbdi worker core, and NetBSD gets the same exclusion
+	 * from splnet(). */
 	IFQ_ENQUEUE(&ifp->if_snd, m, err);
 	if (err != 0) {
 		m_freem(m);

@@ -650,6 +650,14 @@ static void ehci_urb_waitup(struct usbh_bus *bus, struct usbh_urb *urb)
 
     qh = (struct ehci_qh_hw *)urb->hcpriv;
 
+    /* A killed urb's unlink is acknowledged here, but its free and
+     * complete stay with usbh_kill_urb: the kill needs to deliver its
+     * own -USB_ERR_SHUTDOWN exactly once, from its caller's context. */
+    if (qh->killed == 1U) {
+        qh->killed = 2U;
+        return;
+    }
+
     qh->remove_in_iaad = 0;
 
 #ifdef CONFIG_USB_DCACHE_ENABLE
@@ -682,6 +690,47 @@ static void ehci_urb_waitup(struct usbh_bus *bus, struct usbh_urb *urb)
             urb->complete(urb->arg, urb->actual_length);
         }
     }
+}
+
+/* Wait for the async advance of a killed QH to complete.  The IAA
+ * interrupt belongs to the irq handler: usbh_kill_urb must never
+ * write-clear USBSTS.IAA from thread context, because that can erase
+ * a pending level (the spurious-irq signature) and make the handler's
+ * qh pool scan skip this advance entirely, stranding every other QH
+ * that already set remove_in_iaad.  Instead the handler acknowledges
+ * the killed QH through the qh->killed handshake (see
+ * ehci_urb_waitup); only when the interrupt never arrives does the
+ * killer fall back to finishing the unlink itself.  Exactly one of
+ * the two paths frees the qh and runs the callback. */
+static void usbh_kill_urb_wait_advance(struct usbh_bus *bus, struct usbh_urb *urb,
+                                       struct ehci_qh_hw *qh)
+{
+    volatile uint32_t timeout = 0;
+
+    EHCI_HCOR->usbcmd |= EHCI_USBCMD_IAAD;
+
+    while (qh->killed != 2U) {
+        timeout++;
+        if (timeout > 200000U) {
+            /* IAA lost (or the handler raced us): finish the unlink
+             * here so the urb still completes exactly once. */
+            size_t iflags = usb_osal_enter_critical_section();
+
+            if (qh->killed == 2U) {
+                usb_osal_leave_critical_section(iflags);
+                break;
+            }
+            qh->remove_in_iaad = 0;
+            qh->killed = 0;
+            usb_osal_leave_critical_section(iflags);
+
+            USB_LOG_ERR("iaad lost, finishing killed urb inline\r\n");
+            return;
+        }
+    }
+
+    qh->remove_in_iaad = 0;
+    qh->killed = 0;
 }
 
 static void ehci_qh_scan_qtds(struct usbh_bus *bus, struct ehci_qh_hw *qhead, struct ehci_qh_hw *qh)
@@ -1404,28 +1453,50 @@ int usbh_kill_urb(struct usbh_urb *urb)
     EHCI_HCOR->usbcmd |= (EHCI_USBCMD_PSEN | EHCI_USBCMD_ASEN);
 
     qh = (struct ehci_qh_hw *)urb->hcpriv;
-    qh->remove_in_iaad = 0;
+    /* keep remove_in_iaad set when the unlink needs the async advance:
+     * the IAA pool scan must see it for the killed handshake to
+     * complete; the wait clears it afterwards */
+    qh->killed = 1U;
     urb->errorcode = -USB_ERR_SHUTDOWN;
 
-    if (urb->timeout) {
-        usb_osal_sem_give(qh->waitsem);
-    } else {
-        ehci_qh_free(bus, qh);
+    if (remove_in_iaad) {
+        /* release the critical section before waiting: the
+         * acknowledgement comes from the irq handler, whose own
+         * completion paths need this section, so holding it here
+         * would deadlock the very interrupt we wait for */
+        usb_osal_leave_critical_section(flags);
+        /* ring the doorbell and wait for the handler to acknowledge;
+         * never touch USBSTS.IAA here (see
+         * usbh_kill_urb_wait_advance) */
+        usbh_kill_urb_wait_advance(bus, urb, qh);
+
+        if (urb->timeout) {
+            /* the blocked submitter wakes, reads errorcode and frees
+             * the qh itself (usbh_submit_urb timeout path) */
+            usb_osal_sem_give(qh->waitsem);
+        } else {
+            ehci_qh_free(bus, qh);
+        }
+
+        if (urb->complete) {
+            urb->complete(urb->arg, urb->errorcode);
+        }
+        return 0;
     }
 
-    if (remove_in_iaad) {
-        volatile uint32_t timeout = 0;
-        EHCI_HCOR->usbsts = EHCI_USBSTS_IAA;
-        EHCI_HCOR->usbcmd |= EHCI_USBCMD_IAAD;
-        while (!(EHCI_HCOR->usbsts & EHCI_USBSTS_IAA)) {
-            timeout++;
-            if (timeout > 200000) {
-                USB_LOG_ERR("iaad timeout\r\n");
-                usb_osal_leave_critical_section(flags);
-                return -USB_ERR_TIMEOUT;
-            }
-        }
-        EHCI_HCOR->usbsts = EHCI_USBSTS_IAA;
+    if (urb->timeout) {
+        /* the blocked submitter wakes, reads errorcode and frees the
+         * qh itself (usbh_submit_urb timeout path) */
+        usb_osal_sem_give(qh->waitsem);
+    } else {
+        /* the urb was already unlink'd by the completion scan and its
+         * advance doorbell may still be in flight: neutralize the
+         * pool scan for this qh before releasing it, or the in-flight
+         * IAA would run waitup a second time (double free, double
+         * complete) */
+        qh->remove_in_iaad = 0;
+        qh->killed = 0U;
+        ehci_qh_free(bus, qh);
     }
 
     if (urb->complete) {
