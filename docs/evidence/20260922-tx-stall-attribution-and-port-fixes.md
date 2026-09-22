@@ -70,3 +70,22 @@
   淹没串口环形缓冲（本轮改为默认无 trace + 计数器对账）。
 - [记录] `wpa: unsupported key alg 0`×2 与 `gmac1 mac initialize failed`
   为既有无害打印。
+
+## 追加（同日 UDP/TCP 对照诊断，阻塞点定位）
+
+| 层 | 状态 | 证据 |
+|---|---|---|
+| iperf3 应用 | TCP：worker 卡在 send()（首 interval 后不再打印 interval 报告）；UDP：sendto 持续 -1 但测试能结束 | TCP 600s 只见 "1-2 sec 0.09"；UDP 30s 全程 `udp send error, errno -1` + "21-22 sec 0.00" |
+| 主机栈（lwIP/驱动/USB） | 干净 | usbstats：TCP 停摆后 tx 618:618 零滞留；UDP 期间 `wd_timeouts=8 kill=8`——**看门狗抓到 8 个 TX URB（BE 管道全部槽位）滞留 >5s**，即 dongle 对 bulk OUT 持续 NAK（内部队列堵死），看门狗击杀回收后 submit==complete 恢复 |
+| dongle/空口（根因） | **空口投递在第 1 秒末停止** | 服务端权威日志（iperf3 -s 前台）：`0-1s 52.8KB 431Kbits/s 抖动 0.454ms 丢 1/38`，之后 19s **全零**；随后 "Connection reset by peer"（客户端侧已死）。TCP 的"首窗口后停"与 UDP 的"首秒后停"同源 |
+
+其他观测：UDP -1 洪流为次生症状（OACTIVE 时 if_snd 无界积压 + mbuf/pbuf
+耗尽类失败，帧根本没到 netif）；`wlan status` 本轮 rxerr=475（前几轮为 0，
+含义待查）；tx=79/txpn=68；state=RUN、beacon 持续、关联保持。
+
+**结论**：不是 iperf/主机栈/USB 的问题——dongle 固件的空口发送引擎在持续
+发送约 1 秒后停止调度，队列积压后对 USB bulk OUT 流控（NAK），且不自动恢复。
+下一层排查：① 停摆期读 dongle TX FIFO 页计数寄存器（确认页只增不减）；
+② 固件周期性校准/动态调整任务在 port 的 callout→usb taskq 移植路径是否
+正确喂狗（NetBSD `urtwn_calib_to` 类，时标 ~1s 吻合）；③ R92C TXDESC 的
+agg/retry 字段对照 spec。
