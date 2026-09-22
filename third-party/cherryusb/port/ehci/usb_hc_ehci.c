@@ -255,7 +255,12 @@ static void ehci_qh_fill(struct ehci_qh_hw *qh,
     epchar |= (dev_addr << QH_EPCHAR_DEVADDR_SHIFT);
     epchar |= (ep_mps << QH_EPCHAR_MAXPKT_SHIFT);
 
-    if (ep_type == USB_ENDPOINT_TYPE_CONTROL) {
+    /* DTC=1: take the toggle from the qTD.  Control always; bulk OUT too,
+     * because a fresh QH is built per transfer and the controller does not
+     * write the final toggle back to the retired qTD token, so software
+     * must own the toggle chain */
+    if (ep_type == USB_ENDPOINT_TYPE_CONTROL ||
+        (ep_type == USB_ENDPOINT_TYPE_BULK && (ep_addr & 0x80) == 0)) {
         epchar |= QH_EPCHAR_DTC; /* toggle from qtd */
     }
 
@@ -461,6 +466,11 @@ static struct ehci_qh_hw *ehci_bulk_urb_init(struct usbh_bus *bus, struct usbh_u
     uint32_t xfer_len = 0;
     uint32_t token;
     size_t flags;
+    /* bulk OUT keeps the data toggle in software (QH.DTC=1): urb->data_toggle
+     * is the starting toggle and is advanced here across the queued packets */
+    uint8_t is_out = ((urb->ep->bEndpointAddress & 0x80) == 0);
+    uint8_t toggle = (uint8_t)urb->data_toggle;
+    uint16_t ep_mps = USB_GET_MAXPACKETSIZE(urb->ep->wMaxPacketSize);
 
     qh = ehci_qh_alloc(bus);
     if (qh == NULL) {
@@ -500,6 +510,12 @@ static struct ehci_qh_hw *ehci_bulk_urb_init(struct usbh_bus *bus, struct usbh_u
                  ((uint32_t)EHCI_TUNE_CERR << QTD_TOKEN_CERR_SHIFT) |
                  ((uint32_t)xfer_len << QTD_TOKEN_NBYTES_SHIFT);
 
+        /* stamp this qTD with its starting toggle; with QH.DTC=1 the
+         * controller takes the toggle from here, not from the overlay */
+        if (is_out && toggle) {
+            token |= QTD_TOKEN_TOGGLE;
+        }
+
         if (buflen == 0) {
             token |= QTD_TOKEN_IOC;
         }
@@ -508,6 +524,14 @@ static struct ehci_qh_hw *ehci_bulk_urb_init(struct usbh_bus *bus, struct usbh_u
         qtd->urb = urb;
         qtd->hw.next_qtd = QTD_LIST_END;
         buffer += xfer_len;
+
+        /* advance across the packets queued in this qTD; a zero-length qTD
+         * still moves one (zero-length) packet */
+        if (is_out) {
+            uint32_t packets = (xfer_len == 0) ? 1 : ((xfer_len + ep_mps - 1) / ep_mps);
+
+            toggle ^= (uint8_t)(packets & 1);
+        }
 
         if (prev_qtd) {
             prev_qtd->hw.next_qtd = EHCI_PTR2ADDR(qtd);
@@ -530,6 +554,12 @@ static struct ehci_qh_hw *ehci_bulk_urb_init(struct usbh_bus *bus, struct usbh_u
         qh->hw.overlay.token = QTD_TOKEN_TOGGLE;
     } else {
         qh->hw.overlay.token = 0;
+    }
+
+    if (is_out) {
+        /* final toggle of a fully-completed transfer, ready for the next
+         * submit; ehci_check_qh must not resync it from the qTD token */
+        urb->data_toggle = toggle;
     }
 
     /* record qh first qtd */
@@ -780,10 +810,17 @@ static void ehci_check_qh(struct usbh_bus *bus, struct ehci_qh_hw *qhead, struct
     urb = qh->urb;
 
     if ((token & QTD_TOKEN_STATUS_ERRORS) == 0) {
-        if (token & QTD_TOKEN_TOGGLE) {
-            urb->data_toggle = true;
-        } else {
-            urb->data_toggle = false;
+        /* bulk OUT toggle is software-managed (QH.DTC=1) and was already
+         * advanced to its final value at submit time; the DT bit of a
+         * retired qTD token is not written back by the controller, so it
+         * must never be resynced from here */
+        if (USB_GET_ENDPOINT_TYPE(urb->ep->bmAttributes) != USB_ENDPOINT_TYPE_BULK ||
+            (urb->ep->bEndpointAddress & 0x80) != 0) {
+            if (token & QTD_TOKEN_TOGGLE) {
+                urb->data_toggle = true;
+            } else {
+                urb->data_toggle = false;
+            }
         }
         urb->errorcode = 0;
     } else {
