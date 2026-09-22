@@ -197,6 +197,10 @@ static struct wlan_usb_stats {
 	unsigned rx_submit;	/* bulk IN submits */
 	unsigned rx_complete;	/* bulk IN callbacks dispatched */
 	unsigned in_flight_peak;/* max xfers handed to the HCD at once */
+	unsigned ctrl_fail;	/* control xfers failed after retries */
+	unsigned ctrl_retry;	/* control xfer re-submissions after timeout */
+	unsigned task_drop;	/* usb_add_task: task ring full, task lost */
+	unsigned task_busy;	/* usb_add_task: already queued (normal) */
 } wlan_usb_stats;
 
 void wlan_usbdi_stats_dump(void);
@@ -668,10 +672,12 @@ static usbd_status usbd_ctrl_xfer(struct usbd_device *dev,
 		if (ret != -USB_ERR_TIMEOUT || attempt == 2) {
 			break;
 		}
+		wlan_usb_stats.ctrl_retry++;
 		usb_osal_msleep(10);
 	}
 	/* >= 0: actual length; < 0: cherryusb error code */
 	if (ret < 0) {
+		wlan_usb_stats.ctrl_fail++;
 		printf("[wlan] ctrl xfer failed: type=%02x req=%02x val=%04x "
 		    "len=%u raw=%d\n",
 		    req->bmRequestType, req->bRequest, UGETW(req->wValue),
@@ -849,6 +855,10 @@ void wlan_usbdi_stats_dump(void) {
 	    wlan_usb_stats.tx_submit, wlan_usb_stats.tx_complete,
 	    wlan_usb_stats.rx_submit, wlan_usb_stats.rx_complete,
 	    wlan_usb_stats.wd_timeouts);
+	printf("[wlan] usbstats: ctrl_fail=%u ctrl_retry=%u "
+	    "task_drop=%u task_busy=%u\n",
+	    wlan_usb_stats.ctrl_fail, wlan_usb_stats.ctrl_retry,
+	    wlan_usb_stats.task_drop, wlan_usb_stats.task_busy);
 }
 
 /* ------------------------------------------------------------------ */
@@ -865,7 +875,20 @@ void usb_add_task(struct usbd_device *dev, struct usb_task *task,
 	}
 
 	ipl = ipl_save();
-	if (task->queue != USB_NUM_TASKQS || dev->task_head >= USBD_SHIM_RING) {
+	if (task->queue != USB_NUM_TASKQS) {
+		/* normal NetBSD behavior: a queued task is not re-queued */
+		wlan_usb_stats.task_busy++;
+		ipl_restore(ipl);
+		return;
+	}
+	if (dev->task_head >= USBD_SHIM_RING) {
+		/* losing the add_task that carries a fresh driver cmdq
+		 * entry wedges the command ring forever (its queued
+		 * counter never returns to zero) - never stay silent */
+		if (wlan_usb_stats.task_drop == 0) {
+			printf("[wlan] usbdi task ring full: async work lost\n");
+		}
+		wlan_usb_stats.task_drop++;
 		ipl_restore(ipl);
 		return;
 	}

@@ -31,6 +31,50 @@ extern void wlan_usbdi_trace_reset(void);
 extern void wlan_usbdi_trace_set(unsigned level);
 extern void wlan_usbdi_stats_dump(void);
 
+/* register-level debug access (urtwn adapter) */
+extern int wlan_urtwn_reg_read(unsigned addr, unsigned *val);
+extern int wlan_urtwn_reg_write(unsigned addr, unsigned val);
+extern void wlan_urtwn_txq_dump(void);
+
+/* callout diagnostic gate (osal layer, see "wlan calib") */
+extern volatile unsigned wlan_callout_fires;
+extern volatile unsigned wlan_callout_sched;
+extern volatile unsigned wlan_callout_suppressed;
+extern unsigned wlan_callout_get_enabled(void);
+extern void wlan_callout_set_enabled(unsigned on);
+
+/* 88E firmware-maintenance hook (urtwn adapter, see "wlan ra") */
+extern unsigned wlan_ra_hook_get_enabled(void);
+extern void wlan_ra_hook_set_enabled(unsigned on);
+extern void wlan_ra_hook_force(void);
+extern void wlan_ra_hook_kick(void);
+
+/* the cherrysh libc strtoul ignores the base argument (parses decimal
+ * regardless), so hex addresses need this tiny parser */
+static unsigned long parse_hex(const char *s)
+{
+	unsigned long v = 0;
+
+	while (*s == 'x' || *s == 'X') {
+		s++;
+	}
+	while (*s != '\0') {
+		char c = *s;
+
+		if (c >= '0' && c <= '9') {
+			v = v * 16UL + (unsigned long) (c - '0');
+		} else if (c >= 'a' && c <= 'f') {
+			v = v * 16UL + (unsigned long) (c - 'a' + 10);
+		} else if (c >= 'A' && c <= 'F') {
+			v = v * 16UL + (unsigned long) (c - 'A' + 10);
+		} else {
+			break;
+		}
+		s++;
+	}
+	return v;
+}
+
 static int cmd_wlan(int argc, char **argv)
 {
 	chry_shell_t *csh = CSH_FROM_ARGV(argc, argv);
@@ -72,6 +116,49 @@ static int cmd_wlan(int argc, char **argv)
 		return 0;
 	}
 
+	if (argc >= 2 && strcmp(argv[1], "reg") == 0) {
+		unsigned long addr;
+		unsigned val;
+
+		if (argc >= 3 && strcmp(argv[2], "txq") == 0) {
+			wlan_urtwn_txq_dump();
+			return 0;
+		}
+		if (argc >= 4 && strcmp(argv[2], "read") == 0) {
+			addr = parse_hex(argv[3]);
+			if (wlan_urtwn_reg_read((unsigned) addr, &val) == 0) {
+				csh_printf(csh, "urtwn reg[0x%04lx] = 0x%08x\r\n",
+					   addr & 0xfffful, val);
+			} else {
+				csh_printf(csh, "wlan: reg read failed\r\n");
+			}
+			return 0;
+		}
+		if (argc >= 5 && strcmp(argv[2], "write") == 0) {
+			addr = parse_hex(argv[3]);
+			val = (unsigned) parse_hex(argv[4]);
+			csh_printf(csh, "wlan: reg write %s\r\n",
+				   wlan_urtwn_reg_write((unsigned) addr,
+				   val) == 0 ? "ok" : "failed");
+			return 0;
+		}
+		csh_printf(csh, "usage: wlan reg read <hexaddr> | "
+			   "wlan reg write <hexaddr> <hexval> | wlan reg txq\r\n");
+		return 0;
+	}
+
+	if (argc >= 2 && strcmp(argv[1], "calib") == 0) {
+		if (argc > 2) {
+			wlan_callout_set_enabled(
+			    (unsigned) atoi(argv[2]) != 0);
+		}
+		csh_printf(csh, "wlan callouts enabled=%u fires=%u sched=%u "
+			   "suppressed=%u\r\n",
+			   wlan_callout_get_enabled(), wlan_callout_fires,
+			   wlan_callout_sched, wlan_callout_suppressed);
+		return 0;
+	}
+
 	if (argc >= 2 && strcmp(argv[1], "net") == 0) {
 		/* wl netif view: address/gw/lease - the lwip-side state the
 		 * radio-side "status" cannot show */
@@ -96,11 +183,32 @@ static int cmd_wlan(int argc, char **argv)
 		return 0;
 	}
 
+	if (argc >= 2 && strcmp(argv[1], "ra") == 0) {
+		if (argc > 2) {
+			wlan_ra_hook_set_enabled(
+			    (unsigned) atoi(argv[2]) != 0);
+			if (wlan_ra_hook_get_enabled()) {
+				wlan_ra_hook_kick();
+			}
+		}
+		csh_printf(csh, "wlan ra hook enabled=%u (fw maintenance: "
+			   "joinbss_rpt + pwrmode + ra mask per assoc)\r\n",
+			   wlan_ra_hook_get_enabled());
+		return 0;
+	}
+
+	if (argc >= 2 && strcmp(argv[1], "fwfix") == 0) {
+		wlan_ra_hook_force();
+		return 0;
+	}
+
 	csh_printf(csh,
 		   "usage: wlan scan [seconds] | wlan status | wlan net | "
-		   "wlan trace [0|1|2] | wlan usbstats\r\n");
+		   "wlan trace [0|1|2] | wlan usbstats | "
+		   "wlan reg read|write|txq | wlan calib [0|1] | "
+		   "wlan ra [0|1] | wlan fwfix\r\n");
 	return 0;
 }
 
-CSH_CMD_EXPORT_ALIAS_FULL(cmd_wlan, wlan, "wlan scan [s] | status | trace [n] | usbstats",
+CSH_CMD_EXPORT_ALIAS_FULL(cmd_wlan, wlan, "wlan scan [s] | status | trace [n] | usbstats | reg | calib | ra | fwfix",
 			  "net80211 adapter: bring up the radio and scan");

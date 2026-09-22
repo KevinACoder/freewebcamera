@@ -89,3 +89,62 @@
 ② 固件周期性校准/动态调整任务在 port 的 callout→usb taskq 移植路径是否
 正确喂狗（NetBSD `urtwn_calib_to` 类，时标 ~1s 吻合）；③ R92C TXDESC 的
 agg/retry 字段对照 spec。
+
+---
+
+## 2026-09-22 晚间：证伪实验 + 88E 固件 ABI 重定性（长测目标仍未达成）
+
+### 证伪结论（板上实测，全部落 counters/证据）
+
+| 假说 | 实验 | 结果 |
+|---|---|---|
+| calib callout 未跑起来 | `wlan calib` 计数 | **证伪**：fires=142（每秒一拍正常） |
+| calib×ep0（500ms kill 打断 H2C）致停摆 | `wlan calib 0` + TCP iperf 120s | **证伪**：停摆依旧；全程 ctrl_fail=0 ctrl_retry=0 |
+| TX FIFO 页"只进不出" | 停摆现场 `wlan reg txq` 连读 | **证伪**：VOQ/VIQ/BEQ/BKQ/MGQ/HGQ 与健康态逐位相同（0x00ff00ff 系），FIFO 空 |
+| 固件 MAC 暂停 | 停摆现场读 0x522 | **证伪**：TXPAUSE=0x00 |
+| H2C 信箱卡死（初态） | 停摆现场读 0x1cc | 初期 0，**后期非零**：信箱最终不排空 |
+
+### 停摆实测形态（多轮一致）
+
+- 触发：持续空口 TX 约 1.2~2.4MB（~1-3s 满速）后，**dongle 停止空口调度**；
+  USB bulk OUT 层面继续"正常完成"（usbstats 严格配对、无 kill）→ 数据积压在 dongle RAM。
+- ep0 vendor 读从毫秒级劣化到 ~13s/次（8051 半瘫），RX（beacon）全程正常。
+- MAC/FIFO/DMA 寄存器全静默；TXDMA_STATUS 0x401→0x3621 的变化是 watchdog kill 的果不是因。
+- 外证：**NetBSD PR #59036**（真 NetBSD+真 8188EU 同款停摆：device timeout 风暴 + "could not
+  send firmware command 5" + 永不恢复）；FreeBSD 论坛同款。上游驱动+固件配对本身就是坏的。
+
+### 关键发现：88E 固件 H2C ABI 与 92C 完全不同（rtl8189fs 树内 rtl8188e_cmd.h 实证）
+
+厂商 88E 命令表：`MEDIA_STATUS_RPT=0x01、PS_PWR_MODE=0x20、MACID_CFG=0x40(7B)、RSSI_REPORT=0x42(4B)`。
+NetBSD 驱动对 88E 发的 `MACID_CONFIG=6 / RSSI_SETTING=5`（92C 编号）在 88E 固件里**全是死编号**——
+固件 RA 表从未被编程过；calib 每秒喂的 cmd5 是无效命令。
+
+### 已落地的适配层工作（两仓镜像同步，verbatim 零改动）
+
+1. `wlan reg read/write/txq`（hex 解析本地实现，绕过 cherrysh strtoul 忽略进制的缺陷）+ 19 寄存器停摆取证集。
+2. `wlan calib 0|1` callout 抑制开关 + fires/sched/suppressed 计数（双 osal 同形）。
+3. usb_add_task 满环丢弃从静默改计数+首打印；usbstats 扩展 ctrl_fail/ctrl_retry/task_drop/task_busy。
+4. **88E 固件维护钩子**（urtwn_reg.c，适配层）：88E ABI 直写信箱（HMEBOX+4B EXT），
+   关联时发 MEDIA_STATUS(0x01,{1}) + MACID_CFG(0x40){macid4=BC basicrates, macid0=BSS rates} +
+   INIDATA_RATE_SEL；RUN 后每 2s 喂 RSSI_REPORT(0x42, avg_pwdb)。`wlan ra 0|1` / `wlan fwfix` 控制。
+   失败不记录、下拍重试。/ `wlan fwfix`。|
+   （教训：初版载荷 JOINBSS_RPT byte0=0=mstatus"断开" + SET_PWRMODE 全零 payload 是瞎猜，
+   曾致固件更快退化——载荷必须逐位按厂商头文件。）
+
+### 效果与新形态
+
+- 钩子（正确 ABI 版）：关联→DHCP→iperf 首秒 **1.19MB @ 9.87 Mbps（历史最高）**，60s 时
+  tx 920:920 全配对、wd_timeouts=0；但 dongle 在 ~1.2MB 后仍停止空口调度（服务端 idle timeout）。
+  stop 之后 H2C 信箱不排空（cmd5 超时）→ H2C 级复活不可行。
+- 10 分钟长测目标**未达成**。
+
+### 下一轮线索（按优先级）
+
+1. **换固件镜像**：现内嵌 rtl8188eufw.bin == NetBSD 同款（sha 1241ddbf…）；Linux 生态跑同一
+   dongle 的是 linux-firmware 的 `rtlwifi/rtl8188efw.bin`（v29 系）——很可能是不同构建。
+   vendor 驱动+vendor 固件是验证过的组合。对拍两个 blob；若不同，换 Linux 版固件重测。
+2. **USB_TX_AGG**：厂商 88E USB 默认开 TX 聚合，NetBSD 显式清 AGG_EN（if_urtwn.c:4925-4927）。
+   厂商固件按聚合场景调过；在钩子里开 AGG_EN + 聚合参数重测。
+3. KEEP_ALIVE(0x03)/PWR_MODE(0x20) 按 SETPWRMODE_PARM 正确载荷补发。
+4. RSSI 喂食确认 avg_pwdb 在 TX-heavy 下是否真的更新（可能恒 -1 → 从未喂过）。
+5. 观察项：`irq: spurious` 偶发出现，来源未查。

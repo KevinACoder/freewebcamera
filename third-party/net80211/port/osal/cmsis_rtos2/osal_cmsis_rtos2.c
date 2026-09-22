@@ -302,10 +302,33 @@ static osTimerId_t hc_timer(callout_t *c) {
 	return (osTimerId_t) c->hc_timer;
 }
 
+/* Diagnostic gate for every driver callout at this layer (urtwn's 1 Hz
+ * calib timer and its scan timer).  "wlan calib 0" keeps schedule from
+ * arming and drops pending shots, which proves or clears the calib vs
+ * ep0 interaction without touching verbatim code.  Counters are read
+ * back by the same command. */
+volatile unsigned wlan_callout_fires;
+volatile unsigned wlan_callout_sched;
+volatile unsigned wlan_callout_suppressed;
+volatile unsigned wlan_callout_enabled = 1;
+
+unsigned wlan_callout_get_enabled(void) {
+	return wlan_callout_enabled;
+}
+
+void wlan_callout_set_enabled(unsigned on) {
+	wlan_callout_enabled = on ? 1U : 0U;
+}
+
 static void host_callout_fire(void *arg) {
 	callout_t *c = (callout_t *) arg;
 
 	c->hc_pending = 0;
+	if (!wlan_callout_enabled) {
+		wlan_callout_suppressed++;
+		return;
+	}
+	wlan_callout_fires++;
 	if (c->hc_fn != NULL) {
 		c->hc_fn(c->hc_arg);
 	}
@@ -334,6 +357,12 @@ int callout_setfunc(callout_t *c, callout_fn_t fn, void *arg) {
 int callout_schedule(callout_t *c, int ticks) {
 	uint32_t period;
 
+	if (!wlan_callout_enabled) {
+		/* report success: the verbatim driver ignores the return
+		 * value and its state machine must keep going */
+		wlan_callout_suppressed++;
+		return 0;
+	}
 	if (ticks <= 0) {
 		ticks = 1;
 	}
@@ -342,6 +371,7 @@ int callout_schedule(callout_t *c, int ticks) {
 		period = 1;
 	}
 	c->hc_pending = 1;
+	wlan_callout_sched++;
 	/* osTimerStart starts a stopped (dormant) timer */
 	if (osTimerStart(hc_timer(c), period) != osOK) {
 		return EINVAL;

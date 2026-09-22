@@ -198,11 +198,32 @@ static struct callout *hc_cast(callout_t *c) {
 	return (struct callout *) c;
 }
 
+/* Diagnostic gate for every driver callout at this layer, same shape
+ * as the cmsis_rtos2 twin: "wlan calib 0" keeps schedule from arming
+ * and drops pending shots; counters are read back by the command. */
+volatile unsigned wlan_callout_fires;
+volatile unsigned wlan_callout_sched;
+volatile unsigned wlan_callout_suppressed;
+volatile unsigned wlan_callout_enabled = 1;
+
+unsigned wlan_callout_get_enabled(void) {
+	return wlan_callout_enabled;
+}
+
+void wlan_callout_set_enabled(unsigned on) {
+	wlan_callout_enabled = on ? 1U : 0U;
+}
+
 static void host_callout_fire(struct sys_timer *tmr, void *param) {
 	struct callout *c = param;
 
 	(void) tmr;
 	c->hc_pending = 0;
+	if (!wlan_callout_enabled) {
+		wlan_callout_suppressed++;
+		return;
+	}
+	wlan_callout_fires++;
 	if (c->hc_fn != NULL) {
 		c->hc_fn(c->hc_arg);
 	}
@@ -234,11 +255,18 @@ int callout_setfunc(callout_t *c0, callout_fn_t fn, void *arg) {
 int callout_schedule(callout_t *c0, int ticks) {
 	struct callout *c = hc_cast(c0);
 
+	if (!wlan_callout_enabled) {
+		/* report success: the verbatim driver ignores the return
+		 * value and its state machine must keep going */
+		wlan_callout_suppressed++;
+		return 0;
+	}
 	if (ticks <= 0) {
 		ticks = 1;
 	}
 	sys_timer_stop(c->hc_timer);
 	c->hc_pending = 1;
+	wlan_callout_sched++;
 	return sys_timer_init_start_msec(c->hc_timer,
 	    SYS_TIMER_ONESHOT, (uint32_t) ticks * 1000 / hz,
 	    host_callout_fire, c);
