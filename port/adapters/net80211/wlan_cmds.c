@@ -19,6 +19,10 @@
 #include "cherrysh_adapter.h"
 #include "csh.h"
 
+#include "lwip/netif.h"
+#include "lwip/ip4_addr.h"
+#include "lwip/dhcp.h"
+
 #include <port/port.h>
 
 #include "wlan_adapter.h"
@@ -62,8 +66,32 @@ static int cmd_wlan(int argc, char **argv)
 		return 0;
 	}
 
+	if (argc >= 2 && strcmp(argv[1], "net") == 0) {
+		/* wl netif view: address/gw/lease - the lwip-side state the
+		 * radio-side "status" cannot show */
+		struct netif *wl = wlan_lwip_get_netif();
+		char ipbuf[16], gwbuf[16], maskbuf[16];
+
+		(void) wlan_lwip_start();
+		if (wl == NULL || !netif_is_up(wl)) {
+			csh_printf(csh, "wlan net: netif not up\r\n");
+			return 0;
+		}
+		/* ip4addr_ntoa shares one static scratch - always the _r form
+		 * when printing more than one address per line */
+		ip4addr_ntoa_r(netif_ip4_addr(wl), ipbuf, sizeof(ipbuf));
+		ip4addr_ntoa_r(netif_ip4_gw(wl), gwbuf, sizeof(gwbuf));
+		ip4addr_ntoa_r(netif_ip4_netmask(wl), maskbuf, sizeof(maskbuf));
+		csh_printf(csh, "wl: ip=%s gw=%s mask=%s\r\n",
+			   ipbuf, gwbuf, maskbuf);
+		csh_printf(csh, "wl: link=%s dhcp_bound=%s\r\n",
+			   netif_is_link_up(wl) ? "up" : "down",
+			   dhcp_supplied_address(wl) ? "yes" : "no");
+		return 0;
+	}
+
 	csh_printf(csh,
-		   "usage: wlan scan [seconds] | wlan status | "
+		   "usage: wlan scan [seconds] | wlan status | wlan net | "
 		   "wlan trace [0|1|2]\r\n");
 	return 0;
 }

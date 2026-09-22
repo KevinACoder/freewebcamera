@@ -67,7 +67,7 @@ void usbh_console_printf(const char *fmt, ...);
 #define CONFIG_USBHOST_PSC_PRIO		0
 #endif
 #ifndef CONFIG_USBHOST_PSC_STACKSIZE
-/* 16 KiB: the hub thread also runs the net80211 adapter's attach chain
+/* 64 KiB: the hub thread also runs the net80211 adapter's attach chain
  * (urtwn attach + ieee80211_ifattach + firmware load) - the deepest
  * call stack in the image; 8 KiB overflowed it (M7 first boot:
  * synchronous exception at 2.1s, ELR landed in the heap region). */

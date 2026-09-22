@@ -94,6 +94,12 @@ void board_main(void);
  * and are safe from any task context, on any core. */
 void board_early_print(const char *message);
 
+/* Unstamped but LOCKED write on the same polled UART: the sink for console
+ * frontends that must not garble against board_early_print (the net80211
+ * world's printf used to drive the CMSIS USART driver on a different lock
+ * domain, and attach-time prints shredded fault dumps mid-line). */
+void board_console_write(const char *message);
+
 /* Same sink, formatted. Drivers that report what they found (register
  * versions, PHY ids, negotiated link speed) use this instead of each carrying
  * its own formatter. One line per call; not for per-packet output. */

@@ -51,6 +51,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "tx_api.h"
@@ -180,6 +181,7 @@ static int defer(def_kind_t kind, void *slot,
 
 typedef enum {
 	SLOT_FREE = 0,
+	SLOT_RESERVED,		/* claimed, creation in progress */
 	SLOT_PENDING,		/* allocated, created at replay time */
 	SLOT_LIVE,
 	SLOT_ZOMBIE,		/* self-terminated/finished; reap on next New */
@@ -207,6 +209,11 @@ static thread_slot_t thread_slots[MAX_THREADS];
 extern void *pvPortMalloc(size_t length);
 extern void vPortFree(void *ptr);
 
+/* The port assembly's protection primitives (same pair heap.c uses);
+ * spelled out to keep the include surface kernel-call-only. */
+extern unsigned int _tx_thread_smp_protect(void);
+extern void _tx_thread_smp_unprotect(unsigned int save);
+
 static ULONG *thread_stack_alloc(uint32_t stack_size, uint32_t *words_out)
 {
 	uint32_t bytes;
@@ -228,12 +235,23 @@ static ULONG *thread_stack_alloc(uint32_t stack_size, uint32_t *words_out)
 static thread_slot_t *thread_slot_alloc(void)
 {
 	uint32_t i;
+	unsigned int save;
 
+	/* The scan-and-claim must be atomic across cores: two concurrent
+	 * osThreadNew calls (the netstart chain vs the shell's, in this
+	 * image) used to be able to pick the same FREE slot and double-create
+	 * a TCB on it - corrupted ready list, one stack leaked, and saved
+	 * contexts trashed. The reservation closes the window; every failure
+	 * path after this point hands the slot back as SLOT_FREE. */
+	save = _tx_thread_smp_protect();
 	for (i = 0U; i < MAX_THREADS; i++) {
 		if (thread_slots[i].state == SLOT_FREE) {
+			thread_slots[i].state = SLOT_RESERVED;
+			_tx_thread_smp_unprotect(save);
 			return &thread_slots[i];
 		}
 	}
+	_tx_thread_smp_unprotect(save);
 	return NULL;
 }
 
@@ -295,25 +313,31 @@ static void thread_create_into_slot(thread_slot_t *slot, osThreadFunc_t func,
 	slot->func = func;
 	slot->arg = argument;
 
+	/* Created suspended: the tflags group and the TCB backlink must
+	 * exist before the trampoline's first instruction can run. On SMP
+	 * another core picks the thread up the moment it is ready, and a
+	 * TX_AUTO_START here raced that window - flags-set to a NULL
+	 * cmsis_slot, or a zombie parked by a flash-length thread being
+	 * overwritten back to LIVE (leak, never reaped). */
 	if (tx_thread_create(&slot->thread, (CHAR *)"cmsis-thr",
 			     thread_trampoline, (ULONG)(uintptr_t)slot,
 			     (VOID *)slot->stack,
 			     (ULONG)slot->stack_words * sizeof(ULONG),
 			     priority, priority,
-			     TX_NO_TIME_SLICE, TX_AUTO_START) != TX_SUCCESS) {
+			     TX_NO_TIME_SLICE, TX_DONT_START) != TX_SUCCESS) {
 		vPortFree(slot->stack);
 		slot->stack = NULL;
 		slot->state = SLOT_FREE;
 		return;
 	}
-	slot->state = SLOT_LIVE;
 	thread_slot_init_flags(slot);
 
 	/* CMSIS affinity_mask (bit i = core i allowed) maps onto ThreadX's
 	 * EXCLUSION bitmap (bit i = core i forbidden) - the complement. A
 	 * zero or full mask means "no constraint". smp_test's per-core
 	 * pinning rides on this; dropping it silently would break the
-	 * comparison workload's core-binding contract. */
+	 * comparison workload's core-binding contract. Applied before the
+	 * resume so the thread never runs on a forbidden core. */
 	if (affinity_mask != 0U &&
 	    (affinity_mask & (uint32_t)TX_THREAD_SMP_CORE_MASK) !=
 		    (uint32_t)TX_THREAD_SMP_CORE_MASK) {
@@ -321,6 +345,9 @@ static void thread_create_into_slot(thread_slot_t *slot, osThreadFunc_t func,
 						 (ULONG)~affinity_mask &
 						 (ULONG)TX_THREAD_SMP_CORE_MASK);
 	}
+
+	slot->state = SLOT_LIVE;
+	(void)tx_thread_resume(&slot->thread);
 }
 
 osThreadId_t osThreadNew(osThreadFunc_t func, void *argument,
@@ -389,6 +416,22 @@ osThreadId_t osThreadNew(osThreadFunc_t func, void *argument,
 osThreadId_t osThreadGetId(void)
 {
 	return (osThreadId_t)tx_thread_identify();
+}
+
+/* Fault-dump helper (tx_glue.c): identify the slot behind a TCB without
+ * leaking the slot-table types into the glue. */
+unsigned int cmsis_slot_diag(const void *tcb, char *out, unsigned int outsz)
+{
+	uintptr_t base = (uintptr_t)thread_slots;
+	uintptr_t off = (uintptr_t)tcb - base;
+	uint32_t i = (uint32_t)(off / sizeof(thread_slot_t));
+
+	if (off % sizeof(thread_slot_t) != 0U || i >= MAX_THREADS) {
+		return (unsigned int)snprintf(out, outsz, "slot=?");
+	}
+	return (unsigned int)snprintf(out, outsz, "slot=%u state=%d func=%p",
+				      (unsigned)i, (int)thread_slots[i].state,
+				      thread_slots[i].func);
 }
 
 osStatus_t osThreadYield(void)

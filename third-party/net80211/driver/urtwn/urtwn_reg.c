@@ -118,13 +118,24 @@ struct urtwn_softc *urtwn_reg_softc;
 static void wlan_print_node_cb(void *arg, struct ieee80211_node *ni) {
 	(void) arg;
 	struct ieee80211_channel *ch = ni->ni_chan;
+	/* minilibc snprintf has no "%.*s": copy the essid out and print %s */
+	char essid[33];
+	unsigned int i;
+	unsigned int n = ni->ni_esslen;
 
-	printf("  %02x:%02x:%02x:%02x:%02x:%02x  ch=%d  rssi=%u  %s  ssid=%.*s\n",
+	if (n > sizeof(essid) - 1) {
+		n = sizeof(essid) - 1;
+	}
+	for (i = 0; i < n; i++) {
+		essid[i] = (char) ni->ni_essid[i];
+	}
+	essid[n] = '\0';
+	printf("  %02x:%02x:%02x:%02x:%02x:%02x  ch=%d  rssi=%u  %s  ssid=%s\n",
 	    ni->ni_bssid[0], ni->ni_bssid[1], ni->ni_bssid[2],
 	    ni->ni_bssid[3], ni->ni_bssid[4], ni->ni_bssid[5],
 	    ch != NULL ? ch->ic_freq : 0, ni->ni_rssi,
 	    (ni->ni_capinfo & IEEE80211_CAPINFO_PRIVACY) ? "enc " : "open",
-	    ni->ni_esslen, ni->ni_essid);
+	    essid);
 }
 
 int wlan_urtwn_up(void) {

@@ -143,7 +143,13 @@ void sysfree(void *p) {
 void *sysmemalign(size_t align, size_t size) {
 	/* the hooks cannot return aligned blocks directly; over-allocate
 	 * and hand back an aligned point inside (the tail waste is fine
-	 * for the small DMA buffers the shim allocates) */
+	 * for the small DMA buffers the shim allocates).
+	 *
+	 * TRAP: the result is an INTERIOR pointer - it must never be
+	 * passed to wlan_kfree/free, which would read a phantom heap
+	 * block header and corrupt live neighbors on the free list.
+	 * Keep the raw block yourself and free that; the usbdi shim
+	 * does exactly this. */
 	void *raw;
 	uintptr_t aligned;
 

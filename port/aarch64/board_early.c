@@ -238,6 +238,15 @@ void board_early_print(const char *message)
 	print_lock_give(saved_daif);
 }
 
+void board_console_write(const char *message)
+{
+	uint64_t saved_daif;
+
+	print_lock_take(&saved_daif);
+	puts_strip_cr(message);
+	print_lock_give(saved_daif);
+}
+
 /* Same sink and stamp, WITHOUT the print lock: for contexts that must not
  * spin on it. The lock is taken with IRQs masked, so a non-fatal print from
  * an ISR could deadlock against the very context it interrupted (the holder

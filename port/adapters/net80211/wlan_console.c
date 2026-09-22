@@ -22,9 +22,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "Driver_USART.h"
-
-extern ARM_DRIVER_USART Driver_USART_Console;
+#include "board.h"
 
 /* output goes live only after the console driver is initialized;
  * before that the bytes would vanish into an unarmed peripheral */
@@ -35,17 +33,13 @@ void wlan_console_ready(void) {
 }
 
 static void console_emit(const char *s) {
-	size_t n = 0;
-
 	if (!console_ready) {
 		return;
 	}
-	while (s[n] != '\0') {
-		n++;
-	}
-	if (n != 0U) {
-		(void) Driver_USART_Console.Send(s, (uint32_t) n);
-	}
+	/* board_console_write: same polled UART as board_early_print under
+	 * the same print lock - urtwn attach prints used to shred concurrent
+	 * fault dumps because the CMSIS USART driver sat on no lock at all */
+	board_console_write(s);
 }
 
 /* one shared line buffer: wlan prints are shell-paced, never reentered */

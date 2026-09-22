@@ -116,6 +116,10 @@ struct usbd_xfer {
 	usbd_status status;
 	uint32_t actlen;
 	volatile int in_flight;
+	void *dma_raw;	/* the block dma_buf points inside of; the free
+			 * must go to this one - vPortFree on the aligned
+			 * interior point reads a phantom heap header and
+			 * steers coalescing into live neighbors (M7) */
 	struct usbh_urb urb;
 	SLIST_ENTRY(usbd_xfer) next;
 };
@@ -332,12 +336,19 @@ int usbd_create_xfer(struct usbd_pipe *pipe, size_t size, unsigned int flags,
 	xfer->pipe = pipe;
 	xfer->flags = (uint16_t) flags;
 	if (size != 0) {
-		xfer->dma_buf = sysmemalign(USBD_SHIM_ALIGN, size);
-		if (xfer->dma_buf == NULL) {
+		/* sysmemalign hands back an interior point of a larger block
+		 * and drops the raw one - freeing that pointer corrupts the
+		 * heap. Do the alignment dance here and keep the raw owner
+		 * for the free; the M_ZERO covers the old explicit memset
+		 * of the window the driver sees. */
+		xfer->dma_raw = wlan_kmalloc(size + USBD_SHIM_ALIGN,
+		    M_WAITOK | M_ZERO, M_USB);
+		if (xfer->dma_raw == NULL) {
 			wlan_kfree(xfer, M_USB);
 			return USBD_NOMEM;
 		}
-		memset(xfer->dma_buf, 0, size);
+		xfer->dma_buf = (void *)(((uintptr_t) xfer->dma_raw +
+		    USBD_SHIM_ALIGN - 1) & ~(uintptr_t)(USBD_SHIM_ALIGN - 1));
 	}
 	*xp = xfer;
 	return USBD_NORMAL_COMPLETION;
@@ -350,8 +361,8 @@ void usbd_destroy_xfer(struct usbd_xfer *xfer) {
 	if (xfer->in_flight) {
 		(void) usbh_kill_urb(&xfer->urb);
 	}
-	if (xfer->dma_buf != NULL) {
-		wlan_kfree(xfer->dma_buf, M_USB);
+	if (xfer->dma_raw != NULL) {
+		wlan_kfree(xfer->dma_raw, M_USB);
 	}
 	wlan_kfree(xfer, M_USB);
 }

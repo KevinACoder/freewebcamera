@@ -30,6 +30,8 @@
 
 #include "wlan.h"
 
+#include "board.h"
+
 #include <port/port.h>
 #include <port/osal/wlan_port_core.h>
 #include <port/osal/cmsis_rtos2/wlan_port_cmsis.h>
@@ -60,12 +62,8 @@ void *wlan_osal_alloc(size_t size) {
 }
 
 void wlan_osal_free(void *p) {
-	/* M7 bring-up diagnostic: identify the wild free */
-	{
-		extern int kprintf(const char *fmt, ...);
-
-		kprintf("[wlan] free %p\n", p);
-	}
+	/* (the per-free trace that hunted the M7 wild write is gone now that
+	 * the heap is TLSF - it flooded the console at rx rates) */
 	vPortFree(p);
 }
 
@@ -77,11 +75,18 @@ void wlan_osal_free(void *p) {
  * created by usb_osal_thread_create itself - and the CMSIS-RTOS2 layer
  * is not safe to re-enter from there (M7 first boot: two cmsis-thr
  * threads died jumping to NULL right at the osThreadNew pair). Same
- * world, proven primitives, same priority class as the hub threads. */
+ * world, proven primitives.
+ *
+ * Priority 5: BELOW the TCP/IP thread (4). The worker drains the driver
+ * callbacks - ieee80211_input and the net80211 state machine run here -
+ * and at the hub thread's priority 0 it would preempt tcpip through any
+ * RX burst, starving DHCP/ICMP exactly when the link comes up. */
+#define WLAN_WORK_PRIORITY	5
+
 void *wlan_port_thread_create(void *(*run)(void *), void *arg) {
 	return usb_osal_thread_create("wlan-work",
 				      CONFIG_USBHOST_PSC_STACKSIZE / 2,
-				      CONFIG_USBHOST_PSC_PRIO,
+				      WLAN_WORK_PRIORITY,
 				      (usb_thread_entry_t) run, arg);
 }
 
@@ -111,7 +116,10 @@ int wlan_start(void) {
 	}
 	wlan_osal_cmsis_init();
 	wlan_console_ready();
-	wlan_usbdi_trace_set(1);
+	/* usbdi trace stays OFF: at rx rates it floods the 115200 console
+	 * (two lines per URB) and starves the wpa handshake timers. The
+	 * trace is what hunted the M7 attach wild write; enable by hand
+	 * (wlan_usbdi_trace_set) only when chasing a new transfer bug. */
 	if (wlan_port_firmware_register("rtl8188eufw.bin", rtl8188eufw_data,
 		(size_t) rtl8188eufw_size) != 0) {
 		return -1;

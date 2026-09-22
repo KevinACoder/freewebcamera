@@ -91,6 +91,7 @@ INC_ADAPTER := -Ithird-party/FreeRTOS-Kernel/include \
 	-Ithird-party/cherryrb \
 	-Iport/adapters/lwip/include \
 	-Ithird-party/lwip/src/include \
+	-Ithird-party/lwip/apps/ping \
 	-Ithird-party/lwip/contrib/ports/freertos/include \
 	-Iport/adapters/fatfs \
 	-Ithird-party/fatfs \
@@ -226,6 +227,8 @@ ADAPTER_SRCS := \
 	port/adapters/lwip/ethernetif.c \
 	port/adapters/lwip/lwip_adapter.c \
 	port/adapters/lwip/net_cmds.c \
+	port/adapters/lwip/ping_cmd.c \
+	third-party/lwip/apps/ping/ping.c \
 	port/adapters/fatfs/blkdev.c \
 	port/adapters/fatfs/diskio.c \
 	port/adapters/fatfs/fatfs_os.c \
@@ -387,7 +390,7 @@ THREADX_PORT_SRCS := $(filter-out \
 	$(wildcard third-party/threadx/ports_smp/cortex_a55_smp/gnu/src/*.S))
 
 KERNEL_SRCS := $(THREADX_KERNEL_SRCS) port/adapters/threadx/tx_glue.c \
-	port/adapters/threadx/heap.c
+	port/adapters/threadx/heap.c third-party/tlsf/tlsf.c
 
 # The vendored middleware lists. CherryUSB stays stubbed for now (its OSAL
 # is the P4 wave); lwIP runs the cmsis sys_arch below - same core list as
@@ -472,6 +475,8 @@ ADAPTER_SRCS := \
 	port/adapters/lwip/ethernetif.c \
 	port/adapters/lwip/lwip_adapter.c \
 	port/adapters/lwip/net_cmds.c \
+	port/adapters/lwip/ping_cmd.c \
+	third-party/lwip/apps/ping/ping.c \
 	port/adapters/cherryusb/usbh_platform.c \
 	port/adapters/cherryusb/usbh_adapter.c \
 	port/adapters/cherryusb/usbh_cmds.c
@@ -487,6 +492,7 @@ INC_ADAPTER := -Ithird-party/threadx/common_smp/inc \
 	-Iport/adapters/threadx \
 	-Iport/adapters/cmsis_rtos2_threadx \
 	-Iport/adapters/cmsis_rtos2_freertos \
+	-Ithird-party/tlsf \
 	-Iport/adapters/cherrysh \
 	-Ithird-party/cherrysh \
 	-Ithird-party/cherrysh/cherryrl \
@@ -494,6 +500,7 @@ INC_ADAPTER := -Ithird-party/threadx/common_smp/inc \
 	-Iport/adapters/lwip/include \
 	-Iport/adapters/lwip/cmsis/include \
 	-Ithird-party/lwip/src/include \
+	-Ithird-party/lwip/apps/ping \
 	-Iport/adapters/cherryusb \
 	-Iport/adapters/cherryusb/xhci \
 	-Ithird-party/cherryusb/common \
