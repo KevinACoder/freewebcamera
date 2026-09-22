@@ -26,6 +26,9 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
+
+extern void board_early_print(const char *s);
 
 /* The port assembly's protection primitives (tx_thread_smp_protect.S /
  * tx_thread_smp_unprotect.S), spelled out to keep this file free of kernel
@@ -130,6 +133,25 @@ void vPortFree(void *ptr)
 		return;
 	}
 	blk = (heap_block_t *)((uint8_t *)ptr - HDR_SIZE);
+
+	/* M7 hardening: a free of a pointer that is not this heap's payload
+	 * (interior pointer, double free of a foreign allocation, wild
+	 * pointer) used to be an un.logged write into foreign memory that
+	 * surfaced as a wild jump far away from the cause. Validate the
+	 * block before touching it; refuse and report instead. */
+	/* NB: payload is blk + 24 on LP64, so pointers are 8 mod 16 here -
+	 * no alignment check on ptr, only bounds and header sanity. */
+	if ((uint8_t *)blk < heap_region ||
+	    (uint8_t *)blk > heap_region + HEAP_BYTES - HDR_SIZE ||
+	    blk->size > HEAP_BYTES || blk->used == 0u) {
+		static char bad_msg[64];
+
+		(void)snprintf(bad_msg, sizeof(bad_msg),
+			       "heap: BAD FREE %08lx (refused)\n",
+			       (unsigned long)(uintptr_t)ptr);
+		board_early_print(bad_msg);
+		return;
+	}
 
 	save = _tx_thread_smp_protect();
 	blk->used = 0u;

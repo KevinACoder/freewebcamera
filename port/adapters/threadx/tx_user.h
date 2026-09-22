@@ -12,7 +12,12 @@
  *   TX_MAX_PRIORITIES            32
  *   TX_MINIMUM_STACK             200
  *   TX_TIMER_THREAD_PRIORITY     0   (kernel timer thread, mostly asleep)
- *   TX_TIMER_THREAD_STACK_SIZE   4096
+ *   TX_TIMER_THREAD_STACK_SIZE   16384 (default 4096 overflows the
+ *                                     net80211 callout callbacks - driver
+ *                                     watchdog/state-machine chains run
+ *                                     there on the CMSIS osTimer bridge;
+ *                                     M7 first boot crashed with wild
+ *                                     jumps ~2s after attach)
  *
  * Deliberately NOT enabled:
  *   TX_ENABLE_WFI                idle would WFI instead of the port's
@@ -39,6 +44,11 @@
  * CherryUSB's osal refuses to compile against any other claim, and every
  * ms-based osal timeout rides on this being true. */
 #define TX_TIMER_TICKS_PER_SECOND			1000
+
+/* The net80211 callouts (urtwn watchdog, ieee80211 state machines) run on
+ * the kernel timer thread via the CMSIS osTimer bridge - a driver-depth
+ * call chain that the 4 KB default stack cannot hold. */
+#define TX_TIMER_THREAD_STACK_SIZE			16384
 
 #define TX_THREAD_USER_EXTENSION	VOID	*tx_thread_cmsis_slot;
 

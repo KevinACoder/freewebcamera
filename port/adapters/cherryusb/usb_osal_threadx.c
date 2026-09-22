@@ -32,10 +32,11 @@
 #include "usb_log.h"
 #include "tx_api.h"
 
-/* Sized for two hub threads (TCB + 8 KiB stack each), the reaper, the
- * EHCI descriptor pools and the core's per-device allocations, with
- * room to spare. */
-#define USB_OSAL_POOL_BYTES	(256u * 1024u)
+/* Sized for two hub threads (TCB + 64 KiB stack each - the net80211
+ * attach chain runs there and is the deepest call stack in the image),
+ * the reaper, the EHCI descriptor pools and the core's per-device
+ * allocations, with room to spare. */
+#define USB_OSAL_POOL_BYTES	(512u * 1024u)
 
 static uint8_t usb_osal_pool_mem[USB_OSAL_POOL_BYTES]
 	__attribute__((aligned(16)));

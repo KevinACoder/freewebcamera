@@ -256,11 +256,16 @@ void tx_secondary_main(void)
  * path - report and park. */
 void tx_fault_park(uint32_t kind)
 {
-	unsigned long esr = 0UL, far = 0UL;
+	unsigned long esr = 0UL, far = 0UL, elr = 0UL, lr = 0UL, sp = 0UL;
+	uint32_t cpu = board_smp_core_id();
+	volatile TX_THREAD *t = (volatile TX_THREAD *) 0UL;
 
+	__asm__ __volatile__("mov %0, sp" : "=r"(sp));
 	board_early_print("fatal: synchronous exception\n");
 	__asm__ __volatile__("mrs %0, esr_el1" : "=r"(esr));
 	__asm__ __volatile__("mrs %0, far_el1" : "=r"(far));
+	__asm__ __volatile__("mrs %0, elr_el1" : "=r"(elr));
+	__asm__ __volatile__("mov %0, x30" : "=r"(lr));
 	{
 		/* vsnprintf pulls in half of minilibc; the raw hex dump via
 		 * polled puts keeps this path dependency-free, like the
@@ -271,6 +276,73 @@ void tx_fault_park(uint32_t kind)
 			       "fatal: kind=%u ESR_EL1=%08lx FAR_EL1=%08lx\n",
 			       (unsigned)kind, esr, far & 0xffffffffUL);
 		board_early_print(buf);
+		/* ELR/LR for addr2line against the unstripped elf */
+		(void)snprintf(buf, sizeof(buf),
+			       "fatal: ELR_EL1=%08lx LR=%08lx\n",
+			       elr & 0xffffffffUL, lr & 0xffffffffUL);
+		board_early_print(buf);
+		/* Which thread, and is SP inside its stack? Directly
+		 * answers the stack-overflow question. _tx_thread_current_ptr
+		 * is the SMP per-core current-thread array (tx_thread.h). */
+		t = (volatile TX_THREAD *) _tx_thread_smp_current_thread_get();
+		if (t != (volatile TX_THREAD *) 0UL) {
+			/* minilibc snprintf has no %.*s: dump the name as
+			 * hex words and the entry function for addr2line */
+			(void)snprintf(buf, sizeof(buf),
+			       "fatal: core%u sp=%08lx stk=%08lx..%08lx\n",
+			       cpu, sp,
+			       (unsigned long) t->tx_thread_stack_start,
+			       (unsigned long) t->tx_thread_stack_end);
+			board_early_print(buf);
+			{
+				const unsigned char *nm =
+				    (const unsigned char *) t->tx_thread_name;
+				unsigned long entry =
+				    (unsigned long) t->tx_thread_entry;
+
+				(void)snprintf(buf, sizeof(buf),
+				    "fatal: name=%02x%02x%02x%02x%02x%02x%02x%02x entry=%08lx\n",
+				    nm[0], nm[1], nm[2], nm[3],
+				    nm[4], nm[5], nm[6], nm[7], entry);
+				board_early_print(buf);
+			}
+		} else {
+			(void)snprintf(buf, sizeof(buf),
+			       "fatal: core%u thread=<none> sp=%08lx\n",
+			       cpu, sp);
+			board_early_print(buf);
+		}
+		/* raw stack walkback: text-range words near SP are
+		 * candidate return addresses; one atomic multi-line print
+		 * so concurrent cores cannot tear the output away */
+		{
+			static char wl_tb[560];
+			unsigned long a = (sp + 7UL) & ~7UL;
+			unsigned n = 0U;
+			size_t o = 0U;
+			extern char __bss_start[];
+			extern char _end[];
+
+			for (; a + 8UL <= (unsigned long) __bss_start &&
+			    n < 20U; a += 8UL) {
+				unsigned long v =
+				    *(volatile unsigned long *) a;
+
+				if (v >= 0x0a000000UL &&
+				    v < (unsigned long) __bss_start) {
+					o += (size_t) snprintf(wl_tb + o,
+					    sizeof(wl_tb) - o, "stk[%02u] %08lx\n",
+					    n, v);
+					n++;
+				}
+			}
+			if (n > 0U) {
+				board_early_print(wl_tb);
+			} else {
+				board_early_print("stk: none in text range\n");
+			}
+			(void)_end;
+		}
 	}
 
 	for (;;) {

@@ -25,6 +25,9 @@
 
 #include "cmsis_os2.h"
 
+#include <usb_osal.h>
+#include "usb_config.h"
+
 #include "wlan.h"
 
 #include <port/port.h>
@@ -57,26 +60,35 @@ void *wlan_osal_alloc(size_t size) {
 }
 
 void wlan_osal_free(void *p) {
+	/* M7 bring-up diagnostic: identify the wild free */
+	{
+		extern int kprintf(const char *fmt, ...);
+
+		kprintf("[wlan] free %p\n", p);
+	}
 	vPortFree(p);
 }
 
 /* ------------------------------------------------------------------ */
 /* usbdi shim worker threads (embox lane: net_bridge.c) */
 
+/* The workers are created through the CherryUSB osal, NOT osThreadNew:
+ * wlan_usbdi_attach runs on the USB hub thread - a raw ThreadX thread
+ * created by usb_osal_thread_create itself - and the CMSIS-RTOS2 layer
+ * is not safe to re-enter from there (M7 first boot: two cmsis-thr
+ * threads died jumping to NULL right at the osThreadNew pair). Same
+ * world, proven primitives, same priority class as the hub threads. */
 void *wlan_port_thread_create(void *(*run)(void *), void *arg) {
-	/* 16 KiB: the shim's worker loops are flat; the FreeRTOS demo
-	 * lane ran the same loops on a 12 KiB stack */
-	osThreadAttr_t attr = { "wlanwork", 0, NULL, 0, NULL,
-				16 * 1024, osPriorityNormal, 0, 0 };
-
-	/* the CMSIS thread starts running immediately; the embox lane
-	 * needed a suspended-create + launch pair, this one does not */
-	return (void *) osThreadNew((osThreadFunc_t) run, arg, &attr);
+	return usb_osal_thread_create("wlan-work",
+				      CONFIG_USBHOST_PSC_STACKSIZE / 2,
+				      CONFIG_USBHOST_PSC_PRIO,
+				      (usb_thread_entry_t) run, arg);
 }
 
 void wlan_port_thread_start(void *thread) {
-	/* osThreadNew already runs the thread; the embox lane needed a
-	 * suspended-create + launch pair, the CMSIS one does not */
+	/* usb_osal_thread_create auto-starts (TX_AUTO_START); the embox
+	 * lane needed a suspended-create + launch pair, this one does
+	 * not. */
 	(void) thread;
 }
 
@@ -91,11 +103,15 @@ extern const size_t rtl8188eufw_size;
 
 static int wlan_started;
 
+void wlan_console_ready(void);
+
 int wlan_start(void) {
 	if (wlan_started) {
 		return 0;
 	}
 	wlan_osal_cmsis_init();
+	wlan_console_ready();
+	wlan_usbdi_trace_set(1);
 	if (wlan_port_firmware_register("rtl8188eufw.bin", rtl8188eufw_data,
 		(size_t) rtl8188eufw_size) != 0) {
 		return -1;
