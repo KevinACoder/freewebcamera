@@ -1,6 +1,6 @@
 # 2026-09-22 — CherryUSB 通用 HCD ops 层：四总线同镜像（EHCI×2 + xHCI×2）
 
-**状态：代码 + 编译门禁完成；板验等通知（板被占用）。本文所有"验收"均为构建通过，未上板。**
+**状态：全部完成——编译门禁 + 板验（5 轮冷启动）均通过，四总线清单 ×3 复核一致。**
 
 ## 目标
 
@@ -134,3 +134,84 @@ xHCI（DWC3 `0xFD000000`，INTID 202；DWC3 otg-as-host `0xFCC00000`，INTID 201
 - `EHCI_ONLY=1` 两线仅编译门禁（链接零错），未上板——旧形态行为回归靠板验第 4 步；
 - sdmmc 适配器的厂商痕迹（`sdmmc_host_dwmmc.c` 等四文件）是 D20 登记豁免，
   AGENTS.md 裸扫描命令与脚本口径不一致——文档口径以脚本为准（另行知会）。
+## 板验（2026-09-22 当日执行，oslab 纪律全程）
+
+### R1（b7362ef 镜像 502184f2）：xHCI 两路成功，EHCI 两路枚举死
+
+首次上板：bus2（0bda:1a2b）与 **bus3（0bda:b851，fcc00000 首次 RTOS 枚举）** 正常，
+usbh list 四 bus 标签正确；但 **bus0/bus1 树为空**——hub 线程的 INIT/kick/wake 都
+打了，之后零输出（无 claimed 也无 ERROR），251s 不恢复。另见偶发 irq: spurious
+（89s/173s/239s/245s）。
+
+**对照实验**：EHCI_ONLY=1 旧契约形态（76738b8d）同板 EHCI 枚举完全正常（M6-A 清单
+全出）→ 问题锁定 multi 路径。**根因（两个叠加缺陷）**：
+
+1. **域 bring-up 并发**：SMP=4 下四个 hub 线程同时跑 usb_hc_init，EHCI 的 usb2phy1
+   域与 xHCI 的 usb3otg 域**并发执行**——后者也打 con14 SRST 脉冲（H_USB2HOST0/1，
+   其注释 "in this image it bounces nothing" 在 EHCI-only 时代成立，四总线时代不再
+   成立）。时序实测：EHCI init+kick 在 0.21-0.33s 完成，xHCI 域的 con14 脉冲 ~0.4s
+   落下——把已初始化的两个 EHCI 硬件复位砸烂：无中断、无枚举、**无任何报错**
+   （roothub 读回复位值）。once-guard 的 check-then-set 本身在 SMP 上也是竞态。
+2. **hcd_ops 注册时序**（修复尝试中暴露）：把 usbh_hcd_register 提到 usbh_initialize
+   之前后炸 fatal: synchronous exception ESR=0x02000000 FAR=0 ——usbh_bus_init 的
+   memset(bus,0,...) 把先注册的 hcd_ops 清零，hub 线程分发器解引用 NULL 从地址 0
+   取指。
+
+**修复（提交 82c13cd）**：
+
+- usb_start() 在创建任何 hub 线程**之前**，任务上下文串行跑完全部 USB 域
+  （usb2phy1 → usb3otg instance0/1）：所有 SRST 脉冲先于所有控制器 init 落地，
+  hub 线程里的域调用退化为 no-op；
+- usbh_bus_init 跨 memset 保留 hcd_ops（register 先于 initialize 成为合法契约，
+  SMP 竞态同时消除）；
+- EHCI_ONLY 的启动循环止于 USBH_EHCI_NUM（消除 bus2/3 假 FAIL）。
+
+### R1'（修复版 d7fe49e4）：四总线全绿
+
+usbh list -t（251s 时）：
+
+```
+bus0: ehci @fd800000
+  port 1: 1a86:8091 high hub (hub)
+    port 4: 046d:0990 high dev
+bus1: ehci @fd880000
+  port 1: 1a86:8091 high hub (hub)
+    port 1: 0bda:8179 high dev
+    port 2: 1111:1111 high dev
+bus2: xhci @fd000000
+  port 1: 0bda:1a2b high dev
+bus3: xhci @fcc00000
+  port 1: 0bda:b851 high dev
+```
+
+**四个 USB WiFi 模块 + 摄像头全部同镜像挂树**；M0 锚点全过（its PASS、M0 ANCHORS
+DONE）、四盘自动挂载、net 双口 up、零断言。启动期一次 irq: spurious（1.219s），此后
+251s 观察未复发（EHCI_ONLY 形态与其余轮次零 spurious，与多 HCD 无稳定相关，留观察）。
+
+### R2/R3（d7fe49e4）：冷启动复核
+
+枚举清单与 R1' 逐行一致（事件行时间戳同量级）；R2/R3 零 spurious 零断言。
+**×3 冷启动达成**。
+
+### R4'（EHCI_ONLY 修复版 9a028b32）：旧契约形态回归
+
+M6-A 清单完整复现（双 hub claimed + 046d:0990 + 0bda:8179 + 1111:1111），启动止于
+usb: READY（无 bus2/3 噪声），零退化。
+
+### R5（FreeRTOS 四总线 ca313da2）：对照线同绿
+
+同一套 multi-HCD 代码在 FreeRTOS =1 下四清单完整、锚点全过——分发层与内核无关。
+
+### 镜像台账（全部 sha256 对拍 + 板上 crc32 复核过）
+
+| 镜像 | sha256 | 板验 |
+|---|---|---|
+| 四总线 ThreadX 主线（修复后，现 TFTP 待命） | d7fe49e4… | R1'/R2/R3 全绿 |
+| 四总线 ThreadX（修复前） | 502184f2… | R1（暴露缺陷） |
+| EHCI_ONLY ThreadX（修复后） | 9a028b32… | R4' 全绿 |
+| EHCI_ONLY ThreadX（修复前） | 76738b8d… | R4 对照（EHCI 正常） |
+| 四总线 FreeRTOS（修复后） | ca313da2… | R5 全绿 |
+
+收尾：板已 power_off 且 power_status 复核 power_on=false；TFTP 根已恢复 d7fe49e4
+待命镜像。
+
