@@ -336,22 +336,22 @@ void wlan_urtwn_txq_dump(void) {
 	    urtwn_read_1(sc, R92C_TXPAUSE));
 }
 
-/* --- 88E firmware-maintenance hook ---------------------------------------- *
+/* --- 88E firmware-maintenance hook (disabled by default) ------------------- *
  *
  * The 88E firmware speaks a different H2C ABI than the 92C one the
- * verbatim driver was written for: MACID_CFG lives at 0x40 (7-byte
- * payload through the 4-byte 88E HMEBOX_EXT window) and RSSI_REPORT
- * at 0x42 (vendor RTL8188E_H2C_CMD_ID), while the driver programs RA
- * only through the dead 92C id 6 - so the firmware rate table is
- * never programmed at all, and under sustained TX its RA engine
- * wedges the chip (bulk OUT stops being served; NetBSD PR 59036 is
- * the same stall on real hardware).
+ * verbatim driver was written for: MACID_CFG lives at 0x40 and
+ * RSSI_REPORT at 0x42, while the driver programs RA only through the
+ * dead 92C id 6.  This hook sends a reconstructed vendor association
+ * sequence (media status, rate tables, periodic RSSI) behind "wlan ra
+ * 1" / "wlan fwfix".
  *
- * This hook sends the vendor association sequence (media status,
- * rate table) once per BSS and feeds RSSI every other tick, on the
- * usb taskq, re-armed by a callout - the same shape as the driver's
- * own calib callout.  "wlan ra 0|1" gates it, "wlan fwfix" fires the
- * association sequence by hand. */
+ * Disabled by default: the payload layout below was never verified
+ * against the vendor header and on the board it actively breaks the
+ * station - with the hook on, sustained TX crawls at ~1Mbps and the
+ * firmware wedges within seconds; with it off (the exact shape the
+ * stock NetBSD driver runs, dead commands and all) the same dongle
+ * reaches full 11g rate, so the firmware's own RA works unaided.  Do
+ * not re-enable without a byte-exact vendor ABI reference. */
 
 #define WLAN88E_H2C_MEDIA_STATUS	0x01	/* 1B opmode, 1 = connected */
 #define WLAN88E_H2C_MACID_CFG		0x40	/* 7B macid,raid,bw,mask32  */
@@ -359,7 +359,7 @@ void wlan_urtwn_txq_dump(void) {
 
 static callout_t wlan_ra_hook_to;
 static struct usb_task wlan_ra_hook_task;
-static volatile unsigned wlan_ra_hook_enabled = 1;
+static volatile unsigned wlan_ra_hook_enabled;
 static unsigned wlan_ra_hook_sends;
 static unsigned wlan_ra_hook_tick;
 static uint8_t wlan_ra_hook_bssid[6];
