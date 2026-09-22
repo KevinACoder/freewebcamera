@@ -87,13 +87,19 @@ static int sd_fsl_write_1(struct wlan_sdio_dev *dev, uint32_t addr,
 	    (sdio_func_num_t) dev->function, addr, &val, false));
 }
 
+/* 2/4-byte accesses go out as CMD53 incremental transfers, padded to
+ * 4 bytes on the wire: the dw_mmc host rejects any data length that is
+ * not a 4-byte multiple (IDMAC constraint), so a bare 2-byte read is
+ * declined host-side. Over-reading two neighbouring registers on a
+ * read is harmless; a write must not touch them, so 2-byte writes go
+ * out as two CMD52s instead. */
 static uint32_t sd_fsl_read_bytes(struct wlan_sdio_dev *dev,
     uint32_t addr, unsigned n) {
 	sdio_card_t *card = (sdio_card_t *) dev->env_card;
 	uint32_t val = 0;
 
 	(void) SDIO_IO_Read_Extended(card, (sdio_func_num_t) dev->function,
-	    addr, wlan_sdio_stage, n, (uint32_t) SDIO_EXTEND_CMD_OP_CODE_MASK);
+	    addr, wlan_sdio_stage, 4u, (uint32_t) SDIO_EXTEND_CMD_OP_CODE_MASK);
 	memcpy(&val, wlan_sdio_stage, n);
 	return val;
 }
@@ -101,6 +107,18 @@ static uint32_t sd_fsl_read_bytes(struct wlan_sdio_dev *dev,
 static int sd_fsl_write_bytes(struct wlan_sdio_dev *dev, uint32_t addr,
     uint32_t val, unsigned n) {
 	sdio_card_t *card = (sdio_card_t *) dev->env_card;
+	uint8_t b;
+	unsigned i;
+	int err = 0;
+
+	if (n < 4u) {
+		/* sub-dword write: CMD52 per byte, no neighbour clobber */
+		for (i = 0; i < n && err == 0; i++) {
+			b = (uint8_t) (val >> (8u * i));
+			err = sd_fsl_write_1(dev, addr + i, b);
+		}
+		return err;
+	}
 
 	memcpy(wlan_sdio_stage, &val, n);
 	return sd_fsl_check(SDIO_IO_Write_Extended(card,
