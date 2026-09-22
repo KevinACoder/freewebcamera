@@ -73,6 +73,18 @@
 #define DWMMC_MINTSTS_OFFSET		0x040U
 #define DWMMC_RINTSTS_OFFSET		0x044U
 #define DWMMC_STATUS_OFFSET		0x048U
+
+/* Rockchip extensions (dw_mmc-rockchip SDMMC_TIMING_CON0/1): the card
+ * clock drive/sample phases, HIWORD-encoded like the CRU (value bits
+ * [10:1], write-enable bits [26:17]). Ground truth = the vendor kernel's
+ * dw_mmc-rockchip.c set_ios: drive 90 degrees, sample 0 degrees
+ * (rk356x.dtsi carries no default-sample-phase). */
+#define DWMMC_TIMING_CON0_OFFSET	0x130U
+#define DWMMC_TIMING_CON1_OFFSET	0x134U
+#define DWMMC_TIMING_HIWORD(raw)					\
+	((((uint32_t) (raw) & 0x7ffu) << 1) | (0x7ffu << 17))
+#define DWMMC_TIMING_CON_DRIVE_90	DWMMC_TIMING_HIWORD(1u)
+#define DWMMC_TIMING_CON_SAMPLE_0	DWMMC_TIMING_HIWORD(0u)
 #define DWMMC_FIFOTH_OFFSET		0x04CU
 #define DWMMC_CDETECT_OFFSET		0x050U
 #define DWMMC_WRTPRT_OFFSET		0x054U

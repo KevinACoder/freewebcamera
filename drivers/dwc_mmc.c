@@ -208,6 +208,16 @@ static int dwc_mmc_clock_update(struct dwc_mmc *inst, uint32_t clk_div)
 		cmd_bits |= DWMMC_CMD_VOLT_SWITCH;
 	}
 
+	/* Rockchip drive/sample phases, the vendor-kernel set_ios values
+	 * (drive 90deg for hold time, sample 0deg - rk356x.dtsi sets no
+	 * default-sample-phase). M11 board round 2: CMD53 data ran DCRC
+	 * storms at HS50 until these were programmed - the sdmmc0 data
+	 * phase had never been driven before. */
+	DWMMC_WRITE_REG(base_addr, DWMMC_TIMING_CON0_OFFSET,
+			DWMMC_TIMING_CON_DRIVE_90);
+	DWMMC_WRITE_REG(base_addr, DWMMC_TIMING_CON1_OFFSET,
+			DWMMC_TIMING_CON_SAMPLE_0);
+
 	/* 1) stop all clocks */
 	DWMMC_WRITE_REG(base_addr, DWMMC_CLKENA_OFFSET, 0);
 	DWMMC_WRITE_REG(base_addr, DWMMC_CMD_OFFSET, cmd_bits | DWMMC_CMD_START);
