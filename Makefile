@@ -92,6 +92,7 @@ INC_ADAPTER := -Ithird-party/FreeRTOS-Kernel/include \
 	-Iport/adapters/lwip/include \
 	-Ithird-party/lwip/src/include \
 	-Ithird-party/lwip/apps/ping \
+	-Ithird-party/iperf3_embedded \
 	-Ithird-party/lwip/contrib/ports/freertos/include \
 	-Iport/adapters/fatfs \
 	-Ithird-party/fatfs \
@@ -229,6 +230,9 @@ ADAPTER_SRCS := \
 	port/adapters/lwip/net_cmds.c \
 	port/adapters/lwip/ping_cmd.c \
 	third-party/lwip/apps/ping/ping.c \
+	port/adapters/lwip/iperf3_port.c \
+	port/adapters/lwip/iperf3_cmd.c \
+	third-party/iperf3_embedded/iperf3_embedded.c \
 	port/adapters/fatfs/blkdev.c \
 	port/adapters/fatfs/diskio.c \
 	port/adapters/fatfs/fatfs_os.c \
@@ -477,6 +481,9 @@ ADAPTER_SRCS := \
 	port/adapters/lwip/net_cmds.c \
 	port/adapters/lwip/ping_cmd.c \
 	third-party/lwip/apps/ping/ping.c \
+	port/adapters/lwip/iperf3_port.c \
+	port/adapters/lwip/iperf3_cmd.c \
+	third-party/iperf3_embedded/iperf3_embedded.c \
 	port/adapters/cherryusb/usbh_platform.c \
 	port/adapters/cherryusb/usbh_adapter.c \
 	port/adapters/cherryusb/usbh_cmds.c
@@ -501,6 +508,7 @@ INC_ADAPTER := -Ithird-party/threadx/common_smp/inc \
 	-Iport/adapters/lwip/cmsis/include \
 	-Ithird-party/lwip/src/include \
 	-Ithird-party/lwip/apps/ping \
+	-Ithird-party/iperf3_embedded \
 	-Iport/adapters/cherryusb \
 	-Iport/adapters/cherryusb/xhci \
 	-Ithird-party/cherryusb/common \

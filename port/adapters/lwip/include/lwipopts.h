@@ -41,7 +41,10 @@
 /* tcpip thread + mailboxes: the model the vendored FreeRTOS port implements. */
 #define LWIP_TCPIP_CORE_LOCKING         0
 #define LWIP_NETCONN                    1
-#define LWIP_SOCKET                     0
+/* On for the iperf3 throughput client (third-party/iperf3_embedded); its
+ * socket code rides the netconn API that is already compiled. */
+#define LWIP_SOCKET                     1
+#define LWIP_SO_RCVTIMEO                1
 /* netifapi_*: the shell's `net` commands change addresses from another thread. */
 #define LWIP_NETIF_API                  1
 #define LWIP_NETCONN_FULLDUPLEX         0
@@ -81,8 +84,9 @@
 #define LWIP_TCP                        1
 #define LWIP_RAW                        1
 /* No libc behind this image: lwIP supplies its own errno constants
- * (lwip/errno.h) instead of reaching for <errno.h>. Sockets are off, so
- * nothing reads the errno variable either. */
+ * (lwip/errno.h) instead of reaching for <errno.h>, whose newlib shape
+ * needs the reent machinery. With sockets on, sockets.c now also reads
+ * the errno variable - defined once in the adapter (lwip_diag.c). */
 #define LWIP_PROVIDE_ERRNO              1
 
 /* --- pool sizes ----------------------------------------------------------- */
