@@ -594,7 +594,10 @@ NET80211_BSD_SRCS := \
 	third-party/net80211/crypto/aes/aes_ct.c \
 	third-party/net80211/crypto/aes/aes_ct_dec.c \
 	third-party/net80211/crypto/aes/aes_ct_enc.c \
-	third-party/net80211/driver/urtwn/urtwn_reg.c
+	third-party/net80211/driver/urtwn/urtwn_reg.c \
+	third-party/net80211/driver/rtw8189f/rtw8189f_sdio.c \
+	third-party/net80211/driver/rtw8189f/rtw8189f_chip.c \
+	third-party/net80211/driver/rtw8189f/rtw8189f_reg.c
 
 NET80211_HOST_SRCS := \
 	third-party/net80211/port/aes_impl_compat.c \
@@ -605,13 +608,16 @@ NET80211_HOST_SRCS := \
 	third-party/net80211/port/osal/cmsis_rtos2/firmware_cmsis.c \
 	third-party/net80211/port/net/lwip/lwip_netif.c \
 	third-party/net80211/port/bus/usb/cherryusb/usbdi_compat.c \
-	third-party/net80211/port/bus/usb/cherryusb/usbh_urtwn_class.c
+	third-party/net80211/port/bus/usb/cherryusb/usbh_urtwn_class.c \
+	third-party/net80211/port/bus/sd/sdio_compat.c
 
 NET80211_ADAPTER_SRCS := \
 	port/adapters/net80211/wlan_adapter.c \
 	port/adapters/net80211/wlan_console.c \
 	port/adapters/net80211/wlan_cmds.c \
-	port/adapters/net80211/fw_rtl8188eufw.c
+	port/adapters/net80211/wlan_sdio_claim.c \
+	port/adapters/net80211/fw_rtl8188eufw.c \
+	port/adapters/net80211/fw_rtw8189ffw.c
 
 # The PSK-only file set (no EAP/WPS/P2P/ctrl-iface/SME), the same list the
 # embox lane compiles from this fork.

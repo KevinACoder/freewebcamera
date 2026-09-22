@@ -14,12 +14,14 @@
 struct ifnet;
 #include <port/port.h>
 #include <port/bus/usb/port_usb.h>
+#include <port/bus/sd/port_sd.h>
 
 #define WLAN_PORT_MAX_IF 2
 #define WLAN_PORT_MAX_BULK_EP 4
 
 struct wlan_port_iface {
 	struct wlan_usb_dev usb;
+	struct wlan_sdio_dev sdio;
 	const struct wlan_chip_driver *drv;
 	struct ifnet *if_shell; /* BSD ifnet shell, owned by the shim */
 	void *shim_priv; /* usbd_device / softc world */

@@ -77,6 +77,13 @@ static inline uint64_t le64dec(const void *p) {
 	}
 	return v;
 }
+static inline void le16enc(void *p, uint16_t v) {
+	uint8_t *b = p;
+
+	b[0] = (uint8_t) (v >> 0);
+	b[1] = (uint8_t) (v >> 8);
+}
+
 static inline void le32enc(void *p, uint32_t v) {
 	uint8_t *b = p;
 

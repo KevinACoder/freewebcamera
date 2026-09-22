@@ -38,6 +38,21 @@ extern "C" {
  */
 int wlan_start(void);
 
+/* Claim an SDIO wlan device off the sdmmc0 slot, if one has already
+ * enumerated there and matches a compiled-in SDIO chip driver.
+ *
+ * The SDIO counterpart of the USB class hook: the slot has no hotplug
+ * notification, so the claim runs as an explicit probe. Call it after
+ * wlan_start() (services + firmware registry) and after sdio_start()
+ * (card enumeration), in either order - the probe is idempotent and
+ * no-ops until both sides are up. Attaching does not power the radio;
+ * the shell (`wlan up`) or the supplicant does that as with USB.
+ *
+ * Returns 0 when a driver attached, -1 otherwise (not an error in
+ * itself: the slot may carry no matching card).
+ */
+int wlan_sdio_probe(void);
+
 #ifdef __cplusplus
 }
 #endif

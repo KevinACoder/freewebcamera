@@ -41,6 +41,8 @@ struct wlan_usb_dev;
 struct wlan_usb_id;
 struct wlan_pcie_dev;
 struct wlan_pcie_id;
+struct wlan_sdio_dev;
+struct wlan_sdio_id;
 
 /* ------------------------------------------------------------------
  * Firmware
@@ -135,6 +137,7 @@ void *wlan_port_get_ic(void);
 enum wlan_bus_type {
 	WLAN_BUS_USB = 1,
 	WLAN_BUS_PCIE = 2,
+	WLAN_BUS_SDIO = 3,
 };
 
 /* Control & diagnostics hooks a driver adapter offers the port shell.
@@ -164,6 +167,9 @@ struct wlan_chip_driver {
 	const struct wlan_usb_id *usb_ids;
 	/* PCI match table (WLAN_BUS_PCIE), terminated by vendor==0. */
 	const struct wlan_pcie_id *pcie_ids;
+	/* SDIO match table (WLAN_BUS_SDIO), CIS manufacturer/product of
+	 * function 0, terminated by vendor==0. */
+	const struct wlan_sdio_id *sdio_ids;
 
 	/* Attach the device: bring the chip up, load the firmware,
 	 * ieee80211_ifattach. bus_dev is the port device of the driver's

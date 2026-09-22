@@ -22,6 +22,15 @@ identical, verified with cmp) from the NetBSD netbsd-11 sources.
 | `driver/urtwn/rtwnreg.h` | `sys/dev/ic/rtwnreg.h` |
 | `driver/urtwn/rtwn_data.h` | `sys/dev/ic/rtwn_data.h` |
 | `firmware/urtwn/rtl8188eufw.bin` | `external/realtek/urtwn/dist/rtl8188eufw.bin` |
+| `driver/rtw8189f/if_rtw8189f.c` | `sys/dev/sdmmc/if_rtw8189f.c` (branch `feat-rtw8189f-sdio`) |
+| `driver/rtw8189f/rtw8189f_sdio.c` | `sys/dev/sdmmc/rtw8189f_sdio.c` |
+| `driver/rtw8189f/rtw8189f_chip.c` | `sys/dev/sdmmc/rtw8189f_chip.c` |
+| `driver/rtw8189f/rtw8189f_reg.h` | `sys/dev/sdmmc/rtw8189f_reg.h` |
+| `driver/rtw8189f/rtw8189f_tables.h` | `sys/dev/sdmmc/rtw8189f_tables.h` |
+| `driver/rtw8189f/rtw8189fvar.h` | `sys/dev/sdmmc/rtw8189fvar.h` |
+| `driver/rtw8189f/opt_rtw8189f.h` | port-local (kernel opt header, generated at NetBSD build time) |
+| `driver/rtw8189f/rtw8189f_reg.c` | port-local (registration TU; compiles the verbatim if_rtw8189f.c) |
+| `firmware/rtw8189f/rtw8189f_fw.bin` | `external/realtek/rtw8189f/dist/rtw8189f_fw.bin` (20306 B, sha256 cc17cb81...) |
 
 The upstream `sys/net80211/CHANGES`, `Makefile` and `files.net80211`
 are not imported: they belong to the NetBSD build system.

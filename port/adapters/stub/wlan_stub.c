@@ -16,3 +16,8 @@ int wlan_start(void)
 {
 	return 0;
 }
+
+int wlan_sdio_probe(void)
+{
+	return -1;
+}

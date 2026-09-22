@@ -30,6 +30,16 @@ static int cmd_iperf3(int argc, char **argv)
 	int i;
 	int have_ip = 0;
 
+	if (argc >= 2 && strcmp(argv[1], "stop") == 0) {
+		if (!iperf3_client_is_running()) {
+			csh_printf(csh, "iperf3: not running\r\n");
+			return 0;
+		}
+		iperf3_client_stop();
+		csh_printf(csh, "iperf3: stop requested\r\n");
+		return 0;
+	}
+
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.port = 5201;
 	cfg.time_sec = 10;
@@ -58,7 +68,7 @@ static int cmd_iperf3(int argc, char **argv)
 	}
 
 	if (!have_ip) {
-		csh_printf(csh, "usage: iperf3 <ip> [sec] [-u] [-r]"
+		csh_printf(csh, "usage: iperf3 <ip> [sec] [-u] [-r] | stop"
 			   "   (-u UDP, -r reverse = server sends)\r\n");
 		return 0;
 	}

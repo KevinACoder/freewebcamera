@@ -9,6 +9,7 @@
 #include <sys/cdefs.h>
 #include "types.h"
 #include <sys/intr.h>
+#include <sys/mutex.h>
 
 #include <string.h>
 #include <stdio.h>
@@ -54,6 +55,9 @@ void splx(ipl_t);
 int tsleep(void *ident, int pri, const char *wmesg, int timo);
 void wakeup(void *ident);
 void wakeup_one(void *ident);
+/* kpause(9): a timed, identified sleep; the imported drivers never
+ * hand a lock in */
+int kpause(const char *ident, bool nlocked, int timo, kmutex_t *lock);
 
 int uimin(int a, int b);
 int uimax(int a, int b);

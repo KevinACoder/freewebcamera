@@ -29,9 +29,17 @@
 
 #define Hz 100
 
-#endif /* _SYS_PARAM_H_ */
-
 /* the drivers only need it as a size constant */
 #ifndef PAGE_SIZE
 #define PAGE_SIZE 4096
 #endif
+
+/* hz/mstohz live in kernel.h too; the imported drivers include only
+ * param.h and call mstohz - identical definitions, so including both
+ * headers stays benign */
+extern int hz;
+#ifndef mstohz
+#define mstohz(ms) ((ms) * hz / 1000)
+#endif
+
+#endif /* _SYS_PARAM_H_ */

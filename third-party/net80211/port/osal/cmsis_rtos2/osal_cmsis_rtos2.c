@@ -31,6 +31,7 @@
 #include <sys/callout.h>
 #include <sys/kernel.h>
 #include <sys/intr.h>
+#include <sys/kthread.h>
 #include <sys/endian.h>
 
 #include "wlan_port_cmsis.h"
@@ -38,6 +39,10 @@
 /* the compat malloc/free macros must not intercept the host calls */
 #undef malloc
 #undef free
+
+/* provided by the environment (wlan_adapter.c); the same primitive the
+ * usbdi shim workers run on */
+extern void *wlan_port_thread_create(void *(*run)(void *), void *arg);
 
 #define WLAN_HZ 100
 
@@ -707,8 +712,73 @@ void wakeup(void *ident) {
 	osSemaphoreRelease(wlan_tsleep_sem);
 }
 
+int kpause(const char *ident, bool nlocked, int timo, kmutex_t *lock) {
+	(void) nlocked;
+	(void) lock;
+	return tsleep((void *) ident, 0, ident, timo);
+}
+
 void wakeup_one(void *ident) {
 	wakeup(ident);
+}
+
+/* ------------------------------------------------------------------ */
+/* kthread(9): kthreads run on the port worker primitive (the same
+ * usb_osal thread the usbdi shim workers use; ThreadX completes a
+ * thread when its entry returns). The lwp_t handle is only an "is the
+ * worker alive" flag to the drivers - they clear it themselves on
+ * exit. Each create allocates a TCB block from the CherryUSB byte
+ * pool that is not reclaimed on exit: wlan up/down cycles are bounded
+ * in this harness. */
+
+struct wlan_kthread_start {
+	void (*fn)(void *);
+	void *arg;
+};
+
+static void wlan_kthread_trampoline(void *v) {
+	struct wlan_kthread_start start = *(struct wlan_kthread_start *) v;
+
+	wlan_osal_free(v);
+	start.fn(start.arg);
+}
+
+int kthread_create(pri_t pri, int flags, struct cpu_info *ci,
+    void (*func)(void *), void *arg, lwp_t **lwpp, const char *fmt, ...) {
+	struct wlan_kthread_start *start;
+	lwp_t lwp;
+
+	(void) pri;
+	(void) flags;
+	(void) ci;
+	(void) fmt;
+
+	start = wlan_osal_alloc(sizeof(*start));
+	if (start == NULL) {
+		return ENOMEM;
+	}
+	start->fn = func;
+	start->arg = arg;
+	lwp = wlan_port_thread_create(wlan_kthread_trampoline, start);
+	if (lwp == NULL) {
+		wlan_osal_free(start);
+		return ENOMEM;
+	}
+	if (lwpp != NULL) {
+		*lwpp = lwp;
+	}
+	return 0;
+}
+
+void kthread_exit(int code) {
+	(void) code;
+	/* park here if the CMSIS layer has no terminate; a terminated or
+	 * parked worker both read as "gone" to the drivers (they clear
+	 * sc_worker themselves before calling this). */
+	osThreadTerminate(osThreadGetId());
+	for (;;) {
+		osDelay(1);
+	}
 }
 
 /* ------------------------------------------------------------------ */

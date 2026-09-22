@@ -190,6 +190,8 @@ struct ifnet {
 #define if_statset(ifp, x, n) (((ifp)->if_data.x) = (n))
 #define IF_STATGET(ifp, x) ((ifp)->if_data.x)
 
+void if_set_sadl(struct ifnet *ifp, const void *lla, unsigned char salen,
+    int is_unix);
 int if_initialize(struct ifnet *ifp);
 void if_register(struct ifnet *ifp);
 void if_detach(struct ifnet *ifp);

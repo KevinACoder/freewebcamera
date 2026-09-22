@@ -217,6 +217,24 @@ uint64_t ifmedia_baudrate(int mword) {
 	return 54000000;
 }
 
+void if_set_sadl(struct ifnet *ifp, const void *lla,
+	unsigned char salen, int is_unix) {
+	struct sockaddr_dl *sdl = ifp->if_sadl;
+
+	(void) is_unix; /* the port only carries sockaddr_dl */
+	if (sdl == NULL) {
+		sdl = &ifp->if_sadl_storage;
+		memset(sdl, 0, sizeof(*sdl));
+		sdl->sdl_len = (uint8_t) sizeof(*sdl);
+		sdl->sdl_family = 18; /* AF_LINK, kept in sync with socket.h */
+		ifp->if_sadl = sdl;
+	}
+	if (lla != NULL) {
+		memcpy(LLADDR(sdl), lla, salen);
+		sdl->sdl_alen = salen;
+	}
+}
+
 void ether_ifattach(struct ifnet *ifp, const uint8_t *lla) {
 	struct sockaddr_dl *sdl = ifp->if_sadl;
 

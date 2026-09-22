@@ -36,6 +36,12 @@ extern int wlan_urtwn_reg_read(unsigned addr, unsigned *val);
 extern int wlan_urtwn_reg_write(unsigned addr, unsigned val);
 extern void wlan_urtwn_txq_dump(void);
 
+/* register-level debug access (rtw8189f adapter; "wlan reg" falls back
+ * to it when the USB adapter has no device) */
+extern int wlan_rtw8189f_reg_read(unsigned addr, unsigned *val);
+extern int wlan_rtw8189f_reg_write(unsigned addr, unsigned val);
+extern void wlan_rtw8189f_txq_dump(void);
+
 /* callout diagnostic gate (osal layer, see "wlan calib") */
 extern volatile unsigned wlan_callout_fires;
 extern volatile unsigned wlan_callout_sched;
@@ -121,7 +127,11 @@ static int cmd_wlan(int argc, char **argv)
 		unsigned val;
 
 		if (argc >= 3 && strcmp(argv[2], "txq") == 0) {
-			wlan_urtwn_txq_dump();
+			if (wlan_urtwn_reg_read(0x0100u, &val) == 0) {
+				wlan_urtwn_txq_dump();
+			} else {
+				wlan_rtw8189f_txq_dump();
+			}
 			return 0;
 		}
 		if (argc >= 4 && strcmp(argv[2], "read") == 0) {
@@ -129,6 +139,10 @@ static int cmd_wlan(int argc, char **argv)
 			if (wlan_urtwn_reg_read((unsigned) addr, &val) == 0) {
 				csh_printf(csh, "urtwn reg[0x%04lx] = 0x%08x\r\n",
 					   addr & 0xfffful, val);
+			} else if (wlan_rtw8189f_reg_read((unsigned) addr,
+			    &val) == 0) {
+				csh_printf(csh, "rtw8189f reg[0x%04lx] = 0x%08x\r\n",
+					   addr & 0xfffffful, val);
 			} else {
 				csh_printf(csh, "wlan: reg read failed\r\n");
 			}
@@ -137,9 +151,14 @@ static int cmd_wlan(int argc, char **argv)
 		if (argc >= 5 && strcmp(argv[2], "write") == 0) {
 			addr = parse_hex(argv[3]);
 			val = (unsigned) parse_hex(argv[4]);
-			csh_printf(csh, "wlan: reg write %s\r\n",
-				   wlan_urtwn_reg_write((unsigned) addr,
-				   val) == 0 ? "ok" : "failed");
+			if (wlan_urtwn_reg_write((unsigned) addr, val) == 0) {
+				csh_printf(csh, "wlan: reg write ok (urtwn)\r\n");
+			} else if (wlan_rtw8189f_reg_write((unsigned) addr,
+			    val) == 0) {
+				csh_printf(csh, "wlan: reg write ok (rtw8189f)\r\n");
+			} else {
+				csh_printf(csh, "wlan: reg write failed\r\n");
+			}
 			return 0;
 		}
 		csh_printf(csh, "usage: wlan reg read <hexaddr> | "

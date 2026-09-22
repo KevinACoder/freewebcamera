@@ -175,4 +175,40 @@ struct ifnet;
 #define m_set_rcvif(m, ifp) ((m)->m_pkthdr.rcvif = (ifp))
 #define m_get_rcvif(m, ifpp) ((*ifpp) = (struct ifnet *)((m)->m_pkthdr.rcvif))
 
+/* --- mbufq(9): driver-internal mbuf queues (rtw8189f) ---------------------
+ * Singly-linked through m_nextpkt with a tail pointer; the NetBSD
+ * original is a TAILQ but the drivers only use FIFO enqueue/dequeue. */
+#define MBUFQ_HEAD(name)	struct name {	\
+	struct mbuf *mq_head;				\
+	struct mbuf *mq_tail;				\
+	int mq_len;					\
+}
+#define MBUFQ_INIT(q)						\
+	do {							\
+		(q)->mq_head = NULL;				\
+		(q)->mq_tail = NULL;				\
+		(q)->mq_len = 0;				\
+	} while (/*CONSTCOND*/ 0)
+#define MBUFQ_ENQUEUE(q, m)					\
+	do {							\
+		(m)->m_nextpkt = NULL;				\
+		if ((q)->mq_tail != NULL)			\
+			(q)->mq_tail->m_nextpkt = (m);		\
+		else						\
+			(q)->mq_head = (m);			\
+		(q)->mq_tail = (m);				\
+		(q)->mq_len++;					\
+	} while (/*CONSTCOND*/ 0)
+#define MBUFQ_DEQUEUE(q, m)					\
+	do {							\
+		(m) = (q)->mq_head;				\
+		if ((m) != NULL) {				\
+			(q)->mq_head = (m)->m_nextpkt;		\
+			if ((q)->mq_head == NULL)		\
+				(q)->mq_tail = NULL;		\
+			(m)->m_nextpkt = NULL;			\
+			(q)->mq_len--;				\
+		}						\
+	} while (/*CONSTCOND*/ 0)
+
 #endif /* _SYS_MBUF_H_ */
