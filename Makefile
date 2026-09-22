@@ -540,6 +540,156 @@ ADAPTER_SRCS   += port/adapters/cherryusb/usbh_glue.c \
                   port/adapters/cherryusb/xhci/usbh_xhci_glue.c
 endif
 
+# --- wlan: vendored net80211 + wpa_supplicant (M7) -------------------------
+#
+# The net80211 library (third-party/net80211, NetBSD verbatim + the compat
+# shadow headers + its own port layer) is bound into the image in four
+# compile worlds, mirroring the embox lane's build:
+#   BSD world   (-D_KERNEL + the compat/netbsd shadow headers via
+#               -idirafter, NO kernel include paths): the verbatim net80211
+#               core, the AES module, the urtwn driver.
+#   host world  (INC_ADAPTER + the library's port_config.h): the CMSIS-RTOS2
+#               OSAL, the firmware resolver, the lwIP netif and the cherryusb
+#               glue - the parts the embox lane keeps in its net_bridge.
+#   wpa world   (-w + wpa_port_config.h forced): the PSK-only hostap file
+#               set and the CMSIS supplicant glue. No BSD headers.
+#   wpabsd      (BSD + wpa flags): the two translation units that call
+#               net80211 from the supplicant - driver_net80211.c and
+#               l2_packet_net80211.c.
+# The adapter (port/adapters/net80211/) carries the registry, the worker
+# threads, the heap/console bindings and the shell command.
+# Claims happen on the CherryUSB hub thread during enumeration, which is
+# why app/main.c calls wlan_start() (the OSAL services + firmware registry)
+# before usb_start(); the lwIP netif registers lazily after tcpip_init.
+
+NET80211_BSD_SRCS := \
+	third-party/net80211/net80211/ieee80211.c \
+	third-party/net80211/net80211/ieee80211_amrr.c \
+	third-party/net80211/net80211/ieee80211_crypto.c \
+	third-party/net80211/net80211/ieee80211_crypto_ccmp.c \
+	third-party/net80211/net80211/ieee80211_crypto_none.c \
+	third-party/net80211/net80211/ieee80211_input.c \
+	third-party/net80211/net80211/ieee80211_netbsd.c \
+	third-party/net80211/net80211/ieee80211_node.c \
+	third-party/net80211/net80211/ieee80211_output.c \
+	third-party/net80211/net80211/ieee80211_proto.c \
+	third-party/net80211/crypto/aes/aes_bear.c \
+	third-party/net80211/crypto/aes/aes_ccm.c \
+	third-party/net80211/crypto/aes/aes_ccm_mbuf.c \
+	third-party/net80211/crypto/aes/aes_ct.c \
+	third-party/net80211/crypto/aes/aes_ct_dec.c \
+	third-party/net80211/crypto/aes/aes_ct_enc.c \
+	third-party/net80211/driver/urtwn/urtwn_reg.c
+
+NET80211_HOST_SRCS := \
+	third-party/net80211/port/aes_impl_compat.c \
+	third-party/net80211/port/osal/embox/port_core.c \
+	third-party/net80211/port/net/embox/bsd_mbuf.c \
+	third-party/net80211/port/net/embox/bsd_ifnet.c \
+	third-party/net80211/port/osal/cmsis_rtos2/osal_cmsis_rtos2.c \
+	third-party/net80211/port/osal/cmsis_rtos2/firmware_cmsis.c \
+	third-party/net80211/port/net/lwip/lwip_netif.c \
+	third-party/net80211/port/bus/usb/cherryusb/usbdi_compat.c \
+	third-party/net80211/port/bus/usb/cherryusb/usbh_urtwn_class.c
+
+NET80211_ADAPTER_SRCS := \
+	port/adapters/net80211/wlan_adapter.c \
+	port/adapters/net80211/wlan_console.c \
+	port/adapters/net80211/wlan_cmds.c \
+	port/adapters/net80211/fw_rtl8188eufw.c
+
+# The PSK-only file set (no EAP/WPS/P2P/ctrl-iface/SME), the same list the
+# embox lane compiles from this fork.
+WPA_CORE_SRCS := \
+	third-party/wpa_supplicant/src/common/wpa_common.c \
+	third-party/wpa_supplicant/src/common/ieee802_11_common.c \
+	third-party/wpa_supplicant/src/common/hw_features_common.c \
+	third-party/wpa_supplicant/src/drivers/driver_common.c \
+	third-party/wpa_supplicant/src/drivers/drivers.c \
+	third-party/wpa_supplicant/src/rsn_supp/wpa.c \
+	third-party/wpa_supplicant/src/rsn_supp/wpa_ie.c \
+	third-party/wpa_supplicant/src/rsn_supp/pmksa_cache.c \
+	third-party/wpa_supplicant/src/rsn_supp/preauth.c \
+	third-party/wpa_supplicant/src/utils/common.c \
+	third-party/wpa_supplicant/src/utils/wpabuf.c \
+	third-party/wpa_supplicant/src/utils/base64.c \
+	third-party/wpa_supplicant/src/utils/bitfield.c \
+	third-party/wpa_supplicant/src/utils/wpa_debug.c \
+	third-party/wpa_supplicant/src/crypto/crypto_internal.c \
+	third-party/wpa_supplicant/src/crypto/aes-internal.c \
+	third-party/wpa_supplicant/src/crypto/aes-internal-dec.c \
+	third-party/wpa_supplicant/src/crypto/aes-internal-enc.c \
+	third-party/wpa_supplicant/src/crypto/aes-wrap.c \
+	third-party/wpa_supplicant/src/crypto/aes-unwrap.c \
+	third-party/wpa_supplicant/src/crypto/aes-omac1.c \
+	third-party/wpa_supplicant/src/crypto/sha1.c \
+	third-party/wpa_supplicant/src/crypto/sha1-internal.c \
+	third-party/wpa_supplicant/src/crypto/sha1-prf.c \
+	third-party/wpa_supplicant/src/crypto/sha1-pbkdf2.c \
+	third-party/wpa_supplicant/src/crypto/md5.c \
+	third-party/wpa_supplicant/src/crypto/md5-internal.c \
+	third-party/wpa_supplicant/src/crypto/rc4.c \
+	third-party/wpa_supplicant/src/crypto/sha256.c \
+	third-party/wpa_supplicant/src/crypto/sha256-internal.c \
+	third-party/wpa_supplicant/src/crypto/sha256-prf.c \
+	third-party/wpa_supplicant/src/crypto/tls_none.c \
+	third-party/wpa_supplicant/wpa_supplicant/wpa_supplicant.c \
+	third-party/wpa_supplicant/wpa_supplicant/events.c \
+	third-party/wpa_supplicant/wpa_supplicant/scan.c \
+	third-party/wpa_supplicant/wpa_supplicant/bss.c \
+	third-party/wpa_supplicant/wpa_supplicant/config.c \
+	third-party/wpa_supplicant/wpa_supplicant/config_none.c \
+	third-party/wpa_supplicant/wpa_supplicant/notify.c \
+	third-party/wpa_supplicant/wpa_supplicant/wpas_glue.c \
+	third-party/wpa_supplicant/wpa_supplicant/bssid_ignore.c \
+	third-party/wpa_supplicant/wpa_supplicant/eap_register.c \
+	third-party/wpa_supplicant/wpa_supplicant/op_classes.c \
+	third-party/wpa_supplicant/wpa_supplicant/rrm.c \
+	third-party/wpa_supplicant/wpa_supplicant/robust_av.c
+
+WPA_PORT_SRCS := \
+	port/adapters/wpa_supplicant/os_port.c \
+	port/adapters/wpa_supplicant/eloop_port.c \
+	port/adapters/wpa_supplicant/supp_main_cmsis.c \
+	port/adapters/wpa_supplicant/wpa_cmd.c \
+	port/adapters/wpa_supplicant/l2_packet_net80211.c \
+	port/adapters/wpa_supplicant/driver_net80211.c
+
+ADAPTER_SRCS += $(NET80211_ADAPTER_SRCS)
+
+INC_ADAPTER += -Ithird-party/net80211 \
+	-Ithird-party/net80211/port/osal/cmsis_rtos2/compat \
+	-Ithird-party/net80211/port/net/lwip \
+	-Iport/adapters/net80211 \
+	-Iport/adapters/wpa_supplicant \
+	-Iport/adapters/wpa_supplicant/shim \
+	-Ithird-party/wpa_supplicant/src \
+	-Ithird-party/wpa_supplicant/src/utils \
+	-Ithird-party/wpa_supplicant/src/drivers \
+	-Ithird-party/wpa_supplicant/src/l2_packet \
+	-Ithird-party/wpa_supplicant/wpa_supplicant
+
+# BSD world: the compat shadow headers sit AFTER the system directories
+# (-idirafter) so libc headers keep winning where both exist.
+NET80211_BSD_INC := -Ithird-party/net80211 \
+	-Ithird-party/net80211/port/osal/cmsis_rtos2/compat \
+	-idirafter third-party/net80211/compat/netbsd
+NET80211_BSD_CFG := -D_KERNEL -D_COMPAT_SYS_SYSCTL_H_ -include stdarg.h \
+	-include third-party/net80211/port/port_config_bsd.h
+NET80211_HOST_CFG := -D_KERNEL -include stdarg.h \
+	-include third-party/net80211/port/port_config.h
+# shim/ first: minimal net/if.h + netinet/in.h for the wpa world (newlib
+# has none and the compat shadow would drag the BSD malloc macros in).
+WPA_INC := -Iport/adapters/wpa_supplicant/shim \
+	-Ithird-party/wpa_supplicant \
+	-Ithird-party/wpa_supplicant/src \
+	-Ithird-party/wpa_supplicant/src/utils \
+	-Ithird-party/wpa_supplicant/src/drivers \
+	-Ithird-party/wpa_supplicant/src/l2_packet \
+	-Ithird-party/wpa_supplicant/wpa_supplicant \
+	-Iport/adapters/wpa_supplicant
+WPA_CFG := -w -include stdarg.h -include port/adapters/wpa_supplicant/wpa_port_config.h
+
 # The core count and the HCD selection both change codegen everywhere but
 # leave no trace make's timestamp logic can see: a SMP_CORES=2 build after a
 # =4 build (or EHCI_ONLY=1 after the default) would silently relink stale
@@ -576,7 +726,8 @@ endif
 
 # --- rules ----------------------------------------------------------------
 
-	C_SRCS := $(KERNEL_SRCS) $(LWIP_SRCS) $(FATFS_SRCS) $(SDMMC_SRCS) $(CHERRYUSB_SRCS) $(ARCH_SRCS) $(ADAPTER_SRCS) $(DRIVER_SRCS) $(PLAT_SRCS) $(APP_SRCS)
+	C_SRCS := $(KERNEL_SRCS) $(LWIP_SRCS) $(FATFS_SRCS) $(SDMMC_SRCS) $(CHERRYUSB_SRCS) $(ARCH_SRCS) $(ADAPTER_SRCS) $(DRIVER_SRCS) $(PLAT_SRCS) $(APP_SRCS) \
+		$(NET80211_BSD_SRCS) $(NET80211_HOST_SRCS) $(WPA_CORE_SRCS) $(WPA_PORT_SRCS)
 OBJS := $(addprefix $(BUILD)/,$(C_SRCS:.c=.o)) $(addprefix $(BUILD)/,$(ASM_SRCS:.S=.o))
 DEPS := $(OBJS:.o=.d)
 
@@ -584,6 +735,39 @@ DEPS := $(OBJS:.o=.d)
 $(BUILD)/third-party/%.o: third-party/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) -MMD -MP -c $< -o $@
+
+# The net80211/wpa worlds get their own rules: the stem-specific patterns
+# win make's shortest-stem match over the generic third-party/%.o rule.
+# BSD world (verbatim NetBSD): -w silences the vanilla tree's own warnings;
+# no kernel include paths reach it.
+$(BUILD)/third-party/net80211/%.o: third-party/net80211/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -w $(INC_COMMON) $(NET80211_BSD_INC) $(NET80211_BSD_CFG) -MMD -MP -c $< -o $@
+
+# The library's host-world units: CMSIS OSAL, lwIP netif, cherryusb glue.
+$(BUILD)/third-party/net80211/port/%.o: third-party/net80211/port/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(NET80211_BSD_INC) $(NET80211_HOST_CFG) -MMD -MP -c $< -o $@
+
+# The hostap tree: PSK-only set, wpa_port_config.h forced everywhere.
+$(BUILD)/third-party/wpa_supplicant/%.o: third-party/wpa_supplicant/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(WPA_INC) $(WPA_CFG) -MMD -MP -c $< -o $@
+
+# The supplicant glue: wpa world flags over the adapter include set.
+$(BUILD)/port/adapters/wpa_supplicant/%.o: port/adapters/wpa_supplicant/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(WPA_INC) $(WPA_CFG) -MMD -MP -c $< -o $@
+
+# The two both-worlds units: they call net80211 directly (BSD world) and
+# link into the supplicant (wpa world) - exactly the embox lane's split.
+$(BUILD)/port/adapters/wpa_supplicant/driver_net80211.o: port/adapters/wpa_supplicant/driver_net80211.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(NET80211_BSD_INC) $(NET80211_BSD_CFG) $(WPA_INC) $(WPA_CFG) -MMD -MP -c $< -o $@
+
+$(BUILD)/port/adapters/wpa_supplicant/l2_packet_net80211.o: port/adapters/wpa_supplicant/l2_packet_net80211.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(NET80211_BSD_INC) $(NET80211_BSD_CFG) $(WPA_INC) $(WPA_CFG) -MMD -MP -c $< -o $@
 
 $(BUILD)/port/adapters/%.o: port/adapters/%.c
 	@mkdir -p $(dir $@)
@@ -685,6 +869,7 @@ STUB_SRCS := \
 	port/adapters/stub/cmsis_os2_stub.c \
 	port/adapters/stub/shell_stub.c \
 	port/adapters/stub/net_stub.c \
+	port/adapters/stub/wlan_stub.c \
 	port/adapters/stub/fs_stub.c \
 	port/adapters/stub/sdio_stub.c \
 	port/adapters/stub/smp_stub.c \

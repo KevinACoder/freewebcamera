@@ -31,6 +31,7 @@
 #include "sdio.h"
 #include "shell.h"
 #include "usb.h"
+#include "wlan.h"
 
 /* Image identity: same app builds against either kernel (D39 comparison
  * line). The banner is how the two images are told apart on the console and
@@ -454,6 +455,15 @@ static void task_sdio_start(void *argument)
 static void task_usb_start(void *argument)
 {
 	(void)argument;
+
+	/* The wlan services (locks, sleeps, firmware registry) must exist
+	 * before enumeration: the CherryUSB class hook attaches a matched
+	 * adapter on the hub thread, inside usb_start(). The radio itself
+	 * stays down until the shell (`wlan scan`) or the supplicant
+	 * (`wpa start`) drives it. */
+	if (wlan_start() != 0) {
+		board_log("wlan: FAIL\n");
+	}
 
 	if (usb_start() != 0) {
 		board_log("usb: FAIL\n");
