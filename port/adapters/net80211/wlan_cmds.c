@@ -126,23 +126,27 @@ static int cmd_wlan(int argc, char **argv)
 		unsigned long addr;
 		unsigned val;
 
+		/* dispatch order = adapter priority: rtw8189f (SDIO, the
+		 * netif owner when present) first, urtwn (USB dongle)
+		 * second - with both attached the urtwn read would still
+		 * succeed and dump the wrong chip. */
 		if (argc >= 3 && strcmp(argv[2], "txq") == 0) {
-			if (wlan_urtwn_reg_read(0x0100u, &val) == 0) {
-				wlan_urtwn_txq_dump();
-			} else {
+			if (wlan_rtw8189f_reg_read(0x0100u, &val) == 0) {
 				wlan_rtw8189f_txq_dump();
+			} else {
+				wlan_urtwn_txq_dump();
 			}
 			return 0;
 		}
 		if (argc >= 4 && strcmp(argv[2], "read") == 0) {
 			addr = parse_hex(argv[3]);
-			if (wlan_urtwn_reg_read((unsigned) addr, &val) == 0) {
-				csh_printf(csh, "urtwn reg[0x%04lx] = 0x%08x\r\n",
-					   addr & 0xfffful, val);
-			} else if (wlan_rtw8189f_reg_read((unsigned) addr,
-			    &val) == 0) {
+			if (wlan_rtw8189f_reg_read((unsigned) addr, &val) == 0) {
 				csh_printf(csh, "rtw8189f reg[0x%04lx] = 0x%08x\r\n",
 					   addr & 0xfffffful, val);
+			} else if (wlan_urtwn_reg_read((unsigned) addr,
+			    &val) == 0) {
+				csh_printf(csh, "urtwn reg[0x%04lx] = 0x%08x\r\n",
+					   addr & 0xfffful, val);
 			} else {
 				csh_printf(csh, "wlan: reg read failed\r\n");
 			}
@@ -151,11 +155,11 @@ static int cmd_wlan(int argc, char **argv)
 		if (argc >= 5 && strcmp(argv[2], "write") == 0) {
 			addr = parse_hex(argv[3]);
 			val = (unsigned) parse_hex(argv[4]);
-			if (wlan_urtwn_reg_write((unsigned) addr, val) == 0) {
-				csh_printf(csh, "wlan: reg write ok (urtwn)\r\n");
-			} else if (wlan_rtw8189f_reg_write((unsigned) addr,
-			    val) == 0) {
+			if (wlan_rtw8189f_reg_write((unsigned) addr, val) == 0) {
 				csh_printf(csh, "wlan: reg write ok (rtw8189f)\r\n");
+			} else if (wlan_urtwn_reg_write((unsigned) addr,
+			    val) == 0) {
+				csh_printf(csh, "wlan: reg write ok (urtwn)\r\n");
 			} else {
 				csh_printf(csh, "wlan: reg write failed\r\n");
 			}
