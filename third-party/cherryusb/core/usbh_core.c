@@ -634,7 +634,14 @@ void usbh_hubport_release(struct usbh_hubport *hport)
 
 static void usbh_bus_init(struct usbh_bus *bus, uint8_t busid, uintptr_t reg_base)
 {
+    /* A multi-HCD port registers its ops BEFORE usbh_initialize: on SMP the
+     * hub thread starts running usb_hc_init (through the dispatcher) the
+     * moment usbh_hub_initialize creates it, so registering later is a
+     * race. Keep the pre-registration across the wipe below. */
+    const struct usbh_hcd_ops *ops = bus->hcd_ops;
+
     memset(bus, 0, sizeof(struct usbh_bus));
+    bus->hcd_ops = ops;
     bus->busid = busid;
     bus->hcd.hcd_id = busid;
     bus->hcd.reg_base = reg_base;

@@ -30,6 +30,7 @@
 #include "usbh_core.h"
 #include "usbh_hub.h"
 #include "usb_hc_ehci.h"
+#include "usbh_platform.h"
 #ifdef CONFIG_USBHOST_MULTI_HCD
 #include "xhci/usbh_xhci_glue.h"
 #include "xhci/usb_hc_xhci.h"
@@ -270,11 +271,16 @@ static int usbh_bus_start(uint8_t busid)
 	if (USBH_BUS_IS_EHCI(busid)) {
 		struct ehci_hcd *hcd = &g_ehci_hcd[busid];
 
+		/* Register BEFORE usbh_initialize: on SMP the hub thread can
+		 * start running (its entry calls usb_hc_init through the
+		 * dispatcher) the moment the thread exists. usbh_hcd_register
+		 * only writes the static bus slot, it needs nothing from
+		 * usbh_initialize. */
+		usbh_hcd_register(busid, &usbh_ehci_ops);
 		if (usbh_initialize(busid, USBH_EHCI_BASE(busid),
 				    usbh_bus_event) != 0) {
 			return -1;
 		}
-		usbh_hcd_register(busid, &usbh_ehci_ops);
 
 		/* hcor_offset is read from the capability block mid-init; only
 		 * then does an HCOR access (usbintr below) hit the operational
@@ -304,10 +310,11 @@ static int usbh_bus_start(uint8_t busid)
 	if (USBH_XHCI_INST(busid) >= USBH_XHCI_NUM) {
 		return -1;
 	}
+	/* Register before initialize - same SMP ordering as the EHCI branch. */
+	usbh_hcd_register(busid, &usbh_xhci_ops);
 	if (usbh_initialize(busid, USBH_XHCI_BASE(busid), usbh_bus_event) != 0) {
 		return -1;
 	}
-	usbh_hcd_register(busid, &usbh_xhci_ops);
 
 	/* The glue gates register access on its own "MMIO alive" flag, so
 	 * this poll is safe from the first iteration on; the controller
@@ -388,7 +395,27 @@ int usb_start(void)
 	usb_osal_init(NULL, 0U);
 #endif
 
+	/* Bring the whole USB domain up HERE, in task context, before any hub
+	 * thread exists: both domain sequences carry SRST pulses (con14 resets
+	 * BOTH EHCI roots, con9 the DWC3 cores), and on SMP the four hub
+	 * threads race these once-guards on different cores. Measured
+	 * 20260922-R1: the xHCI domain's con14 pulse landed after both EHCI
+	 * roots had already inited and been kicked - the panel hubs went
+	 * permanently silent (no IRQ, no enumeration, and no error anywhere:
+	 * the roothub just reads back reset values). Running every domain to
+	 * completion first puts all pulses ahead of all controller inits, and
+	 * turns the low_level_init domain calls in the hub threads into
+	 * no-ops. Order inside this block is the NetBSD one (usb2phy1's
+	 * release-only writes never assert anything the xHCI side owns). */
+	usbh_rk3568_usb2phy1_domain_init();
+	usbh_rk3568_usb3otg_domain_init(0U);
+	usbh_rk3568_usb3otg_domain_init(1U);
+
+#ifdef CONFIG_USBHOST_MULTI_HCD
 	for (busid = 0U; busid < (USBH_EHCI_NUM + USBH_XHCI_NUM); busid++) {
+#else
+	for (busid = 0U; busid < USBH_EHCI_NUM; busid++) {
+#endif
 		if (usbh_bus_start(busid) != 0) {
 			usbh_console_printf("usbh: bus%u start FAIL\r\n",
 					    busid);
