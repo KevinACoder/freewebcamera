@@ -678,53 +678,82 @@ uint32_t osKernelGetSysTimerFreq(void)
  * reported rather than silently corrupting the save stack. */
 #define MAX_KERNEL_LOCK_DEPTH	8
 
-static uint32_t kernel_lock_count;
-static UINT kernel_lock_daif[MAX_KERNEL_LOCK_DEPTH];
+/* DAIF and nesting state belong to a core, not to the shared SMP lock. */
+#define KERNEL_LOCK_CORES 4
+static uint32_t kernel_lock_count[KERNEL_LOCK_CORES];
+static UINT kernel_lock_daif[KERNEL_LOCK_CORES][MAX_KERNEL_LOCK_DEPTH];
+
+static UINT kernel_lock_core_id(void)
+{
+	uint64_t mpidr;
+
+	__asm__ volatile ("mrs %0, mpidr_el1" : "=r"(mpidr));
+	return (UINT)((mpidr >> 8) & 0xFu);
+}
 
 int32_t osKernelLock(void)
 {
+	UINT core = kernel_lock_core_id();
+	uint32_t previous;
+
 	if (kernel_state != osKernelRunning) {
 		return (int32_t)osError;
 	}
-	if (kernel_lock_count >= MAX_KERNEL_LOCK_DEPTH) {
+	if (core >= KERNEL_LOCK_CORES ||
+	    kernel_lock_count[core] >= MAX_KERNEL_LOCK_DEPTH) {
 		return (int32_t)osError;
 	}
-	kernel_lock_daif[kernel_lock_count] = _tx_thread_smp_protect();
-	kernel_lock_count++;
-	return (int32_t)kernel_lock_count;
+	previous = kernel_lock_count[core];
+	kernel_lock_daif[core][previous] = _tx_thread_smp_protect();
+	kernel_lock_count[core]++;
+	return (int32_t)previous;
 }
 
 int32_t osKernelUnlock(void)
 {
+	UINT core = kernel_lock_core_id();
+	uint32_t previous;
+
 	if (kernel_state != osKernelRunning) {
 		return (int32_t)osError;
 	}
-	if (kernel_lock_count > 0U) {
-		kernel_lock_count--;
-		_tx_thread_smp_unprotect(kernel_lock_daif[kernel_lock_count]);
+	if (core >= KERNEL_LOCK_CORES) {
+		return (int32_t)osError;
 	}
-	return (int32_t)kernel_lock_count;
+	previous = kernel_lock_count[core];
+	if (previous > 0U) {
+		kernel_lock_count[core]--;
+		_tx_thread_smp_unprotect(
+		    kernel_lock_daif[core][kernel_lock_count[core]]);
+	}
+	return (int32_t)previous;
 }
 
 int32_t osKernelRestoreLock(int32_t lock)
 {
+	UINT core = kernel_lock_core_id();
+
 	if (kernel_state != osKernelRunning) {
 		return (int32_t)osError;
 	}
 	if (lock < 0) {
 		return (int32_t)osErrorParameter;
 	}
-	while (kernel_lock_count > (uint32_t)lock) {
+	if (core >= KERNEL_LOCK_CORES) {
+		return (int32_t)osError;
+	}
+	while (kernel_lock_count[core] > (uint32_t)lock) {
 		(void)osKernelUnlock();
 	}
-	while (kernel_lock_count < (uint32_t)lock) {
-		if (kernel_lock_count >= MAX_KERNEL_LOCK_DEPTH) {
+	while (kernel_lock_count[core] < (uint32_t)lock) {
+		if (kernel_lock_count[core] >= MAX_KERNEL_LOCK_DEPTH) {
 			return (int32_t)osError;
 		}
-		kernel_lock_daif[kernel_lock_count] = _tx_thread_smp_protect();
-		kernel_lock_count++;
+		kernel_lock_daif[core][kernel_lock_count[core]] =
+		    _tx_thread_smp_protect();
+		kernel_lock_count[core]++;
 	}
-	return (int32_t)kernel_lock_count;
+	return (int32_t)kernel_lock_count[core];
 }
 
 /* --- event flags ----------------------------------------------------------- */
