@@ -722,10 +722,6 @@ static struct ehci_qh_hw *ehci_intr_urb_init(struct usbh_bus *bus, struct usbh_u
     return qh;
 }
 
-static volatile uint32_t s_ehci_dbg_killed_consume;
-static volatile uint32_t s_ehci_dbg_bulk_done;
-static volatile uint32_t s_ehci_dbg_kill_seq;
-
 static void ehci_urb_waitup(struct usbh_bus *bus, struct usbh_urb *urb)
 {
     struct ehci_qh_hw *qh;
@@ -738,16 +734,7 @@ static void ehci_urb_waitup(struct usbh_bus *bus, struct usbh_urb *urb)
          * every later iaad replays waitup on dead or rebound state. */
         qh->remove_in_iaad = 0;
         qh->killed = 2U;
-        s_ehci_dbg_killed_consume++;
-        if (s_ehci_dbg_killed_consume <= 8U) {
-            USB_LOG_RAW("[ehci-dbg] waitup killed handshake #%u urb=%p\r\n",
-                        s_ehci_dbg_killed_consume, (void *)urb);
-        }
         return;
-    }
-
-    if (USB_GET_ENDPOINT_TYPE(urb->ep->bmAttributes) == USB_ENDPOINT_TYPE_BULK) {
-        s_ehci_dbg_bulk_done++;
     }
 
     qh->remove_in_iaad = 0;
@@ -1467,12 +1454,6 @@ int usbh_kill_urb(struct usbh_urb *urb)
 
     bus = urb->hport->bus;
 
-    uint32_t kill_seq = ++s_ehci_dbg_kill_seq;
-    if (kill_seq <= 8U) {
-        USB_LOG_RAW("[ehci-dbg] kill#%u urb=%p bulk_done=%u\r\n",
-                    kill_seq, (void *)urb, s_ehci_dbg_bulk_done);
-    }
-
 #ifdef CONFIG_USB_EHCI_WITH_OHCI
     if (EHCI_HCOR->portsc[urb->hport->port - 1] & EHCI_PORTSC_OWNER) {
         return ohci_kill_urb(urb);
@@ -1547,8 +1528,6 @@ int usbh_kill_urb(struct usbh_urb *urb)
                 if (!orphan) {
                     return -USB_ERR_TIMEOUT;
                 }
-                USB_LOG_RAW("[ehci-dbg] kill handshake timeout, orphan completion urb=%p\r\n",
-                            (void *)urb);
                 break;
             }
         }
