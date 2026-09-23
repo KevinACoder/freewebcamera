@@ -923,9 +923,14 @@ rtw88_usb_parse(struct rtw88_chip *chip, struct usbd_interface *iface)
 int
 rtw88_usb_attach(struct rtw88_chip *chip, struct usbd_interface *iface)
 {
+	extern unsigned int rtw_debug_mask;
 	struct rtw88_usb *usb = &chip->usb;
 	struct rtw_dev *rtwdev = &chip->rtwdev;
 	int i, ret, ep, data_ep;
+
+	/* forensics 2026-09-24: USB+RX demux visibility until the ladder
+	 * passes; `wlan dbg` still needs an argv fix */
+	rtw_debug_mask = 0x00080004u;
 
 	usb->rtwdev = rtwdev;
 	netbsd_mutex_init(&usb->reg_mtx);

@@ -2189,6 +2189,14 @@ static void xhci_complete_td(struct xhci_hcd *hcd, struct xhci_dev *dev,
     xhci_ring_unlock(ring, save);
 
     if (!killed) {
+        /* 异步 IN 完成的缓存维护: 设备 DMA 写完的缓冲必须先 invalidate
+         * 再交给驱动读。同步等待路径(:683/:1710)各自做过, 异步(中断/
+         * 轮询)完成路径此前完全缺失 —— CPU 读到分配期 memset 的零行,
+         * demux 全是 pkt_len=0 的 "skipping short packet"(2026-09-24
+         * 8821CU 信标全丢的直接原因) */
+        if (got != 0U && (urb->ep->bEndpointAddress & 0x80U) != 0U) {
+            xhci_dcache_invalidate(urb->transfer_buffer, got);
+        }
         xhci_giveback(urb, (error == 0) ? (int)got : error, got);
         /* 武装队列头: 完成一个 pop 下一个(Linux urb_list 语义)。建环失败
          * 连环归还(环满/参数坏不该饿死后续 urb)。 */
