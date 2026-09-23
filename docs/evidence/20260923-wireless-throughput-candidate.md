@@ -9,8 +9,8 @@ BE→低队列与芯片初始化中的 TRXDMA 映射一致，FREE_TXPG 轮询随
 管理帧与组播保持原队列和速率。`wlan select rtw8189f` 在 `wpa start`
 前锁定诊断目标，`wlan status` 显示当前卡及 MAC，`wlan reg` 随所选卡分发。
 
-本轮 `make all` 通过；ThreadX 镜像 sha256：
-`0b5095489003f5440a57d68352b1b64c10f21d20c82641e45c6340d0912a88c1`。
+本轮 `make all` 通过；锁契约修复后 ThreadX 镜像 sha256：
+`c57dd1cc9244fa1cb0240a0ba256e2b43c8cbc5e385feb28ddf8ca27d93adbf5`。
 `make freertos`、`make ktest`、`make gates`（含 K4、clean-room、依赖方向）均通过。
 后续修复 CMSIS `osKernelLock` 返回值契约并重建，板上 24、36、54 Mbps
 上行 30s 分别实测 5.46、5.48、5.58 Mbit/s，均完整结束且无 fatal；
