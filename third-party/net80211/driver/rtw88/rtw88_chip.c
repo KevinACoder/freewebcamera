@@ -713,17 +713,31 @@ rtw88_chip_rx_work(struct work_struct *w)
 				 */
 				if (skb->len < 16 ||
 				    skb->len > RTW88_RX_FRAME_MAX) {
-					rtw_dbg(rtwdev, RTW_DBG_USB,
-					    "dropping garbage frame (len %u)\n",
-					    skb->len);
+					static unsigned garbage_prints;
+
+					garbage_prints++;
+					if (garbage_prints <= 8 ||
+					    (garbage_prints & 0x1ff) == 0) {
+						rtw_dbg(rtwdev, RTW_DBG_USB,
+						    "dropping garbage frame "
+						    "(len %u) (%u)\n",
+						    skb->len, garbage_prints);
+					}
 					rtw88_skb_free(skb);
 					goto next;
 				}
 				fc = le16toh(*(uint16_t *)skb->data);
 				if ((fc & 0x0003) != 0) {
-					rtw_dbg(rtwdev, RTW_DBG_USB,
-					    "dropping frame with fc 0x%04x "
-					    "(len %u)\n", fc, skb->len);
+					static unsigned fc_prints;
+
+					fc_prints++;
+					if (fc_prints <= 8 ||
+					    (fc_prints & 0x1ff) == 0) {
+						rtw_dbg(rtwdev, RTW_DBG_USB,
+						    "dropping frame with fc "
+						    "0x%04x (len %u) (%u)\n",
+						    fc, skb->len, fc_prints);
+					}
 					rtw88_skb_free(skb);
 					goto next;
 				}

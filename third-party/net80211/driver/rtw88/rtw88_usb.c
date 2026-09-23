@@ -617,8 +617,10 @@ rtw88_usb_write_data_h2c(struct rtw_dev *rtwdev, u8 *buf, u32 size)
  */
 #define RTW88_RAWCAP_SLOTS	16
 #define RTW88_RAWCAP_HEAD	64
-#define RTW88_RAWCAP_MID_OFF	576
-#define RTW88_RAWCAP_MID	128
+/* frame start = 24 desc + 32 drvinfo; 160 bytes cover the 802.11
+ * header + fixed fields + the first IEs (SSID) of a beacon */
+#define RTW88_RAWCAP_MID_OFF	56
+#define RTW88_RAWCAP_MID	160
 
 struct rtw88_rawcap_slot {
 	u_int32_t seq;

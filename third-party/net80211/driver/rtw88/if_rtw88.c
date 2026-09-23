@@ -461,6 +461,20 @@ rtw88_rx_frame(void *ctx, const uint8_t *data, size_t len, int rssi)
 
 	if (sc->sc_dying || len == 0)
 		return;
+	{
+		/* delivery forensics: prove what net80211 is handed and
+		 * whether it keeps it (first few frames + every 512th) */
+		static unsigned rx_deliveries;
+
+		rx_deliveries++;
+		if (rx_deliveries <= 4 || (rx_deliveries & 0x1ff) == 0) {
+			printf("rtw88u: delivered #%u len=%zu fc=%04x "
+			    "%02x:%02x:%02x:%02x:%02x:%02x rssi=%d\n",
+			    rx_deliveries, len, data[0] | (data[1] << 8),
+			    data[4], data[5], data[6], data[7], data[8],
+			    data[9], rssi);
+		}
+	}
 	if (len > IEEE80211_MAX_LEN) {
 		/* not a frame net80211 could ever accept: device garbage */
 		if_statinc(ifp, if_ierrors);
