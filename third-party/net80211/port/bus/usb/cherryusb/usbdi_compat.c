@@ -643,13 +643,17 @@ usbd_status usbd_transfer(struct usbd_xfer *xfer) {
 	ret = usbh_submit_urb(&xfer->urb);
 	if (ret != 0) {
 		/* not connected / busy: synthesize the callback so the
-		 * driver can reclaim its tx_data */
+		 * driver can reclaim its tx_data.  Leave the xfer on
+		 * in_flight_xfers: the worker's common path unlinks it
+		 * from both pipe->pending and in_flight_xfers, and a
+		 * second SLIST_REMOVE here would walk the list with an
+		 * element that is no longer on it (undefined in
+		 * NetBSD's SLIST_REMOVE).  wd_deadline is already 0, so
+		 * the watchdog sweep skips it while it waits.
+		 * (net_80211 8505748 同一修复的镜像侧移植) */
 		wlan_usb_stats.submit_fail++;
 		xfer->in_flight = 0;
 		xfer->wd_deadline = 0U;
-		ipl = ipl_save();
-		SLIST_REMOVE(&dev->in_flight_xfers, xfer, usbd_xfer, wd_next);
-		ipl_restore(ipl);
 		xfer->status = usbd_map_err(ret);
 		usbd_ring_post(dev, xfer);
 	}

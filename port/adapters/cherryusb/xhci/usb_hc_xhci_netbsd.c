@@ -30,7 +30,13 @@
  *     SetFeature(PORT_POWER) to a roothub);
  *   - root-hub ClearFeature writes only PP | target W1C bit (PORTSC is
  *     W1C/RW mixed; writing back a stale PED snapshot disables the port -
- *     measured 2026-09-20).
+ *     measured 2026-09-20);
+ *   - per-EP urb gate (CherryUSB contract: one urb in hardware per
+ *     endpoint, extra submits wait on an urb list and are armed on
+ *     completion - the EHCI port's bulk gate is the same shape), plus the
+ *     NetBSD xhci_pipe_restart recovery trio (Stop/Reset Endpoint + Set TR
+ *     Dequeue) so ctrl timeout / STALL / kill_urb no longer leave dead TDs
+ *     jamming the ring (2026-09-23: 8821CU "mac power on failed" cascade).
  *
  * HS/FS (USB2 only - the SS lane's combphy serves SATA). Cache discipline:
  * rings/contexts flushed after build, event ring + output contexts
@@ -127,6 +133,17 @@ void usbh_xhci_irq(uint8_t busid);
 #define CMD_TIMEOUT_MS       5000U /* NetBSD USBD_DEFAULT_TIMEOUT */
 #define CTRL_TIMEOUT_MS      5000U
 
+/* EP 状态(NetBSD xhcireg.h XHCI_EPCTX_0_EPSTATE, EP ctx dword0 [2:0]) */
+#define EP_CTX_0_EPSTATE_GET(x) ((x) & 0x7U)
+#define XHCI_EPSTATE_HALTED     2U
+#define XHCI_EPSTATE_STOPPED    3U
+
+/* 传输事件取证(2026-09-23 rtw88/xHCI 定界轮): 非 SUCCESS 事件全打点,
+ * 定位首因后改 0 */
+#ifndef XHCI_EVENT_DEBUG
+#define XHCI_EVENT_DEBUG 1
+#endif
+
 /* 本 DWC3 寄存器窗只支持 32 位访问: CAPLENGTH/HCIVERSION 这类子字寄存器
  * 用 32 位读 + 移位取字段(NetBSD XHCI_32BIT_ACCESS 的 RMW 语义)。 */
 #define XHCI_HCIVERSION_0_96 0x0096U
@@ -156,6 +173,17 @@ struct xhci_ring {
     uint32_t ep;               /* enqueue index (NetBSD xr_ep) */
     uint8_t cs;                /* consumer/converter cycle (NetBSD xr_cs) */
     uint32_t dequeue;          /* 空间核算用(完成处推进) */
+    /* per-EP urb 闸门(Linux urb_list 语义): 每 EP 硬件 1 个在途(active),
+     * 多余的提交挂 wait 链(经 urb->hcpriv 串单向链), 完成一个 pop 下一个。
+     * EHCI 侧 bulk gate 同型。gate_lock = 本核中断屏蔽 + 原子自旋, 供 ISR
+     * 与多核线程安全共读写字段。cmd_ring 不使用这些字段。 */
+    struct usbh_urb *active;
+    struct usbh_urb *wait_head;
+    struct usbh_urb *wait_tail;
+    struct usbh_urb *killing;  /* 取消中的 urb: 完成事件不再 giveback */
+    volatile uint8_t gate_lock;
+    volatile uint8_t halted;   /* STALL/BABBLE/超时后需 Reset/Stop EP + Set TR Deq */
+    volatile uint8_t recovering; /* Stop/Reset EP + Set TR Deq 恢复窗口: 提交只排队不入环 */
 };
 
 /* 上下文寻址: CSZ(HCCPARAMS1 bit2)决定每上下文 64/32 字节(NetBSD sc_ctxsz)。
@@ -316,6 +344,13 @@ static int xhci_ring_init(struct xhci_ring *ring, uint32_t num_trbs)
     ring->ep = 0;
     ring->cs = 1;
     ring->dequeue = 0;
+    ring->active = NULL;
+    ring->wait_head = NULL;
+    ring->wait_tail = NULL;
+    ring->killing = NULL;
+    ring->gate_lock = 0U;
+    ring->halted = 0U;
+    ring->recovering = 0U;
     /* 不预写 LINK TRB: 到达环尾时随批次写入(NetBSD xhci_ring_put)。 */
     return 0;
 }
@@ -486,9 +521,175 @@ static int xhci_cmd_disable_slot(struct xhci_hcd *hcd, uint8_t slot_id)
     return xhci_do_command(hcd, &trb, CMD_TIMEOUT_MS);
 }
 
+/* ---- 端点恢复命令三件套(NetBSD xhci_reset_endpoint / xhci_stop_endpoint_cmd
+ * / xhci_set_dequeue; 2026-09-23 前本文件只有类型定义没有实现 - STALL/超时
+ * 后端点 halt 无解, 是 8821CU 控制传输级联超时的直接推手) ----
+ * (定义在后文"urb 闸门"一节, 此处前置声明) */
+static void xhci_ring_reset(struct xhci_ring *ring);
+static uint32_t xhci_ring_lock(struct xhci_ring *ring);
+static void xhci_ring_unlock(struct xhci_ring *ring, uint32_t save);
+static void xhci_giveback(struct usbh_urb *urb, int status, uint32_t actual);
+static uint32_t xhci_get_epstate(struct xhci_hcd *hcd, struct xhci_dev *dev,
+                                 uint32_t dci);
+static void xhci_gate_kick(struct xhci_hcd *hcd, struct xhci_dev *dev,
+                           uint32_t dci);
+
+static int xhci_cmd_reset_ep(struct xhci_hcd *hcd, struct xhci_dev *dev,
+                             uint32_t dci)
+{
+    struct xhci_trb trb;
+
+    memset(&trb, 0, sizeof(trb));
+    trb.dw3 = TRB3_TYPE_SET(TRB_TYPE_RESET_EP) | TRB3_SLOT_ID(dev->slot_id) |
+              TRB3_EP_ID(dci);
+    return xhci_do_command(hcd, &trb, CMD_TIMEOUT_MS);
+}
+
+static int xhci_cmd_stop_ep(struct xhci_hcd *hcd, struct xhci_dev *dev,
+                            uint32_t dci)
+{
+    struct xhci_trb trb;
+
+    memset(&trb, 0, sizeof(trb));
+    trb.dw3 = TRB3_TYPE_SET(TRB_TYPE_STOP_EP) | TRB3_SLOT_ID(dev->slot_id) |
+              TRB3_EP_ID(dci);
+    return xhci_do_command(hcd, &trb, CMD_TIMEOUT_MS);
+}
+
+/* Dequeue 指针指回环基址, DCS=新消费者 cycle(NetBSD xhci_set_dequeue:
+ * trb_0 = ring[0] | DCS; 配合 xhci_ring_reset 的 ep=0/cs=1) */
+static int xhci_cmd_set_tr_dequeue(struct xhci_hcd *hcd, struct xhci_dev *dev,
+                                   uint32_t dci, struct xhci_ring *ring)
+{
+    struct xhci_trb trb;
+
+    memset(&trb, 0, sizeof(trb));
+    trb.dw0 = (uint32_t)(uintptr_t)ring->trbs | 1U; /* DCS=1 */
+    trb.dw1 = (uint32_t)((uintptr_t)ring->trbs >> 32);
+    trb.dw3 = TRB3_TYPE_SET(TRB_TYPE_SET_TR_DEQUEUE) |
+              TRB3_SLOT_ID(dev->slot_id) | TRB3_EP_ID(dci);
+    return xhci_do_command(hcd, &trb, CMD_TIMEOUT_MS);
+}
+
+/*
+ * 端点恢复(NetBSD xhci_pipe_restart, xhci.c:2247 形状): 按 EP state 分支
+ * RESET_EP(HALTED)/STOP_EP(其余), 排干在途事件后软件清环, 再无条件
+ * SET_TR_DEQUEUE。线程上下文专用(走同步命令); 勿在持有 ring lock 时调用。
+ * victim 非空 = 取消在途 urb(kill 路径): 先置 killing 标记让在途的
+ * STOPPED/SUCCESS 事件不再 giveback, 由这里按 victim_error 恰好归还一次并
+ * 重臂队列头。victim 为空 = 纯恢复(STALL 后/同步超时后清环), urb 的失败
+ * 状态由调用方自己返回。
+ */
+static int xhci_pipe_recover(struct xhci_hcd *hcd, struct xhci_dev *dev,
+                             uint32_t dci, struct xhci_ring *ring,
+                             struct usbh_urb *victim, int victim_error)
+{
+    uint32_t state, save;
+    uint32_t i;
+    int ret;
+
+    if (victim != NULL) {
+        save = xhci_ring_lock(ring);
+        if (ring->active == victim) {
+            ring->active = NULL;
+        }
+        ring->killing = victim;
+        ring->recovering = 1U; /* 恢复窗口内提交只入队, 由文末 kick 武装 */
+        xhci_ring_unlock(ring, save);
+    }
+    {
+        save = xhci_ring_lock(ring);
+        ring->recovering = 1U;
+        xhci_ring_unlock(ring, save);
+    }
+
+    state = xhci_get_epstate(hcd, dev, dci);
+    if (state == XHCI_EPSTATE_HALTED) {
+        ret = xhci_cmd_reset_ep(hcd, dev, dci);
+    } else if (state != XHCI_EPSTATE_STOPPED) {
+        ret = xhci_cmd_stop_ep(hcd, dev, dci);
+    } else {
+        ret = 0;
+    }
+    if (ret != 0) {
+        USB_LOG_ERR("xhci: recover dci=%u state=%u stop/reset failed ret=%d\r\n",
+                    dci, state, ret);
+        /* 命令失败也继续: NetBSD xhci_abortx 同款, 软件侧照样清环重臂 */
+    }
+
+    /* 排干在途事件(Stop EP 的 STOPPED 传输事件在命令完成事件前后到达;
+     * killing 已置位, 它们不会再触发 giveback) */
+    for (i = 0U; i < 3U; i++) {
+        xhci_event_process(hcd);
+        usb_osal_msleep(1);
+    }
+
+    save = xhci_ring_lock(ring);
+    xhci_ring_reset(ring);
+    xhci_dcache_clean(ring->trbs, ring->num_trbs * TRB_SIZE);
+    ring->halted = 0U;
+    ring->recovering = 0U;
+    xhci_ring_unlock(ring, save);
+
+    ret = xhci_cmd_set_tr_dequeue(hcd, dev, dci, ring);
+    if (ret != 0) {
+        USB_LOG_ERR("xhci: recover dci=%u set tr dequeue failed ret=%d\r\n",
+                    dci, ret);
+    }
+
+    if (victim != NULL) {
+        xhci_giveback(victim, victim_error, 0);
+        xhci_gate_kick(hcd, dev, dci);
+    }
+    return 0;
+}
+
+/* 同步 bulk urb(timeout>0, 现役调用只有 modeswitch 的异步+回调形态之外的
+ * 兜底路径)在锁外轮询事件等完成, 与 queue_control 同款纪律。 */
+static int xhci_bulk_sync_wait(struct xhci_hcd *hcd, struct xhci_dev *dev,
+                               uint32_t dci, struct usbh_urb *urb,
+                               int first_idx)
+{
+    struct xhci_ring *ring = dev->ep_rings[dci];
+    uint8_t *buf = urb->transfer_buffer;
+    uint32_t len = urb->transfer_buffer_length;
+    uint32_t dir_in = (urb->ep->bEndpointAddress & USB2_DIR_IN) != 0U;
+    uint32_t tmo = 0U;
+    int err;
+
+    while (tmo < urb->timeout) {
+        xhci_event_process(hcd);
+        if (ring->tds[first_idx].state != 0U) {
+            break;
+        }
+        usb_osal_msleep(1);
+        tmo++;
+    }
+
+    if (ring->tds[first_idx].state == 1U) {
+        urb->actual_length = ring->tds[first_idx].actual;
+        if (dir_in && urb->actual_length > 0U) {
+            xhci_dcache_invalidate(buf, urb->actual_length);
+        }
+        return 0;
+    }
+    if (ring->tds[first_idx].state == 2U) {
+        err = ring->tds[first_idx].error;
+        if (err == -USB_ERR_STALL) {
+            /* bulk 协议 stall: 先恢复环再返回, 下一次提交不必再踩 halted */
+            (void)xhci_pipe_recover(hcd, dev, dci, ring, NULL, 0);
+        }
+        return err;
+    }
+    /* 超时: 死 TD 不留环(Stop EP + Set TR Dequeue 清环)后再报超时 */
+    (void)xhci_pipe_recover(hcd, dev, dci, ring, NULL, 0);
+    return -USB_ERR_TIMEOUT;
+}
+
 /* NetBSD xhci_host_dequeue: 重编程 ep 上下文前把传输环归零(TRB/td 全清,
  * ep=0, cs=1) - 否则已消费的 TRB 带着 cycle=1 在重臂的 dequeue 上"复活",
- * 控制器会重放旧 TD(2026-09-20: SET_ADDRESS Transaction Error 的根因) */
+ * 控制器会重放旧 TD(2026-09-20: SET_ADDRESS Transaction Error 的根因)。
+ * wait 链不清: 排队的 urb 属于上层 xfer, 归还走 abort/kill 路径。 */
 static void xhci_ring_reset(struct xhci_ring *ring)
 {
     memset(ring->trbs, 0, ring->num_trbs * TRB_SIZE);
@@ -496,6 +697,199 @@ static void xhci_ring_reset(struct xhci_ring *ring)
     ring->ep = 0;
     ring->cs = 1;
     ring->dequeue = 0;
+    ring->active = NULL;
+    ring->killing = NULL;
+}
+
+/* ===================== urb 闸门 ===================== */
+
+/* 本核中断屏蔽(防 ISR 抢自旋造成同核死锁) + 原子自旋(防它核线程)。临界区
+ * 内只有内存写与门铃, 无阻塞调用, 自旋界有限。 */
+static uint32_t xhci_ring_lock(struct xhci_ring *ring)
+{
+    uint32_t save = usb_osal_enter_critical_section();
+
+    while (__atomic_test_and_set(&ring->gate_lock, __ATOMIC_ACQUIRE)) {
+        /* 它核持锁: 自旋等待 */
+    }
+    return save;
+}
+
+static void xhci_ring_unlock(struct xhci_ring *ring, uint32_t save)
+{
+    __atomic_clear(&ring->gate_lock, __ATOMIC_RELEASE);
+    usb_osal_leave_critical_section(save);
+}
+
+static void xhci_giveback(struct usbh_urb *urb, int status, uint32_t actual)
+{
+    urb->actual_length = actual;
+    urb->errorcode = status;
+    if (urb->complete != NULL) {
+        urb->complete(urb->arg, status);
+    }
+}
+
+/* NetBSD xhci_get_epstate: 从输出设备上下文读 EP 状态(先 invalidate) */
+static uint32_t xhci_get_epstate(struct xhci_hcd *hcd, struct xhci_dev *dev,
+                                 uint32_t dci)
+{
+    (void)hcd;
+    xhci_dcache_invalidate(dev->dev_ctx, dev->ctxsz * (1U + XHCI_MAX_DCI));
+    return EP_CTX_0_EPSTATE_GET(xhci_out_ctx(dev, dci)[0]);
+}
+
+/*
+ * bulk/intr: 单 NORMAL TD, 必须在 ring lock 内调用。>64KB 的 urb 按 64KB
+ * 边界分段并 CHAIN 成一个 TD(事件语义与 control 相同: 非末块事件只记账,
+ * 末块事件终态)。成功则 urb 成为本环在途(active)并敲门铃, 返回首 TRB
+ * 下标; 失败返回负错误码, 环状态不变。
+ */
+static int xhci_arm_normal_locked(struct xhci_hcd *hcd, struct xhci_dev *dev,
+                                  uint32_t dci, struct usbh_urb *urb)
+{
+    struct xhci_ring *ring = dev->ep_rings[dci];
+    struct xhci_td td;
+    uint8_t *buf = urb->transfer_buffer;
+    uint32_t len = urb->transfer_buffer_length;
+    uint32_t dir_in = (urb->ep->bEndpointAddress & USB2_DIR_IN) != 0U;
+    uint32_t ntrbs = 0U;
+    int first_idx;
+
+    if (len == 0U) {
+        ntrbs = 1U; /* ZLP: 空 NORMAL */
+    } else {
+        uintptr_t a = (uintptr_t)buf;
+        uint32_t r = len;
+
+        while (r > 0U) {
+            uint32_t chunk = (r > TRB_MAX_BUFF_SIZE) ? TRB_MAX_BUFF_SIZE : r;
+
+            if ((a & (TRB_MAX_BUFF_SIZE - 1U)) + chunk > TRB_MAX_BUFF_SIZE) {
+                chunk = TRB_MAX_BUFF_SIZE - (a & (TRB_MAX_BUFF_SIZE - 1U));
+            }
+            ntrbs++;
+            a += chunk;
+            r -= chunk;
+        }
+    }
+    if (ntrbs > 8U) {
+        return -USB_ERR_INVAL; /* TD 上限(本栈 urb 不应超过 512KB) */
+    }
+    if (xhci_ring_space(ring) < ntrbs + 1U) {
+        return -USB_ERR_NOMEM;
+    }
+
+    if (!dir_in && len > 0U) {
+        xhci_dcache_clean(buf, len);
+    }
+
+    {
+        struct xhci_trb trbs[8];
+        uintptr_t a = (uintptr_t)buf;
+        uint32_t r = len;
+        uint32_t i = 0U;
+
+        memset(trbs, 0, sizeof(trbs));
+        if (len == 0U) {
+            trbs[0].dw0 = 0;
+            trbs[0].dw1 = 0;
+            trbs[0].dw2 = TRB2_LEN(0) | TRB2_IRQ(0);
+            trbs[0].dw3 = TRB3_TYPE_SET(TRB_TYPE_NORMAL) | TRB3_IOC;
+            if (dir_in) {
+                trbs[0].dw3 |= TRB3_ISP;
+            }
+        } else {
+            while (r > 0U) {
+                uint32_t chunk = (r > TRB_MAX_BUFF_SIZE) ? TRB_MAX_BUFF_SIZE : r;
+                uint8_t last = 0U;
+
+                if ((a & (TRB_MAX_BUFF_SIZE - 1U)) + chunk > TRB_MAX_BUFF_SIZE) {
+                    chunk = TRB_MAX_BUFF_SIZE - (a & (TRB_MAX_BUFF_SIZE - 1U));
+                }
+                r -= chunk;
+                last = (r == 0U) ? 1U : 0U;
+                trbs[i].dw0 = (uint32_t)a;
+                trbs[i].dw1 = (uint32_t)(a >> 32);
+                trbs[i].dw2 = TRB2_LEN(chunk) | TRB2_IRQ(0);
+                trbs[i].dw3 = TRB3_TYPE_SET(TRB_TYPE_NORMAL);
+                if (!last) {
+                    trbs[i].dw3 |= TRB3_CHAIN;
+                } else {
+                    trbs[i].dw3 |= TRB3_IOC;
+                }
+                if (dir_in) {
+                    trbs[i].dw3 |= TRB3_ISP;
+                }
+                a += chunk;
+                i++;
+            }
+        }
+
+        memset(&td, 0, sizeof(td));
+        td.urb = urb;
+        td.kind = 0U;
+        first_idx = xhci_ring_put(ring, trbs, ntrbs, &td);
+        if (first_idx < 0) {
+            return -USB_ERR_NOMEM;
+        }
+    }
+
+    xhci_dcache_clean(ring->trbs, ring->num_trbs * TRB_SIZE);
+    *(volatile uint32_t *)(hcd->db + (dev->slot_id << 2)) = dci;
+    ring->active = urb;
+    return first_idx;
+}
+
+/* 锁内: 从 wait 链取队头并武装。返回取下的 urb, *err<0 表示建环失败
+ * (urb 已摘链, 调用方在锁外 giveback 后继续取下一条)。无可武装返回 NULL。 */
+static struct usbh_urb *xhci_gate_pop_arm_locked(struct xhci_hcd *hcd,
+                                                 struct xhci_dev *dev,
+                                                 uint32_t dci,
+                                                 struct xhci_ring *ring,
+                                                 int *err)
+{
+    struct usbh_urb *u = ring->wait_head;
+    int idx;
+
+    *err = 0;
+    if (u == NULL || ring->active != NULL || ring->halted != 0U ||
+        ring->recovering != 0U) {
+        return NULL;
+    }
+    ring->wait_head = (struct usbh_urb *)u->hcpriv;
+    if (ring->wait_tail == u) {
+        ring->wait_tail = NULL;
+    }
+    u->hcpriv = NULL;
+    idx = xhci_arm_normal_locked(hcd, dev, dci, u);
+    if (idx < 0) {
+        *err = idx;
+    }
+    return u;
+}
+
+/* 武装队列头(线程上下文用: kill/超时恢复清环后重臂)。建环失败连环归还。 */
+static void xhci_gate_kick(struct xhci_hcd *hcd, struct xhci_dev *dev,
+                           uint32_t dci)
+{
+    for (;;) {
+        struct xhci_ring *ring = dev->ep_rings[dci];
+        struct usbh_urb *u;
+        int err = 0;
+        uint32_t save;
+
+        if (ring == NULL) {
+            return;
+        }
+        save = xhci_ring_lock(ring);
+        u = xhci_gate_pop_arm_locked(hcd, dev, dci, ring, &err);
+        xhci_ring_unlock(ring, save);
+        if (u == NULL || err == 0) {
+            return;
+        }
+        xhci_giveback(u, err, 0);
+    }
 }
 
 /*
@@ -786,6 +1180,38 @@ static void xhci_port_disconnect(struct xhci_hcd *hcd, uint8_t port)
     dev = xhci_find_dev(hcd, slot_id);
     if (dev == NULL) {
         return;
+    }
+    /* 归还本设备所有环上的在途/排队 urb(-SHUTDOWN, 恰好一次): 上层
+     * abort_pipe/watchdog 不必再依赖这些 urb 的完成事件。Disable Slot
+     * 命令之后事件环可能还有残余事件, 彼时 td->urb 已清, 自然丢弃。 */
+    for (dci = 1U; dci < XHCI_MAX_DCI; dci++) {
+        struct xhci_ring *ring = dev->ep_rings[dci];
+        struct usbh_urb *u, *next;
+        uint32_t save;
+
+        if (ring == NULL) {
+            continue;
+        }
+        save = xhci_ring_lock(ring);
+        u = ring->active;
+        ring->active = NULL;
+        next = ring->wait_head;
+        ring->wait_head = NULL;
+        ring->wait_tail = NULL;
+        ring->killing = NULL;
+        ring->halted = 0U;
+        xhci_ring_unlock(ring, save);
+        if (u != NULL) {
+            u->hcpriv = NULL;
+            xhci_giveback(u, -USB_ERR_SHUTDOWN, 0);
+        }
+        while (next != NULL) {
+            struct usbh_urb *nxt = (struct usbh_urb *)next->hcpriv;
+
+            next->hcpriv = NULL;
+            xhci_giveback(next, -USB_ERR_SHUTDOWN, 0);
+            next = nxt;
+        }
     }
     if (xhci_cmd_disable_slot(hcd, slot_id) != 0) {
         USB_LOG_ERR("xhci: disable slot %u failed\r\n", slot_id);
@@ -1147,6 +1573,8 @@ static int xhci_queue_control(struct xhci_hcd *hcd, struct xhci_dev *dev,
     int first_idx;
     uint32_t ntrbs = 0U;
     uint32_t tmo;
+    uint32_t save;
+    int err;
 
     if (urb->setup == NULL) {
         return -USB_ERR_INVAL;
@@ -1160,6 +1588,12 @@ static int xhci_queue_control(struct xhci_hcd *hcd, struct xhci_dev *dev,
         if ((chk & (TRB_MAX_BUFF_SIZE - 1U)) + len > TRB_MAX_BUFF_SIZE) {
             return -USB_ERR_INVAL; /* 跨界数据块不适合单 DATA TRB, 显式拒绝 */
         }
+    }
+
+    /* ep0 前一轮留下 halted(STALL/BABBLE): 先恢复环再入队, 否则本 TRB 也
+     * 排在死 TD 后面(NetBSD 在 is_halted 时同样不敲 doorbell 先恢复) */
+    if (ring->halted != 0U) {
+        (void)xhci_pipe_recover(hcd, dev, 1U, ring, NULL, 0);
     }
 
     /* SETUP TRB */
@@ -1205,7 +1639,9 @@ static int xhci_queue_control(struct xhci_hcd *hcd, struct xhci_dev *dev,
     trbs[ntrbs].dw3 |= TRB3_IOC;
     ntrbs++;
 
+    save = xhci_ring_lock(ring);
     if (xhci_ring_space(ring) < ntrbs + 1U) {
+        xhci_ring_unlock(ring, save);
         return -USB_ERR_NOMEM;
     }
     memset(&td, 0, sizeof(td));
@@ -1215,10 +1651,12 @@ static int xhci_queue_control(struct xhci_hcd *hcd, struct xhci_dev *dev,
     td.last_idx = ntrbs - 1U;
     first_idx = xhci_ring_put(ring, trbs, ntrbs, &td);
     if (first_idx < 0) {
+        xhci_ring_unlock(ring, save);
         return -USB_ERR_NOMEM;
     }
     xhci_dcache_clean(ring->trbs, ring->num_trbs * TRB_SIZE);
     *(volatile uint32_t *)(hcd->db + (dev->slot_id << 2)) = 1U; /* target dci 1 */
+    xhci_ring_unlock(ring, save);
 
     /* 完成路径更新的是环数组里的 td 副本(ring->tds[每个 TRB 槽]), 等它,
      * 不是等栈上的 td */
@@ -1240,133 +1678,28 @@ static int xhci_queue_control(struct xhci_hcd *hcd, struct xhci_dev *dev,
         return 0;
     }
     if (ring->tds[first_idx].state == 2U) {
-        return ring->tds[first_idx].error;
-    }
-    return -USB_ERR_TIMEOUT;
-}
-
-/* bulk / interrupt: 单 NORMAL TD。>64KB 的 urb 按 64KB 边界分段并 CHAIN 成
- * 一个 TD(事件语义与 control 相同: 非末块事件只记账, 末块事件终态)。 */
-static int xhci_queue_normal(struct xhci_hcd *hcd, struct xhci_dev *dev,
-                             uint32_t dci, struct usbh_urb *urb)
-{
-    struct xhci_ring *ring = dev->ep_rings[dci];
-    struct xhci_td td;
-    uint8_t *buf = urb->transfer_buffer;
-    uint32_t len = urb->transfer_buffer_length;
-    uint32_t dir_in = (urb->ep->bEndpointAddress & USB2_DIR_IN) != 0U;
-    uint32_t ntrbs = 0U;
-    int first_idx;
-    uint32_t tmo;
-    uint32_t timeout_ms = urb->timeout;
-
-    if (len == 0U) {
-        ntrbs = 1U; /* ZLP: 空 NORMAL */
-    } else {
-        uintptr_t a = (uintptr_t)buf;
-        uint32_t r = len;
-
-        while (r > 0U) {
-            uint32_t chunk = (r > TRB_MAX_BUFF_SIZE) ? TRB_MAX_BUFF_SIZE : r;
-
-            if ((a & (TRB_MAX_BUFF_SIZE - 1U)) + chunk > TRB_MAX_BUFF_SIZE) {
-                chunk = TRB_MAX_BUFF_SIZE - (a & (TRB_MAX_BUFF_SIZE - 1U));
-            }
-            ntrbs++;
-            a += chunk;
-            r -= chunk;
+        err = ring->tds[first_idx].error;
+        if (err == -USB_ERR_STALL) {
+            /* ep0 协议 stall: 设备侧自愈, 主机侧立即恢复环 - 恢复用的
+             * CLEAR_FEATURE 也要走 ep0, 不能把 halt 留到下一次提交 */
+            (void)xhci_pipe_recover(hcd, dev, 1U, ring, NULL, 0);
         }
+        return err;
     }
-    if (ntrbs > 8U) {
-        return -USB_ERR_INVAL; /* TD 上限(本栈 urb 不应超过 512KB) */
-    }
-    if (xhci_ring_space(ring) < ntrbs + 1U) {
-        return -USB_ERR_NOMEM;
-    }
-
-    if (!dir_in && len > 0U) {
-        xhci_dcache_clean(buf, len);
-    }
-
-    {
-        struct xhci_trb trbs[8];
-        uintptr_t a = (uintptr_t)buf;
-        uint32_t r = len;
-        uint32_t i = 0U;
-
-        memset(trbs, 0, sizeof(trbs));
-        if (len == 0U) {
-            trbs[0].dw0 = 0;
-            trbs[0].dw1 = 0;
-            trbs[0].dw2 = TRB2_LEN(0) | TRB2_IRQ(0);
-            trbs[0].dw3 = TRB3_TYPE_SET(TRB_TYPE_NORMAL) | TRB3_IOC;
-            if (dir_in) {
-                trbs[0].dw3 |= TRB3_ISP;
-            }
-        } else {
-            while (r > 0U) {
-                uint32_t chunk = (r > TRB_MAX_BUFF_SIZE) ? TRB_MAX_BUFF_SIZE : r;
-                uint8_t last = 0U;
-
-                if ((a & (TRB_MAX_BUFF_SIZE - 1U)) + chunk > TRB_MAX_BUFF_SIZE) {
-                    chunk = TRB_MAX_BUFF_SIZE - (a & (TRB_MAX_BUFF_SIZE - 1U));
-                }
-                r -= chunk;
-                last = (r == 0U) ? 1U : 0U;
-                trbs[i].dw0 = (uint32_t)a;
-                trbs[i].dw1 = (uint32_t)(a >> 32);
-                trbs[i].dw2 = TRB2_LEN(chunk) | TRB2_IRQ(0);
-                trbs[i].dw3 = TRB3_TYPE_SET(TRB_TYPE_NORMAL);
-                if (!last) {
-                    trbs[i].dw3 |= TRB3_CHAIN;
-                } else {
-                    trbs[i].dw3 |= TRB3_IOC;
-                }
-                if (dir_in) {
-                    trbs[i].dw3 |= TRB3_ISP;
-                }
-                a += chunk;
-                i++;
-            }
-        }
-
-        memset(&td, 0, sizeof(td));
-        td.urb = urb;
-        td.kind = 0U;
-        first_idx = xhci_ring_put(ring, trbs, ntrbs, &td);
-        if (first_idx < 0) {
-            return -USB_ERR_NOMEM;
-        }
-    }
-
-    xhci_dcache_clean(ring->trbs, ring->num_trbs * TRB_SIZE);
-    *(volatile uint32_t *)(hcd->db + (dev->slot_id << 2)) = dci;
-
-    if (timeout_ms == 0U) {
-        return 0; /* 异步: 完成由中断回调 */
-    }
-
-    /* 同 queue_control: 等环数组里的 td 副本 */
-    tmo = 0U;
-    while (tmo < timeout_ms) {
-        xhci_event_process(hcd);
-        if (ring->tds[first_idx].state != 0U) {
-            break;
-        }
-        usb_osal_msleep(1);
-        tmo++;
-    }
-
-    if (ring->tds[first_idx].state == 1U) {
-        urb->actual_length = ring->tds[first_idx].actual;
-        if (dir_in && urb->actual_length > 0U) {
-            xhci_dcache_invalidate(buf, urb->actual_length);
-        }
-        return 0;
-    }
-    if (ring->tds[first_idx].state == 2U) {
-        return ring->tds[first_idx].error;
-    }
+#if XHCI_EVENT_DEBUG
+    usbh_console_printf(
+        "xhci: ctrl timeout: type=%02x req=%02x val=%04x idx=%04x len=%04x\r\n",
+        setup->bmRequestType, setup->bRequest, setup->wValue, setup->wIndex,
+        setup->wLength);
+#endif
+    /* 超时: 死 TD 不留环 - 先标记取消(防迟到的完成事件回调), Stop EP +
+     * Set TR Dequeue 清环后再返回。老实现把 TD 原地留在环里, 后续控制
+     * 传输全部排在死 TD 后面永久超时(shim 三次重试堆 4 个死 TD), 即
+     * 8821CU "mac power on failed" 的级联形态 */
+    save = xhci_ring_lock(ring);
+    ring->killing = urb;
+    xhci_ring_unlock(ring, save);
+    (void)xhci_pipe_recover(hcd, dev, 1U, ring, NULL, 0);
     return -USB_ERR_TIMEOUT;
 }
 
@@ -1466,26 +1799,148 @@ int usbh_submit_urb(struct usbh_urb *urb)
         }
     }
 
-    return xhci_queue_normal(hcd, dev, dci, urb);
+    /* per-EP urb 闸门: 每 EP 硬件 1 个在途, 忙则挂 wait 链(urb->hcpriv
+     * 串联), 完成路径 pop 下一个。上层(rtw88 RX x2 / TX 单 pipe 20+,
+     * urtwn TX 8/pipe)按多在途语义提交, 与 EHCI bulk gate 行为对齐。 */
+    {
+        struct xhci_ring *ring = dev->ep_rings[dci];
+        uint32_t save;
+
+        if (ring->halted != 0U) {
+            /* 上轮 STALL/BABBLE 留下的 halt: 提交线程上下文顺路恢复
+             * (NetBSD 在 is_halted 时同样不敲 doorbell, 先 xhci_pipe_restart) */
+            ret = xhci_pipe_recover(hcd, dev, dci, ring, NULL, 0);
+            if (ret != 0) {
+                return ret;
+            }
+        }
+
+        save = xhci_ring_lock(ring);
+        if (ring->active != NULL || ring->recovering != 0U) {
+            if (urb->timeout != 0U) {
+                /* 同步 urb 遇忙/恢复中 EP: 本栈同步 bulk 只剩兜底路径, 正常
+                 * 不触达; 返回忙优于静默排队让同步者饿死(避免 EHCI 侧
+                 * sync-park NULL 解引用同款场景) */
+                xhci_ring_unlock(ring, save);
+                return -USB_ERR_BUSY;
+            }
+            urb->hcpriv = NULL;
+            if (ring->wait_tail != NULL) {
+                ring->wait_tail->hcpriv = urb;
+            } else {
+                ring->wait_head = urb;
+            }
+            ring->wait_tail = urb;
+            xhci_ring_unlock(ring, save);
+            return 0; /* 排队: 完成路径武装 */
+        }
+        ret = xhci_arm_normal_locked(hcd, dev, dci, urb);
+        xhci_ring_unlock(ring, save);
+        if (ret < 0) {
+            return ret;
+        }
+        if (urb->timeout == 0U) {
+            return 0; /* 异步: 完成由中断回调 */
+        }
+        return xhci_bulk_sync_wait(hcd, dev, dci, urb, ret);
+    }
 }
 
 int usbh_kill_urb(struct usbh_urb *urb)
 {
-    /* 同步模型下无在途中断传输; 异步传输由事件环完成/超时收尾。 */
-    (void)urb;
-    return 0;
+    struct usbh_hubport *hport;
+    struct xhci_hcd *hcd;
+    struct xhci_dev *dev;
+    struct xhci_ring *ring;
+    struct usbh_urb *it, *prev;
+    uint32_t dci, save;
+
+    if (urb == NULL || urb->hport == NULL) {
+        return -USB_ERR_INVAL;
+    }
+    hport = urb->hport;
+    if (hport->bus == NULL || hport->bus->busid >= CONFIG_USBHOST_MAX_BUS) {
+        return -USB_ERR_INVAL;
+    }
+    hcd = &g_xhci[hport->bus->busid];
+    if (!hcd->running) {
+        return 0;
+    }
+    dev = xhci_get_dev(hcd, hport);
+    if (dev == NULL) {
+        return 0; /* slot 已释放: 硬件上下文已随断开消失 */
+    }
+    if (urb->ep == &hport->ep0) {
+        dci = 1U;
+    } else {
+        dci = xhci_dci_of(urb->ep);
+    }
+    if (dci < 1U || dci >= XHCI_MAX_DCI) {
+        return -USB_ERR_INVAL;
+    }
+    ring = dev->ep_rings[dci];
+    if (ring == NULL) {
+        return 0;
+    }
+
+    save = xhci_ring_lock(ring);
+    if (ring->killing == urb) {
+        /* 已在取消流程中: 恰好一次归还由那次 kill 负责(modeswitch 超时后
+         * 下一轮尝试会先 drop 残留完成量, 看门狗重复 kill 亦同) */
+        xhci_ring_unlock(ring, save);
+        return 0;
+    }
+    if (ring->active == urb) {
+        ring->active = NULL;
+        ring->killing = urb;
+        xhci_ring_unlock(ring, save);
+        /* 在途取消(NetBSD xhci_abortx): 按状态 Stop/Reset EP + Set TR
+         * Dequeue 清环, urb 由恢复路径给回 -SHUTDOWN 并重臂队列头 */
+        (void)xhci_pipe_recover(hcd, dev, dci, ring, urb, -USB_ERR_SHUTDOWN);
+        return 0;
+    }
+    /* 排队中: 摘链后直接归还 */
+    prev = NULL;
+    for (it = ring->wait_head; it != NULL; prev = it,
+         it = (struct usbh_urb *)it->hcpriv) {
+        if (it == urb) {
+            break;
+        }
+    }
+    if (it != NULL) {
+        if (prev == NULL) {
+            ring->wait_head = (struct usbh_urb *)it->hcpriv;
+        } else {
+            prev->hcpriv = it->hcpriv;
+        }
+        if (ring->wait_tail == urb) {
+            ring->wait_tail = prev;
+        }
+        it->hcpriv = NULL;
+        xhci_ring_unlock(ring, save);
+        xhci_giveback(urb, -USB_ERR_SHUTDOWN, 0);
+        return 0;
+    }
+    xhci_ring_unlock(ring, save);
+    return 0; /* 已完成/已归还 */
 }
 
 /* ===================== 事件处理 ===================== */
 
-static void xhci_complete_td(struct xhci_ring *ring, struct xhci_td *td,
-                             uint32_t idx, uint32_t residual, uint32_t code)
+static void xhci_complete_td(struct xhci_hcd *hcd, struct xhci_dev *dev,
+                             uint32_t dci, struct xhci_ring *ring,
+                             struct xhci_td *td, uint32_t idx,
+                             uint32_t residual, uint32_t code)
 {
     struct usbh_urb *urb = td->urb;
+    uint32_t want = urb->transfer_buffer_length;
+    uint32_t got;
+    int error;
+    int killed;
+    uint32_t save;
 
     if (code == TRB_CODE_SUCCESS || code == TRB_CODE_SHORT_PACKET) {
-        uint32_t want = urb->transfer_buffer_length;
-        uint32_t got = want - residual;
+        got = want - residual;
 
         /* 控制传输短包: data 段事件先记账, status 段事件才是终态 */
         if (td->kind == 1U && idx != td->last_idx) {
@@ -1502,27 +1957,29 @@ static void xhci_complete_td(struct xhci_ring *ring, struct xhci_td *td,
         if (td->kind == 1U) {
             got += 8U;
         }
-        td->actual = got;
-        td->error = 0;
+        error = 0;
     } else if (code == TRB_CODE_STOPPED || code == TRB_CODE_STOPPED_INVAL ||
                code == TRB_CODE_STOPPED_SHORT ||
                code == TRB_CODE_CMD_RING_STOPPED ||
                code == TRB_CODE_CMD_ABORTED) {
-        td->actual = 0;
-        td->error = -USB_ERR_SHUTDOWN;
-    } else if (code == TRB_CODE_STALL) {
-        td->actual = 0;
-        td->error = -USB_ERR_STALL;
+        got = 0;
+        error = -USB_ERR_SHUTDOWN;
+    } else if (code == TRB_CODE_STALL || code == TRB_CODE_BABBLE) {
+        got = 0;
+        error = -USB_ERR_STALL;
     } else if (code == TRB_CODE_TRANSACTION_ERR) {
-        td->actual = 0;
-        td->error = -USB_ERR_NAK;
+        got = 0;
+        error = -USB_ERR_NAK;
     } else {
-        td->actual = 0;
-        td->error = -USB_ERR_IO;
+        got = 0;
+        error = -USB_ERR_IO;
     }
 
+    save = xhci_ring_lock(ring);
     ring->dequeue = (td->last_idx + 1U) % ring->num_trbs;
-    td->state = (td->error == 0) ? 1U : 2U;
+    td->actual = got;
+    td->error = error;
+    td->state = (error == 0) ? 1U : 2U;
 
     /* 终态镜像回 TD 首槽: ring_put 在每个 TRB 槽存的是独立副本, 同步等待
      * 侧只看首槽的那份 */
@@ -1534,12 +1991,36 @@ static void xhci_complete_td(struct xhci_ring *ring, struct xhci_td *td,
         first->error = td->error;
     }
 
-    if (urb->complete != NULL) {
-        urb->actual_length = td->actual;
-        urb->errorcode = td->error;
-        urb->complete(urb->arg, (td->error == 0) ? (int)td->actual : td->error);
+    if (ring->active == urb) {
+        ring->active = NULL;
     }
+    if (code == TRB_CODE_STALL || code == TRB_CODE_BABBLE) {
+        /* 端点已 halt: 恢复(Reset/Stop EP + Set TR Deq)由下一次提交的
+         * 线程上下文顺路执行(NetBSD xhci_pipe_restart_async 同款延后) */
+        ring->halted = 1U;
+    }
+    killed = (ring->killing == urb);
+    xhci_ring_unlock(ring, save);
+
     td->urb = NULL;
+    if (!killed) {
+        xhci_giveback(urb, (error == 0) ? (int)got : error, got);
+        /* 武装队列头: 完成一个 pop 下一个(Linux urb_list 语义)。建环失败
+         * 连环归还(环满/参数坏不该饿死后续 urb)。 */
+        for (;;) {
+            struct usbh_urb *nx;
+            int err = 0;
+
+            save = xhci_ring_lock(ring);
+            nx = xhci_gate_pop_arm_locked(hcd, dev, dci, ring, &err);
+            xhci_ring_unlock(ring, save);
+            if (nx == NULL || err == 0) {
+                break;
+            }
+            nx->hcpriv = NULL;
+            xhci_giveback(nx, err, 0);
+        }
+    }
 }
 
 static void xhci_handle_transfer_event(struct xhci_hcd *hcd, struct xhci_trb *ev)
@@ -1582,16 +2063,25 @@ static void xhci_handle_transfer_event(struct xhci_hcd *hcd, struct xhci_trb *ev
     if (td->urb == NULL) {
         return;
     }
-    xhci_complete_td(ring, td, idx, residual, code);
+#if XHCI_EVENT_DEBUG
+    if (code != TRB_CODE_SUCCESS && code != TRB_CODE_SHORT_PACKET) {
+        usbh_console_printf(
+            "xhci: xfer evt slot=%u dci=%u idx=%u code=%u urb_state=%u\r\n",
+            slot_id, dci, idx, code, td->state);
+    }
+#endif
+    xhci_complete_td(hcd, dev, dci, ring, td, idx, residual, code);
 }
 
 static void xhci_event_process(struct xhci_hcd *hcd)
 {
-    if (hcd->evt_busy) {
+    /* 单消费者闸门: 原 evt_busy 读-改-写在 4 核 SMP 下两核可同时通过
+     * (ISR 与轮询线程各在一条核上)。原子交换持锁, 输家只置 pending 便回
+     * - IMAN PEND 未清, 中断会再来。 */
+    if (__atomic_exchange_n(&hcd->evt_busy, 1U, __ATOMIC_ACQ_REL) != 0U) {
         hcd->evt_pending = 1;
         return;
     }
-    hcd->evt_busy = 1;
     do {
         hcd->evt_pending = 0;
 
@@ -1649,7 +2139,7 @@ static void xhci_event_process(struct xhci_hcd *hcd)
         }
     } while (hcd->evt_pending);
 
-    hcd->evt_busy = 0;
+    __atomic_store_n(&hcd->evt_busy, 0U, __ATOMIC_RELEASE);
 }
 
 /* ===================== Root Hub ===================== */
