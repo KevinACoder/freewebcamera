@@ -763,39 +763,17 @@ rtw88_usb_interface_cfg(struct rtw_dev *rtwdev)
 static void
 rtw88_usb_dynamic_rx_agg(struct rtw_dev *rtwdev, bool enable)
 {
-	u8 size, timeout;
-	u16 val16;
-
 	/*
-	 * Bring-up: keep RX aggregation off.  With agg on (size 3 / timeout
-	 * 32) the device hands us cut fragments whenever the timeout flushes
-	 * mid-frame, and our demux drops those - enough to lose AUTH/ASSOC
-	 * responses.  One whole packet per transfer instead.
+	 * 2026-09-24: leave RX aggregation alone entirely.  Mainline
+	 * rtw88-usb has no dynamic_rx_agg and never touches these
+	 * registers; the firmware default delivers one packet per USB
+	 * transfer.  Setting BIT_RXDMA_AGG_EN here (with size 0 /
+	 * timeout 1) made the device aggregate until the host buffer was
+	 * completely full -- 32768-byte transfers only, every one of them
+	 * rejected by the full-buffer gate, so net80211 never saw a
+	 * beacon (board evidence 2026-09-24, boot-020120).
 	 */
-	enable = false;
-
-	switch (rtwdev->chip->id) {
-	case RTW_CHIP_TYPE_8822C:
-	case RTW_CHIP_TYPE_8822B:
-	case RTW_CHIP_TYPE_8821C:
-	case RTW_CHIP_TYPE_8814A:
-		rtw_write8_set(rtwdev, REG_TXDMA_PQ_MAP, BIT_RXDMA_AGG_EN);
-		rtw_write8_clr(rtwdev, REG_RXDMA_AGG_PG_TH + 3, BIT(7));
-
-		if (enable) {
-			size = 0x5;
-			timeout = 0x20;
-		} else {
-			size = 0x0;
-			timeout = 0x1;
-		}
-		val16 = u16_encode_bits(size, BIT_RXDMA_AGG_PG_TH) |
-		    u16_encode_bits(timeout, BIT_DMA_AGG_TO_V1);
-		rtw_write16(rtwdev, REG_RXDMA_AGG_PG_TH, val16);
-		break;
-	default:
-		break;
-	}
+	(void)enable;
 }
 
 static const struct rtw_hci_ops rtw88_usb_ops = {
