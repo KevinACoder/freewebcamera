@@ -276,3 +276,16 @@ demux 的描述符步进错位——walk 大部分落在错误偏移（pkt_len=0
    （打印显示 drvinfo 8/56、shift 1/2 —— 56 明显异常）；
 3. `rx raw len=360` 首帧：24 desc + ~336 beacon 的分布核对。
 对拍 NetBSD 侧同函数（if_rtw88 + rtw88_chip 的 net80211 版本）即可定案。
+
+# 续轮 9（2026-09-25）：首帧 dump 抓取方法修正 + 当前快照
+
+- 抓取方法修正：wpa start 前先挂 `serial_wait("rx raw len=")`，命中后用
+  `serial_read(since_cursor=<命中点>)` **不带 tail** 回读 8 行 hex
+  （带 tail 会跳到 live 尾部，前两次失败皆因此）。dump 只在前 4 帧
+  打印，一轮开机只有一次机会。
+- 本轮（boot-033725）dump 已再次触发（`rx raw len=360:`，等待命中），
+  hex 行尚未捕获——下一轮按上述方法第一优先抓取。
+- 8 行 hex 判读标准：desc w0 低 13 位 = pkt_len（非零=帧内容正常，问题
+  在 walk 后续；全零=CPU 读到陈旧零行，问题在 VA/PA 或 cache 属性）。
+- 核查清单仍开放：rx_pkt_desc_sz=24 对 8821CU USB 是否正确、
+  next_pkt=round_up(skb_len,8) 步进、drvinfo_sz*8 换算。
