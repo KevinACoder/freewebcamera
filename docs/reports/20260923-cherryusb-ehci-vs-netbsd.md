@@ -821,3 +821,30 @@ diff -ruN /tmp/tmp.vKxKVTqxpz/a/port/ehci/usb_hc_ehci.h /tmp/tmp.vKxKVTqxpz/b/po
  void ehci_kill_iso_urb(struct usbh_bus *bus, struct usbh_urb *urb);
  void ehci_scan_isochronous_list(struct usbh_bus *bus);
 ```
+
+## 五、后记（2026-09-23）：C1 按 upstream 契约撤销，排队上移 usbdi shim
+
+CherryUSB 社区对本报告 C1（HCD 内 per-endpoint bulk FIFO）的反馈：一次给同一
+endpoint 多笔 urb **不允许**，多笔应挂在 urb 的 list 上、完成后再取下一笔——排队是
+调用方的责任。对 upstream 0e40349b 的逐点考证证实了这一契约定位：
+
+- "一 ep 一笔在途"是纯约定、代码零强制（唯一防护是 per-urb 实例的 `-USB_ERR_BUSY`）；
+- 全部 class/hub 驱动均为"每 endpoint 一个内嵌 urb 成员 + 完成续投"；
+- `usbh_urb.list` 节点字段在 host 栈内零使用，正是"urb list"的预留形状；
+- 违约方是 usbdi shim：`usbd_transfer` 直通 HCD × urtwn_start 每 pipe 8 xfer 连发。
+
+据此重定位（详见 `docs/evidence/20260923-usbdi-fifo-queue-ownership.md`，板测三轮
+2.36/2.34/2.34 Mbit/s 全 PASS）：
+
+| 项 | 处置 |
+|---|---|
+| C1（EHCI per-endpoint FIFO） | **撤销**（b3dcd08 的 FIFO 面），HCD 回上游形状 |
+| C3（ZERO_PACKET 零长 qTD） | 保留（块移入 `ehci_bulk_urb_arm` 合理位置） |
+| C4（QH 池 32） | 保留（落点在自有 usb_config.h，零 vendor diff） |
+| NetBSD `up_queue` FIFO | 移植进 **usbdi shim**（`usbd_pipe_kick`，urb worker 补位） |
+| toggle 链 | 排队上移后由构造保证正确（播种在回写/清 halt 之后） |
+
+净效果：`net80211` shim 承担 NetBSD usbdi 的排队语义（这正是它存在的目的——
+忠实模拟 usbdi），vendored CherryUSB 差量收敛为 D50 ops + kill 握手 + osal sem +
+eb2f723 toggle + C3，全部保持可上游化。本报告第二、三章的机理论证依然成立——
+只是排序不变量的落点从"HCD 内部"改为"调用方"，与 upstream 的分层预期一致。
