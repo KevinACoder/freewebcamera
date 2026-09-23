@@ -247,6 +247,19 @@ static int cmd_wlan(int argc, char **argv)
 		return 0;
 	}
 
+	if (argc >= 2 && strcmp(argv[1], "select") == 0) {
+		/* several adapters can be attached at once (USB dongle +
+		 * SDIO module); the active one owns wlan up/scan/xmit */
+		if (argc < 3 || wlan_port_select(argv[2]) != 0) {
+			csh_printf(csh,
+				   "wlan: select <urtwn|rtw8189f|rtw88u>\r\n");
+			return 0;
+		}
+		csh_printf(csh, "wlan: active adapter %s\r\n",
+			   wlan_port_active_name());
+		return 0;
+	}
+
 	csh_printf(csh,
 		   "usage: wlan scan [seconds] | wlan status | wlan net | "
 		   "wlan trace [0|1|2] | wlan usbstats | wlan stats | "

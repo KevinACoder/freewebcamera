@@ -601,6 +601,34 @@ NET80211_BSD_SRCS := \
 	third-party/net80211/driver/rtw8189f/rtw8189f_chip.c \
 	third-party/net80211/driver/rtw8189f/rtw8189f_reg.c
 
+# rtw88 (RTL8821CU): the imported Linux chip logic + its own Linux-API
+# compat layer + the usbdi transport and registration TU. Compiled by the
+# dedicated driver/rtw88/% rule below - the dist tree carries generic
+# header names (debug.h, main.h, mac.h) whose include paths must not leak
+# into the other BSD-world units.
+NET80211_RTW_SRCS := \
+	third-party/net80211/driver/rtw88/compat/rtw88_compat.c \
+	third-party/net80211/driver/rtw88/dist/main.c \
+	third-party/net80211/driver/rtw88/dist/util.c \
+	third-party/net80211/driver/rtw88/dist/tx.c \
+	third-party/net80211/driver/rtw88/dist/rx.c \
+	third-party/net80211/driver/rtw88/dist/mac.c \
+	third-party/net80211/driver/rtw88/dist/phy.c \
+	third-party/net80211/driver/rtw88/dist/coex.c \
+	third-party/net80211/driver/rtw88/dist/efuse.c \
+	third-party/net80211/driver/rtw88/dist/fw.c \
+	third-party/net80211/driver/rtw88/dist/ps.c \
+	third-party/net80211/driver/rtw88/dist/sec.c \
+	third-party/net80211/driver/rtw88/dist/bf.c \
+	third-party/net80211/driver/rtw88/dist/regd.c \
+	third-party/net80211/driver/rtw88/dist/sar.c \
+	third-party/net80211/driver/rtw88/dist/rtw8821c.c \
+	third-party/net80211/driver/rtw88/dist/rtw8821c_table.c \
+	third-party/net80211/driver/rtw88/dist/debug.c \
+	third-party/net80211/driver/rtw88/rtw88_usb.c \
+	third-party/net80211/driver/rtw88/rtw88_chip.c \
+	third-party/net80211/driver/rtw88/rtw88u_reg.c
+
 NET80211_HOST_SRCS := \
 	third-party/net80211/port/aes_impl_compat.c \
 	third-party/net80211/port/osal/embox/port_core.c \
@@ -611,6 +639,7 @@ NET80211_HOST_SRCS := \
 	third-party/net80211/port/net/lwip/lwip_netif.c \
 	third-party/net80211/port/bus/usb/cherryusb/usbdi_compat.c \
 	third-party/net80211/port/bus/usb/cherryusb/usbh_urtwn_class.c \
+	third-party/net80211/port/bus/usb/cherryusb/usbh_modeswitch.c \
 	third-party/net80211/port/bus/sd/sdio_compat.c
 
 NET80211_ADAPTER_SRCS := \
@@ -619,7 +648,8 @@ NET80211_ADAPTER_SRCS := \
 	port/adapters/net80211/wlan_cmds.c \
 	port/adapters/net80211/wlan_sdio_claim.c \
 	port/adapters/net80211/fw_rtl8188eufw.c \
-	port/adapters/net80211/fw_rtw8189ffw.c
+	port/adapters/net80211/fw_rtw8189ffw.c \
+	port/adapters/net80211/fw_rtw8821c.c
 
 # The PSK-only file set (no EAP/WPS/P2P/ctrl-iface/SME), the same list the
 # embox lane compiles from this fork.
@@ -699,6 +729,14 @@ NET80211_BSD_INC := -Ithird-party/net80211 \
 	-idirafter third-party/net80211/compat/netbsd
 NET80211_BSD_CFG := -D_KERNEL -D_COMPAT_SYS_SYSCTL_H_ -include stdarg.h \
 	-include third-party/net80211/port/port_config_bsd.h
+# rtw88: BSD-world config plus the driver's debug switch; the compat
+# shadow (linux/*.h, net/mac80211.h) sits ahead of the NetBSD one and the
+# dist tree resolves its bare-name headers from its own directory.
+NET80211_RTW_INC := $(NET80211_BSD_INC) \
+	-Ithird-party/net80211/driver/rtw88 \
+	-Ithird-party/net80211/driver/rtw88/compat \
+	-Ithird-party/net80211/driver/rtw88/dist
+NET80211_RTW_CFG := $(NET80211_BSD_CFG) -DCONFIG_RTW88_DEBUG -std=gnu11
 NET80211_HOST_CFG := -D_KERNEL -include stdarg.h \
 	-include third-party/net80211/port/port_config.h
 # shim/ first: minimal net/if.h + netinet/in.h for the wpa world (newlib
@@ -750,7 +788,7 @@ endif
 # --- rules ----------------------------------------------------------------
 
 	C_SRCS := $(KERNEL_SRCS) $(LWIP_SRCS) $(FATFS_SRCS) $(SDMMC_SRCS) $(CHERRYUSB_SRCS) $(ARCH_SRCS) $(ADAPTER_SRCS) $(DRIVER_SRCS) $(PLAT_SRCS) $(APP_SRCS) \
-		$(NET80211_BSD_SRCS) $(NET80211_HOST_SRCS) $(WPA_CORE_SRCS) $(WPA_PORT_SRCS)
+		$(NET80211_BSD_SRCS) $(NET80211_RTW_SRCS) $(NET80211_HOST_SRCS) $(WPA_CORE_SRCS) $(WPA_PORT_SRCS)
 OBJS := $(addprefix $(BUILD)/,$(C_SRCS:.c=.o)) $(addprefix $(BUILD)/,$(ASM_SRCS:.S=.o))
 DEPS := $(OBJS:.o=.d)
 
@@ -766,6 +804,13 @@ $(BUILD)/third-party/%.o: third-party/%.c
 $(BUILD)/third-party/net80211/%.o: third-party/net80211/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -w $(INC_COMMON) $(NET80211_BSD_INC) $(NET80211_BSD_CFG) -MMD -MP -c $< -o $@
+
+# rtw88 group: the deepest stem wins over the net80211/% rule above, so
+# only these units see the driver's compat/dist include paths (their
+# generic header names must not shadow anything else).
+$(BUILD)/third-party/net80211/driver/rtw88/%.o: third-party/net80211/driver/rtw88/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -w $(INC_COMMON) $(NET80211_RTW_INC) $(NET80211_RTW_CFG) -MMD -MP -c $< -o $@
 
 # The library's host-world units: CMSIS OSAL, lwIP netif, cherryusb glue.
 $(BUILD)/third-party/net80211/port/%.o: third-party/net80211/port/%.c

@@ -159,6 +159,7 @@ usb_endpoint_descriptor_t *
 
 usb_config_descriptor_t *usbd_get_config_descriptor(struct usbd_device *);
 usb_device_descriptor_t *usbd_get_device_descriptor(struct usbd_device *);
+uint8_t usbd_get_speed(struct usbd_device *);
 
 usbd_status usbd_set_interface(struct usbd_interface *, int);
 usbd_status usbd_get_interface(struct usbd_interface *, uint8_t *);

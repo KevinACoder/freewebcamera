@@ -22,7 +22,8 @@
 
 #include <port/port.h>
 
-#define WLAN_PORT_ADAPTER_MAX 2
+/* one entry per chip driver that can be built in, with room to spare */
+#define WLAN_PORT_ADAPTER_MAX 4
 
 static const struct wlan_port_adapter *
 	wlan_port_adapters[WLAN_PORT_ADAPTER_MAX];
@@ -34,6 +35,8 @@ void wlan_port_adapter_register(const struct wlan_port_adapter *adapter) {
 			return;
 		}
 	}
+	/* silently dropping one makes it look like the device never came up */
+	printf("wlan: adapter table full, %s not registered\n", adapter->name);
 }
 
 /* Explicit selection, or the first attached adapter by default. */
@@ -65,7 +68,20 @@ int wlan_port_select(const char *name) {
 			return 0;
 		}
 	}
+	printf("wlan: adapters:");
+	for (int i = 0; i < WLAN_PORT_ADAPTER_MAX; i++) {
+		if (wlan_port_adapters[i] != NULL) {
+			printf(" %s", wlan_port_adapters[i]->name);
+		}
+	}
+	printf("\n");
 	return -1;
+}
+
+const char *wlan_port_active_name(void) {
+	const struct wlan_port_adapter *ad = wlan_port_adapter_first();
+
+	return ad != NULL ? ad->name : NULL;
 }
 
 int wlan_port_up(void) {

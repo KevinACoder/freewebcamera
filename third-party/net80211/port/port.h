@@ -127,6 +127,9 @@ void wlan_port_scan_dump(void);
 /* Focus the shell hooks on a named driver adapter. */
 int wlan_port_select(const char *name);
 
+/* Name of the focused (or first attached) adapter, for shell feedback. */
+const char *wlan_port_active_name(void);
+
 /* The active adapter's ieee80211com (NULL before attach). */
 void *wlan_port_get_ic(void);
 
