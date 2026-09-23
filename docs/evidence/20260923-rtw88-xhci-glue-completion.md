@@ -141,3 +141,43 @@ fw download + validate ✓（连续多轮）→ RTL8821CU ready ✓ → chip par
 net_80211 `1381aba`+`0cb547c`（rxeof 取证/整缓冲放行）、`9734995`（workqueue
 守卫）；fwc-rtw88 `e5d7f95`（complete_td 守卫+整段清 + 镜像 + dbg 命令）。
 XHCI_EVENT_DEBUG=1。
+
+---
+
+# 续轮 3（2026-09-24）：demux 崩溃定位 —— RX 帧死因 = worker 线程被踩死
+
+## 新证据（boot-022048，binary d23a6d2d，含 shim err 打印 + demux 入口计数）
+
+- `rx work run 0/1, skbq 1`：**demux 确实在跑、队列确实有帧**（整缓冲放行
+  生效，skb 链进了 demux）。
+- `rx work run 1` 之后即刻 `fatal core0 ESR=96000004 FAR=b27b00d0
+  ELR=0a0a69a4`（线程 wlan-wor）→ addr2line = `usbd_shim_urb_work:795`
+  的 `wlan_usb_latency_record`，处理了一个 magic 恰好合法但内容已被重用
+  的 xfer。worker 死 → RX 从此全断（net80211 rx=0、扫描表空）。
+- `wlan dbg` 命令实测 bug：打印 `rtw_debug_mask=0x0`（strtoul/csh 参数
+  传递问题待查），本轮 demux 丢弃打印不可见。
+- `rx drop status=1`（=USBD_IN_PROGRESS）类仍在：这些 xfer 的 status 从
+  未被完成路径设置，来源待查（shim 已加原始错误码打印 `shim: rx
+  complete err=`，本轮未及捕获）。
+
+## 因果链（当前最佳解释）
+
+设备聚合满 32K 才 flush → 整缓冲进 demux → demux/latency-record 路径
+存在对被释放/被踩内存的访问（TLSF assert 两轮 + FAR=b27b00d0 两轮同值
+域）→ worker 死 → RX 静默。堆踩踏的第一现场仍未定位（候选：满缓冲 DMA
+边界 / rtw88_skb 生命周期 / latency record 环）。
+
+## 下一轮
+
+1. 修 `wlan dbg` 参数解析（argv 偏移或 strtoul base）。
+2. demux 崩溃：在 `usbd_shim_urb_work` 入口对 magic+指针域做二次校验，
+   崩溃点前 dump xfer 邻域；排查 `wlan_usb_latency_record` 对异常 xfer
+   的字段访问（先把它短路再放行 demux，二分定位）。
+3. rxeof status 门打印已带 err 码（`shim: rx complete err=`），下一轮
+   直接抓取分类。
+4. 堆修好 → scan 节点表 → wpa connect → DHCP → iperf。
+
+## 提交
+
+net_80211 `19ff73f`+`9257cc1`；fwc-rtw88 镜像 + worker fatal 定位记录
+（本节）。binary d23a6d2d 停在 fatal 后现场（未再复跑）。
