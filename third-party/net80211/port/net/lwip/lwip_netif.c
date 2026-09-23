@@ -31,6 +31,17 @@ static struct netif wlan_netif;
 static int wlan_lwip_rx_probe;
 static volatile int wlan_lwip_assoc;
 
+/*
+ * Bridge drop counters. Every loss below used to be a silent return, so
+ * a wedged bulk flow had no trace between net80211 delivery and the
+ * tcpip mailbox (M11 TCP-downlink chase). Dumped by wlan_lwip_bridge_dump().
+ */
+static volatile unsigned long wlan_lwip_rx_posted;
+static volatile unsigned long wlan_lwip_rx_assoc_gated;
+static volatile unsigned long wlan_lwip_rx_pbuf_fail;
+static volatile unsigned long wlan_lwip_rx_take_fail;
+static volatile unsigned long wlan_lwip_rx_input_fail;
+
 /* ---- rx hooks (USB worker context: copy and return) ---- */
 
 static void wlan_lwip_data_rx(const uint8_t *frame, size_t len, void *arg) {
@@ -38,6 +49,7 @@ static void wlan_lwip_data_rx(const uint8_t *frame, size_t len, void *arg) {
 
 	(void) arg;
 	if (!wlan_lwip_assoc || len == 0) {
+		wlan_lwip_rx_assoc_gated++;
 		return;
 	}
 	if (wlan_lwip_rx_probe && (frame[0] & 0x01) == 0) {
@@ -53,15 +65,28 @@ static void wlan_lwip_data_rx(const uint8_t *frame, size_t len, void *arg) {
 	}
 	p = pbuf_alloc(PBUF_RAW, (u16_t) len, PBUF_RAM);
 	if (p == NULL) {
+		wlan_lwip_rx_pbuf_fail++;
 		return;
 	}
 	if (pbuf_take(p, frame, (u16_t) len) != ERR_OK) {
+		wlan_lwip_rx_take_fail++;
 		pbuf_free(p);
 		return;
 	}
 	if (wlan_netif.input(p, &wlan_netif) != ERR_OK) {
+		wlan_lwip_rx_input_fail++;
 		pbuf_free(p);
+		return;
 	}
+	wlan_lwip_rx_posted++;
+}
+
+void wlan_lwip_bridge_dump(void) {
+	printf("wlan lwip bridge posted=%lu gated=%lu pbuf_fail=%lu "
+	    "take_fail=%lu input_fail=%lu assoc=%d\n",
+	    wlan_lwip_rx_posted, wlan_lwip_rx_assoc_gated,
+	    wlan_lwip_rx_pbuf_fail, wlan_lwip_rx_take_fail,
+	    wlan_lwip_rx_input_fail, wlan_lwip_assoc);
 }
 
 static void wlan_lwip_eapol_rx(const uint8_t src[6],

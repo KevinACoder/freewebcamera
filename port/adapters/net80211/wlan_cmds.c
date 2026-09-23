@@ -41,6 +41,11 @@ extern void wlan_urtwn_txq_dump(void);
 extern int wlan_rtw8189f_reg_read(unsigned addr, unsigned *val);
 extern int wlan_rtw8189f_reg_write(unsigned addr, unsigned val);
 extern void wlan_rtw8189f_txq_dump(void);
+extern void wlan_rtw8189f_icstats_dump(void);
+extern void wlan_rtw8189f_sdreg_dump(void);
+
+/* lwIP bridge drop counters (net_80211 port/net/lwip/lwip_netif.c) */
+extern void wlan_lwip_bridge_dump(void);
 
 /* callout diagnostic gate (osal layer, see "wlan calib") */
 extern volatile unsigned wlan_callout_fires;
@@ -119,6 +124,23 @@ static int cmd_wlan(int argc, char **argv)
 
 	if (argc >= 2 && strcmp(argv[1], "usbstats") == 0) {
 		wlan_usbdi_stats_dump();
+		return 0;
+	}
+
+	if (argc >= 2 && strcmp(argv[1], "stats") == 0) {
+		/* RX-path health in one shot: net80211 ic_stats (dup/replay/
+		 * demic/decap/...), the lwIP bridge drop counters, and the
+		 * rtw8189f driver frame counters. Snapshot twice ~10 s apart
+		 * across a wedged flow and diff. */
+		wlan_rtw8189f_icstats_dump();
+		wlan_lwip_bridge_dump();
+		return 0;
+	}
+
+	if (argc >= 2 && strcmp(argv[1], "sdreg") == 0) {
+		/* SDIO-local window: HISR/HIMR/RX0_REQ_LEN/FREE_TXPG - the
+		 * interrupt and RX-fifo state the MAC window cannot show */
+		wlan_rtw8189f_sdreg_dump();
 		return 0;
 	}
 
@@ -227,11 +249,12 @@ static int cmd_wlan(int argc, char **argv)
 
 	csh_printf(csh,
 		   "usage: wlan scan [seconds] | wlan status | wlan net | "
-		   "wlan trace [0|1|2] | wlan usbstats | "
+		   "wlan trace [0|1|2] | wlan usbstats | wlan stats | "
+		   "wlan sdreg | "
 		   "wlan reg read|write|txq | wlan calib [0|1] | "
 		   "wlan ra [0|1] | wlan fwfix\r\n");
 	return 0;
 }
 
-CSH_CMD_EXPORT_ALIAS_FULL(cmd_wlan, wlan, "wlan scan [s] | status | trace [n] | usbstats | reg | calib | ra | fwfix",
+CSH_CMD_EXPORT_ALIAS_FULL(cmd_wlan, wlan, "wlan scan [s] | status | trace [n] | usbstats | stats | sdreg | reg | calib | ra | fwfix",
 			  "net80211 adapter: bring up the radio and scan");

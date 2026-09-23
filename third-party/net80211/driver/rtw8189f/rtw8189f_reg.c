@@ -383,3 +383,70 @@ void wlan_rtw8189f_txq_dump(void) {
 	printf("rtw8189f %-18s [0x522] = 0x%02x\n", "TXPAUSE",
 	    rtw8189f_mac_read_1(sc, 0x0522));
 }
+
+/* net80211 RX-path error counters (ic_stats). The live ones for the
+ * TCP-downlink chase: dup removal, CCMP replay, demic/decap failures,
+ * address-filter rejects and mbuf starvation. All zeros while frames
+ * keep flowing means the drop is downstream (lwIP bridge / tcpip). */
+void wlan_rtw8189f_icstats_dump(void) {
+	struct rtw8189f_softc *sc = rtw8189f_reg_softc;
+	struct ieee80211_stats *st;
+
+	if (sc == NULL) {
+		printf("wlan: no device\n");
+		return;
+	}
+	st = &sc->sc_ic.ic_stats;
+	printf("wlan icstats rx: dup=%u ccmpreplay=%u tkipreplay=%u "
+	    "wepfail=%u decap=%u nobuf=%u\n",
+	    st->is_rx_dup, st->is_rx_ccmpreplay, st->is_rx_tkipreplay,
+	    st->is_rx_wepfail, st->is_rx_decap, st->is_rx_nobuf);
+	printf("wlan icstats rx: wrongbss=%u notassoc=%u unauth=%u "
+	    "tooshort=%u badversion=%u mcastecho=%u wrongdir=%u\n",
+	    st->is_rx_wrongbss, st->is_rx_notassoc, st->is_rx_unauth,
+	    st->is_rx_tooshort, st->is_rx_badversion, st->is_rx_mcastecho,
+	    st->is_rx_wrongdir);
+	printf("wlan icstats rx: decryptcrc=%u badkeyid=%u noprivacy=%u "
+	    "unencrypted=%u deauth=%u disassoc=%u\n",
+	    st->is_rx_decryptcrc, st->is_rx_badkeyid, st->is_rx_noprivacy,
+	    st->is_rx_unencrypted, st->is_rx_deauth, st->is_rx_disassoc);
+	printf("wlan icstats tx: nobuf=%u nonode=%u noheadroom=%u "
+	    "badcipher=%u frags=%u\n",
+	    st->is_tx_nobuf, st->is_tx_nonode, st->is_tx_noheadroom,
+	    st->is_tx_badcipher, st->is_tx_frags);
+}
+
+/* SDIO-local (DeviceID 0) registers: the interrupt/fifo state the MAC
+ * window cannot show. RX0_REQ_LEN is the live pending-RX length, HISR
+ * bit0 the pending RX_REQUEST - read twice ~1 s apart: a wedged RX DMA
+ * shows as REQ_LEN pinned nonzero (or zero with the server still
+ * sending) and HISR stuck. Byte reads only, like the power-on selftest. */
+static unsigned wlan_rtw8189f_sdlocal_read_4(struct rtw8189f_softc *sc,
+    uint16_t reg) {
+	return (unsigned) rtw8189f_sdiolocal_read_1(sc, reg) |
+	    ((unsigned) rtw8189f_sdiolocal_read_1(sc, reg + 1) << 8) |
+	    ((unsigned) rtw8189f_sdiolocal_read_1(sc, reg + 2) << 16) |
+	    ((unsigned) rtw8189f_sdiolocal_read_1(sc, reg + 3) << 24);
+}
+
+void wlan_rtw8189f_sdreg_dump(void) {
+	struct rtw8189f_softc *sc = rtw8189f_reg_softc;
+
+	if (sc == NULL || sc->sc_dying) {
+		printf("wlan: no attached rtw8189f device\n");
+		return;
+	}
+	printf("rtw8189f sdreg TX_CTRL     [0x000] = 0x%08x\n",
+	    wlan_rtw8189f_sdlocal_read_4(sc, 0x0000));
+	printf("rtw8189f sdreg HIMR        [0x014] = 0x%08x\n",
+	    wlan_rtw8189f_sdlocal_read_4(sc, RTW8189F_SDIO_REG_HIMR));
+	printf("rtw8189f sdreg HISR        [0x018] = 0x%08x\n",
+	    wlan_rtw8189f_sdlocal_read_4(sc, RTW8189F_SDIO_REG_HISR));
+	printf("rtw8189f sdreg RX0_REQ_LEN [0x01c] = %u\n",
+	    (unsigned) rtw8189f_sdiolocal_read_1(sc,
+	        RTW8189F_SDIO_REG_RX0_REQ_LEN) |
+	    ((unsigned) rtw8189f_sdiolocal_read_1(sc,
+	        RTW8189F_SDIO_REG_RX0_REQ_LEN + 1) << 8));
+	printf("rtw8189f sdreg FREE_TXPG   [0x020] = 0x%08x\n",
+	    wlan_rtw8189f_sdlocal_read_4(sc, RTW8189F_SDIO_REG_FREE_TXPG));
+}

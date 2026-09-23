@@ -199,6 +199,26 @@ rtw8189f_attachhook(device_t self)
 	}
 	aprint_normal_dev(self, "Ethernet address %s\n",
 	    ether_sprintf(sc->sc_mac_addr));
+
+	/*
+	 * Queue geometry BEFORE the firmware boots (deviation, mirrored
+	 * to rtl8189fs _InitTransferPageSize ordering): the 8051 samples
+	 * the RX page size and the FIFO boundaries when it starts.
+	 * Programmed only post-download (the old order) the firmware kept
+	 * running with the PBP reset default 0x10 - RX pages of 64 bytes
+	 * instead of 128 - and every large received frame was lost on the
+	 * air interface while small frames (beacons, ARP, ICMP) passed:
+	 * the M11 TCP-downlink stall.  Post-download chip_init still
+	 * re-writes these; harmless re-assertion.
+	 */
+	rtw8189f_mac_write_1(sc, RTW8189F_REG_PBP,
+	    RTW8189F_PBP_RX(RTW8189F_PBP_128) | RTW8189F_PBP_TX(RTW8189F_PBP_128));
+	rtw8189f_mac_write_1(sc, RTW8189F_REG_RX_DRVINFO_SZ, 4);
+	rtw8189f_mac_write_1(sc, RTW8189F_REG_TDECTRL + 1,
+	    RTW8189F_TX_PAGE_BOUNDARY);
+	rtw8189f_mac_write_2(sc, RTW8189F_REG_TRXFF_BNDY + 2,
+	    RTW8189F_RX_DMA_BOUNDARY);
+
 	if (rtw8189f_fw_download(sc) != 0) {
 		aprint_error_dev(self, "firmware download failed\n");
 		return;

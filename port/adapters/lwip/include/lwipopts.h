@@ -107,12 +107,27 @@
 /* --- TCP ------------------------------------------------------------------ */
 
 #define TCP_MSS                         1460
-/* 8*MSS x ~40ms air RTT capped iperf uplink at ~2 Mbit/s (BDP); 32*MSS
- * lets the same link reach its air-rate ceiling */
-#define TCP_WND                         (32 * TCP_MSS)
+/* Send window: 8*MSS x ~40ms air RTT capped iperf uplink at ~2 Mbit/s
+ * (BDP); 32*MSS (the M7P bump) lets the same link reach its air-rate
+ * ceiling. Kept - the TX side has no hardware FIFO constraint. */
 #define TCP_SND_BUF                     (32 * TCP_MSS)
 /* Must be >= 4 * TCP_SND_BUF / TCP_MSS: 4 * 46720 / 1460 = 128. */
 #define TCP_SND_QUEUELEN                128
+/* Receive window vs the RTL8188F's RX FIFO: the SDIO chip buffers
+ * received frames in a 16 KB RX FIFO (rtl8189fs RX_DMA_SIZE_8188F =
+ * 0x4000, 128/256 B reserved for C2H/txrpt) and silently drops what
+ * does not fit - no driver counter sees it. The rtw8189f worker
+ * drains every 10 ms, so steady rates survive (UDP 2.6 Mbit/s
+ * passes), but a TCP burst up to the advertised window lands as one
+ * over-the-air burst: at 32*MSS the window (46 KB) exceeded the FIFO
+ * and the data connection lost 15 of its first 17 segments (M11
+ * round 2, board + pktmon evidence); 8*MSS was marginal - stall after
+ * seconds-to-minutes when a burst coincided with ambient broadcast
+ * junk. 4*MSS keeps a full-window burst well inside the FIFO;
+ * ceiling ~4 Mbit/s at the 11 ms air RTT, above the measured rates.
+ * Partial revert of 9a9df36's RCV side (that fix targets the USB
+ * lane, which has no such FIFO); D52 in DESIGN §14. */
+#define TCP_WND                         (4 * TCP_MSS)
 #define TCP_QUEUE_OOSEQ                 0
 #define LWIP_WND_SCALE                  0
 #define LWIP_TCP_SACK_OUT               0
@@ -150,9 +165,15 @@
 
 /* LWIP_DEBUG stays off: every diag call would go out the polled console at
  * 115200 baud, which the lab has already seen drag the network path to a halt
- * (DESIGN G18). Enable per-file with LWIP_DBG_ON while debugging, not here. */
+ * (DESIGN G18). Enable per-file with LWIP_DBG_ON while debugging, not here.
+ *
+ * Stats stay on permanently: the counters cost a few hundred bytes of
+ * static RAM, print nothing on their own, and the shell's `lwstats` dump
+ * is the only window into the tcpip-thread state (drops, memerrs, mbox
+ * pressure) when a bulk flow wedges - the M11 TCP-downlink chase had to
+ * run blind without it. */
 #define LWIP_DEBUG                      0
-#define LWIP_STATS                      0
-#define LWIP_STATS_DISPLAY              0
+#define LWIP_STATS                      1
+#define LWIP_STATS_DISPLAY              1
 
 #endif /* FREEWEBCAMERA_LWIPOPTS_H */

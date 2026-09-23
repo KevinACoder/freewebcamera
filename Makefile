@@ -229,6 +229,7 @@ ADAPTER_SRCS := \
 	port/adapters/lwip/lwip_adapter.c \
 	port/adapters/lwip/net_cmds.c \
 	port/adapters/lwip/ping_cmd.c \
+	port/adapters/lwip/lwstats_cmd.c \
 	third-party/lwip/apps/ping/ping.c \
 	port/adapters/lwip/iperf3_port.c \
 	port/adapters/lwip/iperf3_cmd.c \
@@ -480,6 +481,7 @@ ADAPTER_SRCS := \
 	port/adapters/lwip/lwip_adapter.c \
 	port/adapters/lwip/net_cmds.c \
 	port/adapters/lwip/ping_cmd.c \
+	port/adapters/lwip/lwstats_cmd.c \
 	third-party/lwip/apps/ping/ping.c \
 	port/adapters/lwip/iperf3_port.c \
 	port/adapters/lwip/iperf3_cmd.c \
