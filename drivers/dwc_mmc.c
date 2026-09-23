@@ -817,9 +817,16 @@ static int dwc_mmc_prepare_dma(struct dwc_mmc *inst, struct dwc_mmc_cmd *cmd_p)
 	/* descriptor list base address */
 	DWMMC_WRITE_REG(base_addr, DWMMC_DBADDR_OFFSET, (uint32_t)desc_bus);
 
-	/* clear stale IDMAC status: the read completion poll reads IDSTS
-	 * and must only see this transfer's receive interrupt */
+	/* clear stale IDMAC status, then arm the IDMAC status enables: on
+	 * this IP the IDSTS completion/error bits do not post unless the
+	 * matching IDINTEN bits are set (NetBSD writes IDIE before its
+	 * wait, Linux dw_mci_idmac_init likewise - poll mode read RI
+	 * without ever arming it and saw nothing but zeroes) */
 	DWMMC_WRITE_REG(base_addr, DWMMC_IDSTS_OFFSET, DWMMC_INTMSK_ALL);
+	DWMMC_WRITE_REG(base_addr, DWMMC_IDINTEN_OFFSET,
+			DWMMC_IDMAC_INT_RI | DWMMC_IDMAC_INT_TI |
+			DWMMC_IDMAC_INT_NI | DWMMC_IDMAC_INT_AI |
+			DWMMC_IDMAC_ERR_FLAGS);
 
 	/* CTRL: enable IDMAC + DMA (INT_ENABLE must ride along - the FIFO
 	 * reset clears it) */
