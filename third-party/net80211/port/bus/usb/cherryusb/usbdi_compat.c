@@ -147,6 +147,9 @@ struct usbd_xfer {
 	void *dma_buf;
 	usbd_status status;
 	uint32_t actlen;
+	unsigned submit_ms;
+	unsigned arm_ms;
+	unsigned done_ms;
 	volatile int in_flight;
 	int in_xq;	/* parked on pipe->xq, not yet at the HCD */
 	void *dma_raw;	/* the block dma_buf points inside of; the free
@@ -227,6 +230,31 @@ static struct wlan_usb_stats {
 	unsigned q_timeout;	/* queued xfers timed out before arming */
 	unsigned q_orphan;	/* destroyed while parked (must stay 0) */
 } wlan_usb_stats;
+
+static struct wlan_usb_latency {
+	unsigned samples;
+	unsigned queue_total_ms;
+	unsigned hcd_total_ms;
+	unsigned wake_total_ms;
+	unsigned queue_max_ms;
+	unsigned hcd_max_ms;
+	unsigned wake_max_ms;
+} wlan_usb_tx_latency, wlan_usb_rx_latency;
+
+static void wlan_usb_latency_record(struct wlan_usb_latency *lat,
+	const struct usbd_xfer *xfer, unsigned now_ms) {
+	unsigned queue_ms = xfer->arm_ms - xfer->submit_ms;
+	unsigned hcd_ms = xfer->done_ms - xfer->arm_ms;
+	unsigned wake_ms = now_ms - xfer->done_ms;
+
+	lat->samples++;
+	lat->queue_total_ms += queue_ms;
+	lat->hcd_total_ms += hcd_ms;
+	lat->wake_total_ms += wake_ms;
+	if (queue_ms > lat->queue_max_ms) lat->queue_max_ms = queue_ms;
+	if (hcd_ms > lat->hcd_max_ms) lat->hcd_max_ms = hcd_ms;
+	if (wake_ms > lat->wake_max_ms) lat->wake_max_ms = wake_ms;
+}
 
 void wlan_usbdi_stats_dump(void);
 
@@ -584,6 +612,7 @@ static void usbd_shim_urb_complete(void *arg, int nbytes_or_err) {
 		return;
 	}
 	dev = xfer->pipe->dev;
+	xfer->done_ms = wlan_port_now_ms();
 	xfer->pipe->data_toggle = xfer->urb.data_toggle;
 
 	if (nbytes_or_err < 0) {
@@ -634,6 +663,7 @@ static int usbd_pipe_arm(struct usbd_xfer *xfer) {
 	}
 
 	xfer->in_flight = 1;
+	xfer->arm_ms = wlan_port_now_ms();
 	if (usbd_pipe_is_tx(xfer->pipe)) {
 		wlan_usb_stats.tx_submit++;
 	} else {
@@ -672,6 +702,7 @@ static int usbd_pipe_arm(struct usbd_xfer *xfer) {
 		SLIST_REMOVE(&dev->in_flight_xfers, xfer, usbd_xfer, wd_next);
 		ipl_restore(ipl);
 		xfer->status = usbd_map_err(ret);
+		xfer->done_ms = wlan_port_now_ms();
 		usbd_ring_post(dev, xfer);
 	}
 	return ret;
@@ -726,6 +757,11 @@ static void usbd_shim_urb_work(struct usbd_xfer *xfer) {
 	}
 
 	was_armed = xfer->in_flight;
+	if (was_armed && xfer->status == USBD_NORMAL_COMPLETION) {
+		wlan_usb_latency_record(usbd_pipe_is_tx(xfer->pipe)
+		    ? &wlan_usb_tx_latency : &wlan_usb_rx_latency,
+		    xfer, wlan_port_now_ms());
+	}
 	xfer->in_flight = 0;
 	xfer->wd_deadline = 0U;
 	if (xfer->pipe != NULL) {
@@ -797,6 +833,7 @@ usbd_status usbd_transfer(struct usbd_xfer *xfer) {
 	shim_locks_init();
 
 	wlan_usb_stats.submit++;
+	xfer->submit_ms = wlan_port_now_ms();
 
 	/* NetBSD usbdi serves every pipe strictly FIFO (up_queue) while
 	 * the cherryusb HCD contract is one urb per endpoint in flight:
@@ -1093,6 +1130,8 @@ void wlan_usbdi_trace_set(unsigned level) {
  * itself lost a completion (kill paths / IAA eat) - exactly what this
  * instrumentation is built to expose. */
 void wlan_usbdi_stats_dump(void) {
+	const struct wlan_usb_latency *tx = &wlan_usb_tx_latency;
+	const struct wlan_usb_latency *rx = &wlan_usb_rx_latency;
 	printf("[wlan] usbstats: submit=%u submit_fail=%u complete=%u "
 	    "guard_drop=%u post_ok=%u post_drop=%u worker=%u kill=%u "
 	    "peak_inflight=%u\n",
@@ -1116,6 +1155,14 @@ void wlan_usbdi_stats_dump(void) {
 	    wlan_usb_stats.q_kicks, wlan_usb_stats.q_peak,
 	    wlan_usb_stats.q_flush, wlan_usb_stats.q_timeout,
 	    wlan_usb_stats.q_orphan);
+	printf("[wlan] usbtime tx: n=%u queue=%u/%u hcd=%u/%u wake=%u/%u ms (sum/max)\n",
+	    tx->samples, tx->queue_total_ms, tx->queue_max_ms,
+	    tx->hcd_total_ms, tx->hcd_max_ms, tx->wake_total_ms,
+	    tx->wake_max_ms);
+	printf("[wlan] usbtime rx: n=%u queue=%u/%u hcd=%u/%u wake=%u/%u ms (sum/max)\n",
+	    rx->samples, rx->queue_total_ms, rx->queue_max_ms,
+	    rx->hcd_total_ms, rx->hcd_max_ms, rx->wake_total_ms,
+	    rx->wake_max_ms);
 }
 
 /* ------------------------------------------------------------------ */
