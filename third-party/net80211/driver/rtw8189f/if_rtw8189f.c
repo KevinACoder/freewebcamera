@@ -88,6 +88,8 @@ CFATTACH_DECL_NEW(rtw8189f, sizeof(struct rtw8189f_softc), rtw8189f_match,
 static void	rtw8189f_attachhook(device_t);
 static int	rtw8189f_load_firmware(struct rtw8189f_softc *);
 static int	rtw8189f_init(struct ifnet *);
+/* NET80211_PORT(L): SDIO DAT1 card interrupt handler */
+static int	rtw8189f_sdio_intr(void *);
 static void	rtw8189f_stop(struct ifnet *, int);
 static void	rtw8189f_start(struct ifnet *);
 static void	rtw8189f_watchdog(struct ifnet *);
@@ -412,6 +414,22 @@ rtw8189f_init(struct ifnet *ifp)
 			sc->sc_chip_ready = false;
 			return error;
 		}
+
+		/* NET80211_PORT(L): SDIO DAT1 interrupt mode. Chip-side
+		 * RX_REQUEST plus CCCR INT_ENABLE go on with the worker
+		 * already running; the 10 ms poll stays armed as the
+		 * watchdog (mstohz(RTW8189F_RX_POLL_MS)). */
+		sc->sc_ih = sdmmc_intr_establish(sc->sc_sf,
+		    rtw8189f_sdio_intr, sc);
+		if (sc->sc_ih != NULL) {
+			(void) rtw8189f_sdiolocal_write_1(sc,
+			    RTW8189F_SDIO_REG_HIMR, RTW8189F_HIMR_RX_REQUEST);
+			aprint_normal_dev(sc->sc_dev,
+			    "SDIO interrupt mode on\n");
+		} else {
+			aprint_normal_dev(sc->sc_dev,
+			    "SDIO interrupt establish failed, poll-only\n");
+		}
 	}
 
 	s = splnet();
@@ -440,6 +458,14 @@ rtw8189f_stop(struct ifnet *ifp, int disable)
 	if (ic->ic_state != IEEE80211_S_INIT)
 		ieee80211_new_state(ic, IEEE80211_S_INIT, -1);
 	splx(s);
+
+	if (sc->sc_ih != NULL) {
+		/* kill the chip-side source first, then the host line */
+		(void) rtw8189f_sdiolocal_write_1(sc,
+		    RTW8189F_SDIO_REG_HIMR, 0);
+		sdmmc_intr_disestablish(sc->sc_ih);
+		sc->sc_ih = NULL;
+	}
 
 	/*
 	 * Halt the worker without joining it: the worker can be deep
@@ -738,6 +764,19 @@ rtw8189f_worker_stop(struct rtw8189f_softc *sc)
 		kpause("rtw8189fw", false, mstohz(10), NULL);
 }
 
+/* NET80211_PORT(L): SDIO card interrupt (DAT1). Runs in host-controller
+ * ISR context: latch the RX work flag and hand the worker cv one token -
+ * the bus itself is untouchable here. */
+static int
+rtw8189f_sdio_intr(void *arg)
+{
+	struct rtw8189f_softc *sc = arg;
+
+	sc->sc_flags |= RTW8189F_F_RX;
+	wlan_cv_isr_wake(&sc->sc_cv);
+	return 1;
+}
+
 static void
 rtw8189f_worker(void *arg)
 {
@@ -754,7 +793,8 @@ rtw8189f_worker(void *arg)
 	while (!sc->sc_dying) {
 		mutex_enter(&sc->sc_work_mtx);
 		while (!(sc->sc_flags & (RTW8189F_F_NEWSTATE | RTW8189F_F_TX |
-		    RTW8189F_F_SCANNEXT | RTW8189F_F_EXIT)) && !sc->sc_dying) {
+		    RTW8189F_F_SCANNEXT | RTW8189F_F_EXIT |
+		    RTW8189F_F_RX)) && !sc->sc_dying) {
 			/* A timeout is RX work, even without a software event.
 			 * PORT: poll quantum is a tunable (opt_rtw8189f.h,
 			 * 10 ms here vs NetBSD's 50 ms). */
@@ -815,8 +855,15 @@ rtw8189f_worker(void *arg)
 			rtw8189f_tx_frame(sc, m);
 		}
 
-		/* Poll the RX FIFO; interrupts are a hardening step. */
+		/* NET80211_PORT(L): the DAT1 interrupt makes this drain the
+		 * primary RX path (the comment below it predates the round).
+		 * The drain doubles as the ack - the chip-side source is
+		 * consumed by then, so re-arm the host line; a frame landing
+		 * in between simply re-asserts DAT1. */
 		rtw8189f_rx_drain(sc);
+
+		if (sc->sc_ih != NULL)
+			sdmmc_intr_ack(sc->sc_ih);
 
 		wlan_port_serializer_unlock();
 	}

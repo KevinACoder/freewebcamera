@@ -137,3 +137,39 @@ sdmmc_io_function_enable(struct sdmmc_function *sf)
 	}
 	return ops->func_enable(sf->sf_port);
 }
+
+/* NET80211_PORT(L): SDIO card interrupt channel (M11 r4). NetBSD hangs
+ * the handler off the host controller and re-arms internally; our line
+ * is level-signalled and self-masked by the ISR, so the consumer acks
+ * after draining. The cookie is the claimed wlan_sdio_dev. */
+void *
+sdmmc_intr_establish(struct sdmmc_function *sf, int (*fn_ih)(void *),
+    void *arg)
+{
+	const struct wlan_sdio_bus_ops *ops = sf_ops(sf);
+
+	if (ops == NULL || ops->intr_establish == NULL) {
+		return NULL;
+	}
+	return ops->intr_establish(sf->sf_port, fn_ih, arg);
+}
+
+void
+sdmmc_intr_ack(void *cookie)
+{
+	struct wlan_sdio_dev *dev = cookie;
+
+	if (dev != NULL && dev->ops->intr_ack != NULL) {
+		dev->ops->intr_ack(dev);
+	}
+}
+
+void
+sdmmc_intr_disestablish(void *cookie)
+{
+	struct wlan_sdio_dev *dev = cookie;
+
+	if (dev != NULL && dev->ops->intr_release != NULL) {
+		dev->ops->intr_release(dev);
+	}
+}

@@ -695,19 +695,24 @@ static int dwc_mmc_send_command(uintptr_t base_addr, struct dwc_mmc_cmd *cmd_p)
 			    mask,
 			    DWMMC_READ_REG(base_addr, DWMMC_MINTSTS_OFFSET),
 			    DWMMC_READ_REG(base_addr, DWMMC_INTMASK_OFFSET));
-		DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET, mask);
+		/* never W1C the SDIO card-interrupt bit from thread context:
+		 * the DAT1 level belongs to the ISR/consumer pair */
+		DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET,
+				mask & ~DWMMC_INTMSK_SDIO_INT);
 		return DWMMC_ERR_TIMEOUT;
 	}
 
 	if (mask & DWMMC_INTMSK_RTO) {
 		DWMMC_INFO("CMD %u response timeout (expected for CMD55)", cmd_p->cmdidx);
-		DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET, mask);
+		DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET,
+				mask & ~DWMMC_INTMSK_SDIO_INT);
 		return DWMMC_ERR_TIMEOUT;
 	}
 
 	if (mask & DWMMC_INTMSK_RE) {
 		DWMMC_ERROR("CMD %u response error", cmd_p->cmdidx);
-		DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET, mask);
+		DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET,
+				mask & ~DWMMC_INTMSK_SDIO_INT);
 		return DWMMC_ERR_CMD_FAILED;
 	}
 
@@ -886,13 +891,15 @@ static int dwc_mmc_wait_data_over(uintptr_t base_addr, struct dwc_mmc_cmd *cmd_p
 
 		if (mask & (DWMMC_DATA_ERR_FLAGS | DWMMC_DATA_TOUT_FLAGS)) {
 			DWMMC_ERROR("CMD %u data error: 0x%x", cmd_p->cmdidx, mask);
-			DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET, mask);
+			DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET,
+					mask & ~DWMMC_INTMSK_SDIO_INT);
 			DWMMC_WRITE_REG(base_addr, DWMMC_IDSTS_OFFSET, 0xFFFFFFFFU);
 			return DWMMC_ERR_DATA_FAILED;
 		}
 
 		if (mask & DWMMC_INTMSK_DTO) {
-			DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET, mask);
+			DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET,
+					mask & ~DWMMC_INTMSK_SDIO_INT);
 			if (0U != (cmd_p->flag & DWMMC_CMD_FLAG_READ_DATA)) {
 				ret = dwc_mmc_wait_idmac_rx(base_addr);
 				if (DWMMC_SUCCESS != ret) {
@@ -913,7 +920,8 @@ static int dwc_mmc_wait_data_over(uintptr_t base_addr, struct dwc_mmc_cmd *cmd_p
 	} while (--loop);
 
 	DWMMC_ERROR("CMD %u data timeout", cmd_p->cmdidx);
-	DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET, mask);
+	DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET,
+			mask & ~DWMMC_INTMSK_SDIO_INT);
 	return DWMMC_ERR_TIMEOUT;
 }
 
@@ -1167,6 +1175,19 @@ void dwc_mmc_interrupt_handler(void *param)
 			if (handler != NULL) {
 				handler(inst->evt_args[DWMMC_EVT_DATA_ERROR]);
 			}
+		}
+	}
+
+	if (status & DWMMC_INTMSK_SDIO_INT) {
+		/* SDIO card interrupt (DAT1): self-mask first so a level-held
+		 * DAT1 cannot storm the GIC while the consumer works; the
+		 * consumer re-arms via dwc_mmc_set_interrupt_mask once it
+		 * has consumed the chip-side source. The upcall must only
+		 * wake a worker - ISR context, the bus is untouchable. */
+		dwc_mmc_set_interrupt_mask(inst, DWMMC_INTMSK_SDIO_INT, false);
+		handler = inst->evt_handler[DWMMC_EVT_SDIO_INT];
+		if (handler != NULL) {
+			handler(inst->evt_args[DWMMC_EVT_SDIO_INT]);
 		}
 	}
 

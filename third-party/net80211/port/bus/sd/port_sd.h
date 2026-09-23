@@ -37,6 +37,19 @@ struct wlan_sdio_bus_ops {
 	int (*set_blocklen)(struct wlan_sdio_dev *dev, int len);
 	int (*func_enable)(struct wlan_sdio_dev *dev);
 
+	/* SDIO card interrupt (DAT1), NET80211_PORT(L) M11 r4. establish
+	 * registers a callback that runs in host-controller ISR context -
+	 * it may only wake a worker, never touch the bus - and arms the
+	 * card side (CCCR INT_ENABLE). The host ISR masks the line after
+	 * the first fire (a level-held DAT1 must not storm the GIC); ack
+	 * re-arms it once the chip-side source was consumed; release
+	 * disarms both (stop path). NetBSD vocabulary:
+	 * sdmmc_intr_establish / _ack / _disestablish. */
+	void *(*intr_establish)(struct wlan_sdio_dev *dev,
+	    int (*cb)(void *), void *arg);
+	void (*intr_ack)(struct wlan_sdio_dev *dev);
+	void (*intr_release)(struct wlan_sdio_dev *dev);
+
 	uint8_t (*read_1)(struct wlan_sdio_dev *dev, uint32_t addr);
 	uint16_t (*read_2)(struct wlan_sdio_dev *dev, uint32_t addr);
 	uint32_t (*read_4)(struct wlan_sdio_dev *dev, uint32_t addr);

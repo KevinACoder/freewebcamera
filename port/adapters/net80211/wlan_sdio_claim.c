@@ -39,6 +39,7 @@
 #include <stdio.h>
 
 #include "fsl_sdio.h"
+#include "sdmmc_board.h"		/* dwmmc_host_sdio_int_* (M11 r4) */
 
 #include <port/port.h>
 #include <port/bus/sd/port_sd.h>
@@ -198,9 +199,65 @@ static int sd_fsl_write_region(struct wlan_sdio_dev *dev, uint32_t addr,
 	    flags));
 }
 
+/* --- SDIO card interrupt (DAT1), M11 r4 ---------------------------------- */
+
+/* the driver's ISR handler, invoked from the host controller ISR via the
+ * dwmmc glue: forwarding only, no bus access in this context */
+static struct {
+	int (*cb)(void *);
+	void *arg;
+} fsl_sdio_intr_target;
+
+static void fsl_sdio_intr_trampoline(void *arg) {
+	int (*cb)(void *) = fsl_sdio_intr_target.cb;
+
+	(void) arg;
+	if (cb != NULL) {
+		cb(fsl_sdio_intr_target.arg);
+	}
+}
+
+static void *sd_fsl_intr_establish(struct wlan_sdio_dev *dev,
+    int (*cb)(void *), void *arg) {
+	sdio_card_t *card = (sdio_card_t *) dev->env_card;
+
+	/* chip side first: this function may assert DAT1 (CCCR INT_ENABLE) */
+	if (SDIO_EnableIOInterrupt(card,
+	    (sdio_func_num_t) dev->function, true) != kStatus_Success) {
+		return NULL;
+	}
+	fsl_sdio_intr_target.cb = cb;
+	fsl_sdio_intr_target.arg = arg;
+	if (dwmmc_host_sdio_int_establish(card->host,
+	    fsl_sdio_intr_trampoline, NULL) != kStatus_Success) {
+		(void) SDIO_EnableIOInterrupt(card,
+		    (sdio_func_num_t) dev->function, false);
+		fsl_sdio_intr_target.cb = NULL;
+		return NULL;
+	}
+	return dev;
+}
+
+static void sd_fsl_intr_ack(struct wlan_sdio_dev *dev) {
+	sdio_card_t *card = (sdio_card_t *) dev->env_card;
+
+	dwmmc_host_sdio_int_ack(card->host);
+}
+
+static void sd_fsl_intr_release(struct wlan_sdio_dev *dev) {
+	sdio_card_t *card = (sdio_card_t *) dev->env_card;
+
+	dwmmc_host_sdio_int_release(card->host);
+	(void) SDIO_EnableIOInterrupt(card,
+	    (sdio_func_num_t) dev->function, false);
+}
+
 static const struct wlan_sdio_bus_ops sd_fsl_ops = {
 	.set_blocklen = sd_fsl_set_blocklen,
 	.func_enable = sd_fsl_func_enable,
+	.intr_establish = sd_fsl_intr_establish,
+	.intr_ack = sd_fsl_intr_ack,
+	.intr_release = sd_fsl_intr_release,
 	.read_1 = sd_fsl_read_1,
 	.read_2 = sd_fsl_read_2,
 	.read_4 = sd_fsl_read_4,

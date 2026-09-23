@@ -52,6 +52,8 @@ typedef struct _fdwmmchost_dev_
     volatile bool data_done;
     volatile bool cmd_error;
     volatile bool data_error;
+    void (*sdio_upcall)(void *); /* SDIO card-interrupt consumer (ISR ctx) */
+    void *sdio_upcall_arg;
 } dwmmc_host_dev_t;
 
 /*******************************************************************************
@@ -101,6 +103,81 @@ static void dwmmc_host_DataErrorCB(void *para)
 
     dev->data_done = true;
     dev->data_error = true;
+}
+
+/* --- SDIO card interrupt (DAT1), M11 r4 ---------------------------------- */
+
+static void dwmmc_host_SdioIntUpcall(void *para)
+{
+    dwmmc_host_dev_t *dev = (dwmmc_host_dev_t *)para;
+
+    /* ISR context (dwc_mmc_interrupt_handler, EVT_SDIO_INT). The line is
+     * already self-masked; hand the consumer's upcall through untouched -
+     * it must wake a worker and nothing more. */
+    if (dev->sdio_upcall != NULL)
+    {
+        dev->sdio_upcall(dev->sdio_upcall_arg);
+    }
+}
+
+status_t dwmmc_host_sdio_int_establish(sdmmchost_t *host,
+    void (*upcall)(void *), void *arg)
+{
+    dwmmc_host_dev_t *dev = (dwmmc_host_dev_t *)host->dev;
+    dwc_mmc_t *ctrl_p = &(dev->hc);
+
+    if ((NULL == dev) || (NULL == upcall))
+    {
+        return kStatus_Fail;
+    }
+
+    if (!host->config.enableIrq)
+    {
+        /* the poll line never installs the controller IRQ itself; the
+         * transfer bits stay masked so the line can only assert through
+         * the SDIO_INT bit armed below */
+        dwc_mmc_set_interrupt_mask(ctrl_p, DWMMC_INTMSK_ALL, false);
+        dwc_mmc_clear_interrupt_status(ctrl_p->config.base_addr);
+        InterruptSetPriority(ctrl_p->config.irq_num, 0);
+        InterruptInstall(ctrl_p->config.irq_num, dwc_mmc_interrupt_handler,
+                         ctrl_p, "DWMMC");
+        InterruptUmask(ctrl_p->config.irq_num);
+    }
+
+    dev->sdio_upcall = upcall;
+    dev->sdio_upcall_arg = arg;
+    dwc_mmc_register_event_handler(ctrl_p, DWMMC_EVT_SDIO_INT,
+                                   dwmmc_host_SdioIntUpcall, dev);
+
+    /* arm the line; the ISR masks it again on the first card interrupt
+     * and the consumer re-arms via ..._ack after servicing the card */
+    dwc_mmc_set_interrupt_mask(ctrl_p, DWMMC_INTMSK_SDIO_INT, true);
+
+    return kStatus_Success;
+}
+
+void dwmmc_host_sdio_int_ack(sdmmchost_t *host)
+{
+    dwmmc_host_dev_t *dev = (dwmmc_host_dev_t *)host->dev;
+
+    if (NULL == dev)
+    {
+        return;
+    }
+    dwc_mmc_set_interrupt_mask(&(dev->hc), DWMMC_INTMSK_SDIO_INT, true);
+}
+
+void dwmmc_host_sdio_int_release(sdmmchost_t *host)
+{
+    dwmmc_host_dev_t *dev = (dwmmc_host_dev_t *)host->dev;
+
+    if (NULL == dev)
+    {
+        return;
+    }
+    dwc_mmc_set_interrupt_mask(&(dev->hc), DWMMC_INTMSK_SDIO_INT, false);
+    dev->sdio_upcall = NULL;
+    dev->sdio_upcall_arg = NULL;
 }
 
 static void dwmmc_host_SetupIrq(dwmmc_host_dev_t *dev)

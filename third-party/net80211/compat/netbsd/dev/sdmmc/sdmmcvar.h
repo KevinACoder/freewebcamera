@@ -56,4 +56,13 @@ int sdmmc_io_write_region_1(struct sdmmc_function *, uint32_t,
 int sdmmc_io_set_blocklen(struct sdmmc_function *, int);
 int sdmmc_io_function_enable(struct sdmmc_function *);
 
+/* NET80211_PORT(L): SDIO card interrupt (M11 r4). NetBSD establishes a
+ * handler on the host controller and re-arms internally; our line is
+ * level-signalled and the ISR self-masks it (a DAT1 held would storm
+ * the GIC), so the consumer acks after draining. The cookie feeds ack
+ * and disestablish (stop path). */
+void *sdmmc_intr_establish(struct sdmmc_function *, int (*)(void *), void *);
+void sdmmc_intr_ack(void *);
+void sdmmc_intr_disestablish(void *);
+
 #endif /* _COMPAT_DEV_SDMMC_SDMMCVAR_H_ */

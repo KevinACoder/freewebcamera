@@ -78,6 +78,10 @@ extern int rtw8189f_debug;
 #define RTW8189F_F_TX			0x0002
 #define RTW8189F_F_EXIT			0x0004
 #define RTW8189F_F_SCANNEXT		0x0008
+/* NET80211_PORT(L): set from the SDIO DAT1 ISR, so it lives outside the
+ * mutex discipline - a lost update to this one bit only costs one poll
+ * quantum (the 10 ms watchdog stays on). */
+#define RTW8189F_F_RX			0x0010
 
 /* Bounce buffer sizes: RX must hold the largest aggregated FIFO burst,
  * TX one TXDESC (40B) plus the largest 802.11 frame. */
@@ -106,6 +110,7 @@ struct rtw8189f_softc {
 	enum ieee80211_state	sc_nstate;	/* deferred newstate args */
 	int			sc_narg;
 	lwp_t			*sc_worker;
+	void			*sc_ih;		/* NET80211_PORT(L): SDIO intr cookie */
 
 	int			sc_dying;
 	bool			sc_attached;

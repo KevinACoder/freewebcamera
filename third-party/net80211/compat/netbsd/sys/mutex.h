@@ -63,6 +63,11 @@ int wlan_cv_init(kcondvar_t *cv, int flags);
 int wlan_cv_wait(kcondvar_t *cv, kmutex_t *m);
 int wlan_cv_timedwait(kcondvar_t *cv, kmutex_t *m, int ticks);
 int wlan_cv_broadcast(kcondvar_t *cv);
+/* ISR-safe wake (M11 r4 SDIO card interrupt): hands the cv one token
+ * without touching the waiters mutex. A token consumed by a
+ * not-yet-waiting thread is a spurious wakeup under the documented
+ * cv contract - predicates are polled around timed waits. */
+int wlan_cv_isr_wake(kcondvar_t *cv);
 void wlan_cv_destroy(kcondvar_t *cv);
 
 #define cv_init(cv, ...) wlan_cv_init((cv), 0)

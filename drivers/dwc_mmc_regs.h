@@ -242,10 +242,16 @@ static inline bool dwc_mmc_card_exists(uintptr_t base_addr)
 	return (0U == (DWMMC_READ_REG(base_addr, DWMMC_CDETECT_OFFSET) & 0x1U));
 }
 
-/* Clear all raw interrupt state (write-one-clear). */
+/* Clear all raw interrupt state (write-one-clear) EXCEPT the SDIO card
+ * interrupt (bit 16): a pending card interrupt must survive pre-transfer
+ * clears, or the DAT1 level would be silently swallowed between frames
+ * (M11 r4 interrupt mode). */
+#define DWMMC_RINTSTS_CLEAR_ALL	\
+	(DWMMC_INTMSK_ALL & ~(uint32_t)DWMMC_INTMSK_SDIO_INT)
+
 static inline void dwc_mmc_clear_interrupt_status(uintptr_t base_addr)
 {
-	DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET, DWMMC_INTMSK_ALL);
+	DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET, DWMMC_RINTSTS_CLEAR_ALL);
 	DWMMC_WRITE_REG(base_addr, DWMMC_IDSTS_OFFSET, 0xFFFFFFFFU);
 }
 
