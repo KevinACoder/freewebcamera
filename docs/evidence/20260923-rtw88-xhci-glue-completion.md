@@ -206,3 +206,17 @@ net_80211 `19ff73f`+`9257cc1`；fwc-rtw88 镜像 + worker fatal 定位记录
 3. demux 崩溃二分：latency record 短路实验。
 4. RX 聚合寄存器对拍 NetBSD（0x280/0x10C 行为差）。
 5. 堆修好 → scan 节点 → wpa connect → DHCP → iperf 600s×2。
+
+# 续轮 5：聚合根因 = dist 独有 BIT_RXDMA_AGG_EN 使能（主线无此写）
+
+- 主线 Linux rtw88 usb.c（rtems-libbsd/freebsd-org 镜像，969 行）grep 无
+  dynamic_rx_agg、无 RX 聚合寄存器写 —— 设备 fw 默认逐包交付。
+- dist/glue 的 dynamic_rx_agg 每 2s 写 BIT_RXDMA_AGG_EN(0x10C BIT2) +
+  0x280=0x0100 → 本芯片语义 = 聚合到宿主缓冲满（32K 整缓冲）→ 全部被
+  len 门丢弃。修复 = dynamic_rx_agg 改 no-op（对齐主线）（net_80211
+  04b2c30，fwc 镜像同补）。
+- 首轮验证（boot-024837）：demux 256+ 次运行、队列有帧；status=-1 与
+  event-context 哨兵仍周期出现；扫描表在 6s dump 时机下仍空（未及
+  整圈）。**效果待完整扫描窗口复验。**
+- 另：1024 环实验已回退（power-on 卡死回归）；`wlan dbg` argv 解析
+  bug 待修（mask 落 0）。
