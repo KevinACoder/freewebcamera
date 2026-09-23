@@ -136,10 +136,20 @@ void tx_irq_handler(void)
 		 * - goes through the board's handler table. */
 		board_gicv3_dispatch(id);
 	} else {
-		/* Spurious (IAR=1023): same stamped raw marker as the
-		 * FreeRTOS glue, so both kernels produce comparable logs. No
-		 * EOI for a spurious ack. */
-		board_early_print_raw("irq: spurious\n");
+		/* Spurious (IAR=1023): no EOI for a spurious ack. A
+		 * level-signalled source self-masking inside its own ISR
+		 * produces one of these per real interrupt - the line-drop
+		 * propagation outlives the EOI, the re-pend evaporates and
+		 * the next IAR comes back empty (M11 r4 SDIO DAT1: tens per
+		 * second, harmless, so the print is throttled to a running
+		 * count instead of flooding the console). */
+		static uint32_t spurious_count;
+		static uint32_t spurious_last;
+		spurious_count++;
+		if (spurious_count - spurious_last >= 100U) {
+			board_early_print_raw("irq: spurious x100\n");
+			spurious_last = spurious_count;
+		}
 	}
 
 	if (id != 1023U) {
