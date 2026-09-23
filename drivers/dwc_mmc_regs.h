@@ -199,6 +199,11 @@
 #define DWMMC_IDMAC_INT_CES		(1u << 5)
 #define DWMMC_IDMAC_INT_NI		(1u << 8)
 #define DWMMC_IDMAC_INT_AI		(1u << 9)
+/* fatal IDMAC status: fatal bus error, descriptor unavailable, card
+ * error summary, abnormal interrupt */
+#define DWMMC_IDMAC_ERR_FLAGS \
+	(DWMMC_IDMAC_INT_FBE | DWMMC_IDMAC_INT_DU | \
+	 DWMMC_IDMAC_INT_CES | DWMMC_IDMAC_INT_AI)
 
 /* 4 KiB per descriptor, burst up to 0x1fff. */
 #define DWMMC_DMA_DESC_MAX_DATA_LEN	0x1000U

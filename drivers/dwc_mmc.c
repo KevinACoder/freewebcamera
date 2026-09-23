@@ -798,6 +798,13 @@ static int dwc_mmc_prepare_dma(struct dwc_mmc *inst, struct dwc_mmc_cmd *cmd_p)
 	if (0U != (cmd_p->flag & DWMMC_CMD_FLAG_WRITE_DATA)) {
 		board_dcache_flush(buf_bus, dat_p->datalen);
 	}
+	/* a read transfer hands the buffer to the device the other way:
+	 * drop the CPU's lines covering it before the doorbell so no
+	 * dirty line evicted during the DMA window can write back over
+	 * the incoming data (M11 r3: block-mode CMD53 corruption) */
+	if (0U != (cmd_p->flag & DWMMC_CMD_FLAG_READ_DATA)) {
+		board_dcache_invalidate(buf_bus, dat_p->datalen);
+	}
 
 	/* FIFO reset and wait for self-clear */
 	DWMMC_WRITE_REG(base_addr, DWMMC_CTRL_OFFSET, DWMMC_CTRL_FIFO_RESET);
@@ -809,6 +816,10 @@ static int dwc_mmc_prepare_dma(struct dwc_mmc *inst, struct dwc_mmc_cmd *cmd_p)
 
 	/* descriptor list base address */
 	DWMMC_WRITE_REG(base_addr, DWMMC_DBADDR_OFFSET, (uint32_t)desc_bus);
+
+	/* clear stale IDMAC status: the read completion poll reads IDSTS
+	 * and must only see this transfer's receive interrupt */
+	DWMMC_WRITE_REG(base_addr, DWMMC_IDSTS_OFFSET, DWMMC_INTMSK_ALL);
 
 	/* CTRL: enable IDMAC + DMA (INT_ENABLE must ride along - the FIFO
 	 * reset clears it) */
@@ -828,10 +839,40 @@ static int dwc_mmc_prepare_dma(struct dwc_mmc *inst, struct dwc_mmc_cmd *cmd_p)
 	return DWMMC_SUCCESS;
 }
 
+/* Wait for the IDMAC to close the last descriptor of a read transfer:
+ * DTO only means the controller consumed the wire data - the FIFO-to-RAM
+ * drain trails it. RI is the bit NetBSD's dwc_mmc ISR waits on. */
+static int dwc_mmc_wait_idmac_rx(uintptr_t base_addr)
+{
+	uint32_t idsts = 0U;
+	uint32_t loop = DWMMC_DATA_TIMEOUT_MS;
+
+	do {
+		idsts = DWMMC_READ_REG(base_addr, DWMMC_IDSTS_OFFSET);
+
+		if (0U != (idsts & DWMMC_IDMAC_ERR_FLAGS)) {
+			DWMMC_ERROR("IDMAC error: 0x%x", idsts);
+			break;
+		}
+		if (0U != (idsts & DWMMC_IDMAC_INT_RI)) {
+			DWMMC_WRITE_REG(base_addr, DWMMC_IDSTS_OFFSET,
+					DWMMC_INTMSK_ALL);
+			return DWMMC_SUCCESS;
+		}
+
+		dwc_udelay(100);
+	} while (--loop);
+
+	DWMMC_ERROR("IDMAC receive not complete (idsts=0x%x)", idsts);
+	DWMMC_WRITE_REG(base_addr, DWMMC_IDSTS_OFFSET, DWMMC_INTMSK_ALL);
+	return DWMMC_ERR_TIMEOUT;
+}
+
 static int dwc_mmc_wait_data_over(uintptr_t base_addr, struct dwc_mmc_cmd *cmd_p)
 {
 	uint32_t mask;
 	uint32_t loop = DWMMC_DATA_TIMEOUT_MS;
+	int ret;
 
 	do {
 		mask = DWMMC_READ_REG(base_addr, DWMMC_RINTSTS_OFFSET);
@@ -845,9 +886,15 @@ static int dwc_mmc_wait_data_over(uintptr_t base_addr, struct dwc_mmc_cmd *cmd_p
 
 		if (mask & DWMMC_INTMSK_DTO) {
 			DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET, mask);
-			/* a read transfer just wrote through RAM: drop the
-			 * stale lines before the consumer looks at the data */
 			if (0U != (cmd_p->flag & DWMMC_CMD_FLAG_READ_DATA)) {
+				ret = dwc_mmc_wait_idmac_rx(base_addr);
+				if (DWMMC_SUCCESS != ret) {
+					return ret;
+				}
+				/* drop this core's stale copies before the
+				 * consumer reads: pre-DMA invalidation ran on
+				 * whatever core armed the transfer, the
+				 * consumer may resume on another one */
 				board_dcache_invalidate(
 					(uintptr_t)cmd_p->data_p->buf,
 					cmd_p->data_p->datalen);

@@ -17,7 +17,17 @@
  * shares a line with live data gets its neighbors discarded. All
  * data bursts therefore go through this file's own 512-byte-aligned
  * staging buffer, which owns whole lines (and doubles as the bounce
- * buffer alignment the CMD53 FIFO protocol wants).
+ * buffer alignment the CMD53 FIFO protocol wants). On the RX side
+ * dw_mmc (M11 r3) drops the CPU's lines before it arms the DMA, waits
+ * for the IDMAC's last-descriptor interrupt after DTO, and invalidates
+ * again for the consuming core - until then a TCP burst could corrupt
+ * block-mode reads through evicted dirty lines and a FIFO tail that
+ * was still in flight.
+ *
+ * Mutual exclusion lives one layer up: the chip driver holds the port
+ * serializer across every bus op (TX frames and RX drain both run on
+ * its work thread), so the memcpys into and out of this buffer are
+ * already atomic against the CMD53s - no extra locking here.
  *
  * @author zhugengyu
  * @date   22.09.2026
