@@ -377,6 +377,7 @@ void usbd_abort_pipe(struct usbd_pipe *pipe) {
 	ipl_restore(ipl);
 }
 
+static usbd_status usbd_pipe_clear_halt(struct usbd_pipe *pipe);
 void usbd_clear_endpoint_stall_async(struct usbd_pipe *pipe) {
 	(void) usbd_pipe_clear_halt(pipe);
 }
