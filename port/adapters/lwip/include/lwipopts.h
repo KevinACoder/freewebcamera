@@ -62,7 +62,7 @@
 #define MEM_ALIGNMENT                   8
 #define MEMP_OVERFLOW_CHECK             0
 #define MEMP_SANITY_CHECK               0
-#define PBUF_POOL_SIZE                  16
+#define PBUF_POOL_SIZE                  40
 /* Large enough for a 1518-byte frame plus link header, with headroom: a
  * jumbo-ish single-pbuf receive must never need a chain. */
 #define PBUF_POOL_BUFSIZE               1600
