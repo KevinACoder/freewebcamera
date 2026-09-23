@@ -679,54 +679,85 @@ uint32_t osKernelGetSysTimerFreq(void)
  * guard a word of state and never span a blocking call, but running out is
  * reported rather than silently corrupting the save stack. */
 #define MAX_KERNEL_LOCK_DEPTH	8
+/* Per-core bookkeeping: the DAIF save value belongs to THIS core's CPSR
+ * and the nesting depth is this core's state. A shared count let core A
+ * unprotect() release the global lock while core B still held it, and a
+ * third core then walked into a "protected" lwIP memory section (M11 r4
+ * B1: memp free-list updated by two cores at once, one block handed out
+ * twice, list head overwritten with payload bytes - fatal, both tcpip
+ * and wlan-work dying in do_memp_malloc_pool). */
+#define KERNEL_LOCK_CORES	4
 
-static uint32_t kernel_lock_count;
-static UINT kernel_lock_daif[MAX_KERNEL_LOCK_DEPTH];
+static uint32_t kernel_lock_count[KERNEL_LOCK_CORES];
+static UINT kernel_lock_daif[KERNEL_LOCK_CORES][MAX_KERNEL_LOCK_DEPTH];
+
+static UINT kernel_lock_core_id(void)
+{
+	uint64_t mpidr;
+
+	__asm__ volatile ("mrs %0, mpidr_el1" : "=r"(mpidr));
+	/* this SoC numbers its cores in Aff1 (see gicv3.c) */
+	return (UINT)((mpidr >> 8) & 0xFu);
+}
 
 int32_t osKernelLock(void)
 {
+	UINT core = kernel_lock_core_id();
+
 	if (kernel_state != osKernelRunning) {
 		return (int32_t)osError;
 	}
-	if (kernel_lock_count >= MAX_KERNEL_LOCK_DEPTH) {
+	if (core >= KERNEL_LOCK_CORES ||
+	    kernel_lock_count[core] >= MAX_KERNEL_LOCK_DEPTH) {
 		return (int32_t)osError;
 	}
-	kernel_lock_daif[kernel_lock_count] = _tx_thread_smp_protect();
-	kernel_lock_count++;
-	return (int32_t)kernel_lock_count;
+	kernel_lock_daif[core][kernel_lock_count[core]] =
+		_tx_thread_smp_protect();
+	kernel_lock_count[core]++;
+	return (int32_t)kernel_lock_count[core];
 }
 
 int32_t osKernelUnlock(void)
 {
+	UINT core = kernel_lock_core_id();
+
 	if (kernel_state != osKernelRunning) {
 		return (int32_t)osError;
 	}
-	if (kernel_lock_count > 0U) {
-		kernel_lock_count--;
-		_tx_thread_smp_unprotect(kernel_lock_daif[kernel_lock_count]);
+	if (core < KERNEL_LOCK_CORES && kernel_lock_count[core] > 0U) {
+		kernel_lock_count[core]--;
+		_tx_thread_smp_unprotect(
+			kernel_lock_daif[core][kernel_lock_count[core]]);
 	}
-	return (int32_t)kernel_lock_count;
+	return (core < KERNEL_LOCK_CORES)
+	       ? (int32_t)kernel_lock_count[core] : (int32_t)osError;
 }
 
 int32_t osKernelRestoreLock(int32_t lock)
 {
+	UINT core = kernel_lock_core_id();
+
 	if (kernel_state != osKernelRunning) {
 		return (int32_t)osError;
 	}
 	if (lock < 0) {
 		return (int32_t)osErrorParameter;
 	}
-	while (kernel_lock_count > (uint32_t)lock) {
+	if (core >= KERNEL_LOCK_CORES) {
+		return (int32_t)osError;
+	}
+	while (kernel_lock_count[core] > (uint32_t)lock) {
 		(void)osKernelUnlock();
 	}
-	while (kernel_lock_count < (uint32_t)lock) {
-		if (kernel_lock_count >= MAX_KERNEL_LOCK_DEPTH) {
+	while (kernel_lock_count[core] < (uint32_t)lock) {
+		if (kernel_lock_count[core] >= MAX_KERNEL_LOCK_DEPTH) {
 			return (int32_t)osError;
 		}
-		kernel_lock_daif[kernel_lock_count] = _tx_thread_smp_protect();
-		kernel_lock_count++;
+		kernel_lock_daif[core][kernel_lock_count[core]] =
+			_tx_thread_smp_protect();
+		kernel_lock_count[core]++;
 	}
-	return (int32_t)kernel_lock_count;
+	return (int32_t)kernel_lock_count[core];
 }
 
 /* --- event flags ----------------------------------------------------------- */
