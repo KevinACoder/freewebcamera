@@ -613,6 +613,30 @@ rtw88_chip_rx_work(struct work_struct *w)
 			break;
 
 		rx_desc = rx_skb->data;
+		{
+			/* forensics 2026-09-24: raw content of the first
+			 * frames reaching the demux */
+			static unsigned rx_dump_done;
+			unsigned u;
+
+			if (rx_dump_done < 4) {
+				printf("rtw88: rx raw len=%u:\n",
+				    (unsigned) rx_skb->len);
+				for (u = 0; u < 64; u += 8) {
+					printf("  %02x%02x %02x%02x %02x%02x "
+					    "%02x%02x\n",
+					    rx_skb->data[u],
+					    rx_skb->data[u + 1],
+					    rx_skb->data[u + 2],
+					    rx_skb->data[u + 3],
+					    rx_skb->data[u + 4],
+					    rx_skb->data[u + 5],
+					    rx_skb->data[u + 6],
+					    rx_skb->data[u + 7]);
+				}
+				rx_dump_done++;
+			}
+		}
 		do {
 			rx_buf = rx_desc + pkt_desc_sz;
 			rtw_rx_query_rx_desc(rtwdev, rx_desc, rx_buf, &pkt_stat,
