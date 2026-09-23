@@ -181,3 +181,28 @@ XHCI_EVENT_DEBUG=1。
 
 net_80211 `19ff73f`+`9257cc1`；fwc-rtw88 镜像 + worker fatal 定位记录
 （本节）。binary d23a6d2d 停在 fatal 后现场（未再复跑）。
+
+---
+
+# 续轮 4（2026-09-24）：demux fatal 修复 + shim err 码取证 + 1024 环回归回退
+
+- complete_td 守卫+整段清（e5d7f95）板验站稳：boot-023812 上 demux 768 次
+  运行、skbq 持续有帧、无 fatal（此前 run 1-2 即死）。
+- shim 完成点取证（16cfd01，net_80211 9257cc1 手工镜像）：`shim: rx
+  complete err=` 打印原始 cherryusb 错误码；`wlan dbg` 命令本轮确认有
+  解析 bug（打印 mask=0x0），待修。
+- **镜像事故记录**：3deadb1 误将 net_80211 新版 usbdi_compat.c（+418 行
+  刻意分歧变体）覆盖 fwc 刻意保留的旧变体；16cfd01 恢复并手工只打
+  rx_err 补丁。教训：fwc 的 usbdi_compat.c / rtw88_compat.c 为刻意分歧
+  变体，禁止整文件镜像，只能手工移植补丁。
+- **1024 传输环实验失败回退**：环扩到 1024 后 power-on 卡死（ctrl 风暴
+  val=04e0/0x30 循环超时 + "chip bring-up did not complete"），疑似堆
+  压力，已回退 256；实验记录在案。
+
+## 下一轮（不变 + 新增）
+
+1. `wlan dbg` argv 解析修复（实测 mask 落 0）。
+2. `shim: rx complete err=` 抓取分类（本轮已接线未及捕获）。
+3. demux 崩溃二分：latency record 短路实验。
+4. RX 聚合寄存器对拍 NetBSD（0x280/0x10C 行为差）。
+5. 堆修好 → scan 节点 → wpa connect → DHCP → iperf 600s×2。
