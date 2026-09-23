@@ -1767,6 +1767,23 @@ rtw8189f_txdesc_chksum(uint8_t *desc)
 
 #define RTW8189F_TX_QUEUE_IDX_HI	0
 
+static unsigned rtw8189f_data_rate_mbps = 24;
+
+int
+rtw8189f_data_rate_set(unsigned mbps)
+{
+	if (mbps != 24 && mbps != 36 && mbps != 54)
+		return EINVAL;
+	rtw8189f_data_rate_mbps = mbps;
+	return 0;
+}
+
+unsigned
+rtw8189f_data_rate_get(void)
+{
+	return rtw8189f_data_rate_mbps;
+}
+
 void
 rtw8189f_tx_frame(struct rtw8189f_softc *sc, struct mbuf *m)
 {
@@ -1775,8 +1792,9 @@ rtw8189f_tx_frame(struct rtw8189f_softc *sc, struct mbuf *m)
 	struct ieee80211_node *ni;
 	struct ieee80211_frame *wh;
 	uint8_t *buf = sc->sc_txbuf;
-	uint32_t len, pages, free_hi, free_pub, rptseq;
-	unsigned rate;
+	uint32_t len, pages, free_queue, free_pub, rptseq;
+	unsigned rate, queue, devid, page_offset;
+	bool data;
 	int tries;
 
 	rptseq = (uint32_t)-1;
@@ -1788,8 +1806,21 @@ rtw8189f_tx_frame(struct rtw8189f_softc *sc, struct mbuf *m)
 	}
 
 	wh = mtod(m, struct ieee80211_frame *);
+	data = (wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK) ==
+	    IEEE80211_FC0_TYPE_DATA && (wh->i_addr1[0] & 0x01) == 0;
+	queue = data ? RTW8189F_TXDESC_QSEL_BE : RTW8189F_TXDESC_QSEL_MGNT;
+	devid = data ? RTW8189F_WLAN_TX_LOQ_DEVICE_ID :
+	    RTW8189F_WLAN_TX_HIQ_DEVICE_ID;
+	page_offset = data ? 4 : 0;
 	rate = (wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK) == IEEE80211_FC0_TYPE_MGT
 	    ? RTW8189F_RATE_1M : RTW8189F_RATE_6M;
+	if (data) {
+		switch (rtw8189f_data_rate_mbps) {
+		case 24: rate = RTW8189F_RATE_24M; break;
+		case 36: rate = RTW8189F_RATE_36M; break;
+		default: rate = RTW8189F_RATE_54M; break;
+		}
+	}
 
 	len = (uint32_t)m->m_pkthdr.len;
 	if (len + RTW8189F_TXDESC_SIZE > RTW8189F_TXBUFSZ) {
@@ -1802,7 +1833,7 @@ rtw8189f_tx_frame(struct rtw8189f_softc *sc, struct mbuf *m)
 
 	le32enc(buf + 0, (len & RTW8189F_TXDW0_PKTLEN_M) |
 	    (RTW8189F_TXDESC_SIZE << RTW8189F_TXDW0_OFFSET_S));
-	le32enc(buf + 4, RTW8189F_TXDESC_QSEL_MGNT << RTW8189F_TXDW1_QSEL_S);
+	le32enc(buf + 4, queue << RTW8189F_TXDW1_QSEL_S);
 	le32enc(buf + 12, RTW8189F_TXDW3_USE_RATE);
 	le32enc(buf + 16, rate & RTW8189F_TXDW4_RATE_M);
 	if ((wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK) == IEEE80211_FC0_TYPE_MGT) {
@@ -1837,22 +1868,23 @@ rtw8189f_tx_frame(struct rtw8189f_softc *sc, struct mbuf *m)
 	len = (len + RTW8189F_TXDESC_SIZE + 3) & ~3u;
 	pages = (len + 127) / 128;
 
-	/* Wait for HIQ (+public) pages, vendor polling mode. */
+	/* FREE_TXPG stores high, normal, low and public 16-bit counts. */
 	for (tries = 0;; tries++) {
-		free_hi = rtw8189f_sdiolocal_read_1(sc, RTW8189F_SDIO_REG_FREE_TXPG + 0);
+		free_queue = rtw8189f_sdiolocal_read_1(sc,
+		    RTW8189F_SDIO_REG_FREE_TXPG + page_offset);
 		free_pub = rtw8189f_sdiolocal_read_1(sc, RTW8189F_SDIO_REG_FREE_TXPG + 6);
-		if (free_hi + free_pub >= pages)
+		if (free_queue + free_pub >= pages)
 			break;
 		if (tries >= 100 || sc->sc_dying) {
 			DPRINTF(sc, "tx: no free pages (%u+%u < %u)\n",
-			    free_hi, free_pub, pages);
+			    free_queue, free_pub, pages);
 			if_statinc(ifp, if_oerrors);
 			goto out;
 		}
 		kpause("rtw8189ft", true, mstohz(50), NULL);
 	}
 
-	if (rtw8189f_fifo_write(sc, RTW8189F_WLAN_TX_HIQ_DEVICE_ID, buf, len) != 0) {
+	if (rtw8189f_fifo_write(sc, devid, buf, len) != 0) {
 		DPRINTF(sc, "tx: fifo write failed\n");
 		if_statinc(ifp, if_oerrors);
 		goto out;

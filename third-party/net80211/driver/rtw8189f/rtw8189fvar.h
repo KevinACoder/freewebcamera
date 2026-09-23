@@ -178,6 +178,8 @@ void	rtw8189f_set_channel(struct rtw8189f_softc *, unsigned);
 void	rtw8189f_scan_rx_fltr(struct rtw8189f_softc *, bool);
 void	rtw8189f_set_bssid(struct rtw8189f_softc *, const uint8_t *);
 void	rtw8189f_tx_frame(struct rtw8189f_softc *, struct mbuf *);
+int	rtw8189f_data_rate_set(unsigned);
+unsigned rtw8189f_data_rate_get(void);
 void	rtw8189f_rx_drain(struct rtw8189f_softc *);
 
 #endif /* !_DEV_SDMMC_RTW8189FVAR_H_ */

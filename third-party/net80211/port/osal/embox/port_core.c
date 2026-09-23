@@ -68,6 +68,12 @@ int wlan_port_select(const char *name) {
 	return -1;
 }
 
+const char *wlan_port_active_name(void) {
+	const struct wlan_port_adapter *ad = wlan_port_adapter_first();
+
+	return ad != NULL ? ad->name : NULL;
+}
+
 int wlan_port_up(void) {
 	const struct wlan_port_adapter *ad = wlan_port_adapter_first();
 

@@ -24,8 +24,13 @@
 #include "lwip/dhcp.h"
 
 #include <port/port.h>
+#include <port/net/lwip/lwip_netif.h>
 
 #include "wlan_adapter.h"
+#include "wpa_port_api.h"
+
+extern int rtw8189f_data_rate_set(unsigned mbps);
+extern unsigned rtw8189f_data_rate_get(void);
 
 extern void wlan_usbdi_trace_reset(void);
 extern void wlan_usbdi_trace_set(unsigned level);
@@ -91,7 +96,48 @@ static int cmd_wlan(int argc, char **argv)
 	chry_shell_t *csh = CSH_FROM_ARGV(argc, argv);
 
 	if (argc >= 2 && strcmp(argv[1], "status") == 0) {
+		const char *name = wlan_port_active_name();
+		uint8_t mac[6];
+
+		if (name != NULL && wlan_port_get_hwaddr(mac) == 0) {
+			csh_printf(csh, "wlan selected=%s mac=%02x:%02x:%02x:%02x:%02x:%02x\r\n",
+			    name, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+		}
 		wlan_port_status_dump();
+		return 0;
+	}
+
+	if (argc >= 2 && strcmp(argv[1], "select") == 0) {
+		if (argc != 3 || (strcmp(argv[2], "urtwn") != 0 &&
+		    strcmp(argv[2], "rtw8189f") != 0)) {
+			csh_printf(csh, "usage: wlan select urtwn|rtw8189f\r\n");
+		} else if (wpa_port_started()) {
+			csh_printf(csh, "wlan: select before wpa start\r\n");
+		} else if (wlan_port_select(argv[2]) != 0) {
+			csh_printf(csh, "wlan: adapter %s not attached\r\n", argv[2]);
+		} else {
+			csh_printf(csh, "wlan: selected %s\r\n", argv[2]);
+		}
+		return 0;
+	}
+
+	if (argc >= 2 && strcmp(argv[1], "rate") == 0) {
+		if (strcmp(wlan_port_active_name() != NULL ?
+		    wlan_port_active_name() : "", "rtw8189f") != 0) {
+			csh_printf(csh, "wlan: select rtw8189f first\r\n");
+			return 0;
+		}
+		if (argc > 3 || (argc == 3 &&
+		    strcmp(argv[2], "24") != 0 &&
+		    strcmp(argv[2], "36") != 0 &&
+		    strcmp(argv[2], "54") != 0)) {
+			csh_printf(csh, "usage: wlan rate 24|36|54\r\n");
+			return 0;
+		}
+		if (argc == 3)
+			(void) rtw8189f_data_rate_set((unsigned) atoi(argv[2]));
+		csh_printf(csh, "rtw8189f data rate=%u Mbps\r\n",
+		    rtw8189f_data_rate_get());
 		return 0;
 	}
 
@@ -147,13 +193,13 @@ static int cmd_wlan(int argc, char **argv)
 	if (argc >= 2 && strcmp(argv[1], "reg") == 0) {
 		unsigned long addr;
 		unsigned val;
+		int sdio = wlan_port_active_name() != NULL &&
+		    strcmp(wlan_port_active_name(), "rtw8189f") == 0;
 
-		/* dispatch order = adapter priority: rtw8189f (SDIO, the
-		 * netif owner when present) first, urtwn (USB dongle)
-		 * second - with both attached the urtwn read would still
-		 * succeed and dump the wrong chip. */
+		/* Diagnostics follow the selected adapter, including when both
+		 * buses are attached. */
 		if (argc >= 3 && strcmp(argv[2], "txq") == 0) {
-			if (wlan_rtw8189f_reg_read(0x0100u, &val) == 0) {
+			if (sdio) {
 				wlan_rtw8189f_txq_dump();
 			} else {
 				wlan_urtwn_txq_dump();
@@ -162,10 +208,10 @@ static int cmd_wlan(int argc, char **argv)
 		}
 		if (argc >= 4 && strcmp(argv[2], "read") == 0) {
 			addr = parse_hex(argv[3]);
-			if (wlan_rtw8189f_reg_read((unsigned) addr, &val) == 0) {
+			if (sdio && wlan_rtw8189f_reg_read((unsigned) addr, &val) == 0) {
 				csh_printf(csh, "rtw8189f reg[0x%04lx] = 0x%08x\r\n",
 					   addr & 0xfffffful, val);
-			} else if (wlan_urtwn_reg_read((unsigned) addr,
+			} else if (!sdio && wlan_urtwn_reg_read((unsigned) addr,
 			    &val) == 0) {
 				csh_printf(csh, "urtwn reg[0x%04lx] = 0x%08x\r\n",
 					   addr & 0xfffful, val);
@@ -177,9 +223,9 @@ static int cmd_wlan(int argc, char **argv)
 		if (argc >= 5 && strcmp(argv[2], "write") == 0) {
 			addr = parse_hex(argv[3]);
 			val = (unsigned) parse_hex(argv[4]);
-			if (wlan_rtw8189f_reg_write((unsigned) addr, val) == 0) {
+			if (sdio && wlan_rtw8189f_reg_write((unsigned) addr, val) == 0) {
 				csh_printf(csh, "wlan: reg write ok (rtw8189f)\r\n");
-			} else if (wlan_urtwn_reg_write((unsigned) addr,
+			} else if (!sdio && wlan_urtwn_reg_write((unsigned) addr,
 			    val) == 0) {
 				csh_printf(csh, "wlan: reg write ok (urtwn)\r\n");
 			} else {
@@ -207,10 +253,11 @@ static int cmd_wlan(int argc, char **argv)
 	if (argc >= 2 && strcmp(argv[1], "net") == 0) {
 		/* wl netif view: address/gw/lease - the lwip-side state the
 		 * radio-side "status" cannot show */
-		struct netif *wl = wlan_lwip_get_netif();
+		struct netif *wl;
 		char ipbuf[16], gwbuf[16], maskbuf[16];
 
 		(void) wlan_lwip_start();
+		wl = wlan_lwip_get_netif();
 		if (wl == NULL || !netif_is_up(wl)) {
 			csh_printf(csh, "wlan net: netif not up\r\n");
 			return 0;
@@ -248,7 +295,8 @@ static int cmd_wlan(int argc, char **argv)
 	}
 
 	csh_printf(csh,
-		   "usage: wlan scan [seconds] | wlan status | wlan net | "
+		   "usage: wlan select urtwn|rtw8189f | rate 24|36|54 | "
+		   "scan [seconds] | status | net | "
 		   "wlan trace [0|1|2] | wlan usbstats | wlan stats | "
 		   "wlan sdreg | "
 		   "wlan reg read|write|txq | wlan calib [0|1] | "
@@ -256,5 +304,5 @@ static int cmd_wlan(int argc, char **argv)
 	return 0;
 }
 
-CSH_CMD_EXPORT_ALIAS_FULL(cmd_wlan, wlan, "wlan scan [s] | status | trace [n] | usbstats | stats | sdreg | reg | calib | ra | fwfix",
+CSH_CMD_EXPORT_ALIAS_FULL(cmd_wlan, wlan, "wlan select <adapter> | rate <Mbps> | scan | status | net | stats | usbstats",
 			  "net80211 adapter: bring up the radio and scan");
