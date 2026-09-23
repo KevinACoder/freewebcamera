@@ -80,8 +80,10 @@ extern void board_smp_start_secondaries(void);
 /* CMSIS: 1..56, higher = more urgent. ThreadX: 0..TX_MAX_PRIORITIES-1,
  * LOWER = more urgent. CMSIS named bands are 8 apart; each band maps to a
  * run of 4 ThreadX levels, highest band first. osPriorityNormal (24, band
- * 3) lands on level 16 - the middle of the range, same shape as the
- * FreeRTOS twin's default. */
+ * 3) lands on level 19 and osPriorityAboveNormal (32, band 4) on 15 - the
+ * latter is the tcpip thread's level (TCPIP_THREAD_PRIO=4 through this
+ * map), with the wlan workers parked just below it (wlan_adapter.c
+ * WLAN_WORK_PRIORITY, raw 16 on this kernel). */
 static UINT to_tx_priority(osPriority_t priority)
 {
 	uint32_t band;

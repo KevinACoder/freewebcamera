@@ -20,15 +20,18 @@
  *    the files for them are not even vendored (see the Makefile's LWIP_SRCS).
  *    The httpd lands in the next milestone and only needs the raw API.
  *
- *  - The thread priorities below are FreeRTOS priorities, not CMSIS-RTOS2
- *    ones: lwIP's own sys_thread_new (vendored verbatim in
- *    third-party/lwip/contrib/ports/freertos) calls xTaskCreate directly, so
- *    these numbers go straight into the scheduler. The adapter's own threads
- *    are created through CMSIS-RTOS2 instead, whose mapping divides the CMSIS
- *    band number by 8 (cmsis_rtos2/cmsis_os2_impl.c), i.e.
- *    osPriorityLow=1, osPriorityNormal=3, osPriorityAboveNormal=4,
- *    osPriorityHigh=5. Keep the two sets consistent: tcpip outranks the
- *    receive threads it is fed by, and the console shell outranks tcpip.
+ *  - Thread priorities are kernel-flavored and the two image lines differ
+ *    (M11 r4 audit). The ThreadX line's lwIP sys_arch
+ *    (port/adapters/lwip/cmsis/sys_arch.c) maps TCPIP_THREAD_PRIO through
+ *    the CMSIS bands: 4 (osPriorityAboveNormal) becomes raw ThreadX
+ *    priority 15, where smaller means MORE urgent. The FreeRTOS line's
+ *    vendored sys_arch passes the same 4 straight to xTaskCreate. Either
+ *    way tcpip must outrank the wlan workers feeding it - wlan_adapter.c
+ *    resolves WLAN_WORK_PRIORITY per kernel (16 raw on ThreadX, 5 before
+ *    the FreeRTOS inversion) for exactly that. The console shell sits at
+ *    osPriorityNormal = ThreadX raw 19, so on the ThreadX line tcpip
+ *    outranks the shell and console interaction can lag under a bulk
+ *    flow; on FreeRTOS the shell (5) outranks tcpip (4).
  */
 
 #ifndef FREEWEBCAMERA_LWIPOPTS_H
@@ -55,7 +58,13 @@
 
 #define MEM_LIBC_MALLOC                 0
 #define MEMP_MEM_MALLOC                 0
-#define MEM_SIZE                        (64 * 1024)
+/* 128 KB: the net80211 bridge allocates every RX frame as
+ * pbuf_alloc(PBUF_RAM) + pbuf_take from this heap (three-copy SDIO path),
+ * so heap churn scales with the frame rate; at the 12 Mbit/s class rates
+ * this round targets that is ~1000 alloc/free of 1.5 KB per second.
+ * 64 KB held at the 1-2 Mbit/s rates, 128 KB keeps headroom without
+ * squeezing the wlan/USB pools (M11 r4). */
+#define MEM_SIZE                        (128 * 1024)
 /* 8, not lwIP's 4-byte default: aarch64 pointers are 8 bytes and mem_malloc
  * must hand back 8-aligned blocks or every pbuf's pointer fields are asked to
  * be read unaligned. */
@@ -99,8 +108,18 @@
 #define MEMP_NUM_RAW_PCB                8
 #define MEMP_NUM_NETBUF                 32
 #define MEMP_NUM_NETCONN                32
-#define MEMP_NUM_TCPIP_MSG_API          16
-#define MEMP_NUM_TCPIP_MSG_INPKT        16
+/* Mailbox pressure: TCPIP_MBOX_SIZE below must stay <= the INPKT pool
+ * (every inbound post consumes one MEMP_TCPIP_MSG_INPKT), and the API
+ * pool covers the netconn-driven share of the same mailbox (bounded by
+ * MEMP_NUM_NETCONN). The 16-deep configuration was exhausted 1799 times
+ * in one 600 s TCP downlink (M11 r4 baseline); 64/64/32 lets the tcpip
+ * thread absorb an RX burst without dropping segments into retransmit. */
+#define MEMP_NUM_TCPIP_MSG_API          32
+#define MEMP_NUM_TCPIP_MSG_INPKT        64
+/* PBUF_ROM/PBUF_REF pbufs come from this pool (PBUF_RAM takes the heap
+ * above); no current path leans on it - pinned explicitly instead of
+ * riding lwIP's default 16. */
+#define MEMP_NUM_PBUF                   32
 #define MEMP_NUM_SYS_TIMEOUT            16
 #define MEMP_NUM_FRAG_PBUF              16
 
@@ -136,15 +155,24 @@
 
 #define TCPIP_THREAD_NAME               "tcpip"
 #define TCPIP_THREAD_STACKSIZE          4096
-/* FreeRTOS priority 4 == osPriorityAboveNormal: above the receive threads,
- * below the console shell (5) and the timer task (7). */
+/* FreeRTOS: straight xTaskCreate priority 4. ThreadX: CMSIS band 4
+ * (osPriorityAboveNormal) -> raw ThreadX priority 15, small = urgent.
+ * On both lines it must sit ABOVE the wlan workers (WLAN_WORK_PRIORITY
+ * in wlan_adapter.c resolves the matching pair) so the stack drains
+ * its mailboxes faster than the drivers fill them. */
 #define TCPIP_THREAD_PRIO               4
-#define TCPIP_MBOX_SIZE                 16
+/* 64 == MEMP_NUM_TCPIP_MSG_INPKT: the mbox and its message pool exhaust
+ * together, so only their common depth matters. */
+#define TCPIP_MBOX_SIZE                 64
 #define DEFAULT_THREAD_STACKSIZE        2048
 #define DEFAULT_THREAD_PRIO             3
 #define DEFAULT_RAW_RECVMBOX_SIZE       8
 #define DEFAULT_UDP_RECVMBOX_SIZE       8
-#define DEFAULT_TCP_RECVMBOX_SIZE       8
+/* Socket receive path: tcpip hands delivered segments to the netconn's
+ * own mailbox before the application recv()s them; 8 slots backed up
+ * within milliseconds at bulk rates (iperf3_embedded recv loops at
+ * 4096 B). 32 keeps a full TCP window's worth of segments queued. */
+#define DEFAULT_TCP_RECVMBOX_SIZE       32
 #define DEFAULT_ACCEPTMBOX_SIZE         4
 
 /* --- netif ---------------------------------------------------------------- */
