@@ -135,18 +135,18 @@
 /* Receive window vs the RTL8188F's RX FIFO: the SDIO chip buffers
  * received frames in a 16 KB RX FIFO (rtl8189fs RX_DMA_SIZE_8188F =
  * 0x4000, 128/256 B reserved for C2H/txrpt) and silently drops what
- * does not fit - no driver counter sees it. The rtw8189f worker
- * drains every 10 ms, so steady rates survive (UDP 2.6 Mbit/s
- * passes), but a TCP burst up to the advertised window lands as one
- * over-the-air burst: at 32*MSS the window (46 KB) exceeded the FIFO
- * and the data connection lost 15 of its first 17 segments (M11
- * round 2, board + pktmon evidence); 8*MSS was marginal - stall after
- * seconds-to-minutes when a burst coincided with ambient broadcast
- * junk. 4*MSS keeps a full-window burst well inside the FIFO;
- * ceiling ~4 Mbit/s at the 11 ms air RTT, above the measured rates.
- * Partial revert of 9a9df36's RCV side (that fix targets the USB
- * lane, which has no such FIFO); D52 in DESIGN §14. */
-#define TCP_WND                         (4 * TCP_MSS)
+ * does not fit - no driver counter sees it. History: the rtw8189f
+ * worker drained every 10 ms, so a full-window burst sat in the FIFO
+ * for up to a poll quantum - at 32*MSS the window (46 KB) exceeded
+ * the FIFO and the data connection lost 15 of its first 17 segments
+ * (M11 round 2); 8*MSS was marginal; 4*MSS was the safe pick (D52).
+ * M11 r4 B2: the DAT1 card interrupt drains within microseconds of
+ * the first frame, and the FIFO fills at air rate (~20 Mbit/s class)
+ * while SDIO empties it at 200 Mbit/s - occupancy now stays far
+ * below one window. 8*MSS (11.7 KB) is the measured-RTT BDP step
+ * (avg 13 ms, ~7 Mbit/s); window growth beyond this needs the
+ * PBUF_POOL/heap behind it, not the FIFO. */
+#define TCP_WND                         (8 * TCP_MSS)
 #define TCP_QUEUE_OOSEQ                 0
 #define LWIP_WND_SCALE                  0
 #define LWIP_TCP_SACK_OUT               0
