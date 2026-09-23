@@ -703,6 +703,7 @@ static UINT kernel_lock_core_id(void)
 int32_t osKernelLock(void)
 {
 	UINT core = kernel_lock_core_id();
+	uint32_t previous;
 
 	if (kernel_state != osKernelRunning) {
 		return (int32_t)osError;
@@ -711,26 +712,31 @@ int32_t osKernelLock(void)
 	    kernel_lock_count[core] >= MAX_KERNEL_LOCK_DEPTH) {
 		return (int32_t)osError;
 	}
+	previous = kernel_lock_count[core];
 	kernel_lock_daif[core][kernel_lock_count[core]] =
 		_tx_thread_smp_protect();
 	kernel_lock_count[core]++;
-	return (int32_t)kernel_lock_count[core];
+	return (int32_t)previous;
 }
 
 int32_t osKernelUnlock(void)
 {
 	UINT core = kernel_lock_core_id();
+	uint32_t previous;
 
 	if (kernel_state != osKernelRunning) {
 		return (int32_t)osError;
 	}
-	if (core < KERNEL_LOCK_CORES && kernel_lock_count[core] > 0U) {
+	if (core >= KERNEL_LOCK_CORES) {
+		return (int32_t)osError;
+	}
+	previous = kernel_lock_count[core];
+	if (previous > 0U) {
 		kernel_lock_count[core]--;
 		_tx_thread_smp_unprotect(
 			kernel_lock_daif[core][kernel_lock_count[core]]);
 	}
-	return (core < KERNEL_LOCK_CORES)
-	       ? (int32_t)kernel_lock_count[core] : (int32_t)osError;
+	return (int32_t)previous;
 }
 
 int32_t osKernelRestoreLock(int32_t lock)

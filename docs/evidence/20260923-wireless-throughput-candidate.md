@@ -1,6 +1,6 @@
 # SDIO WiFi 吞吐候选：数据队列与 OFDM 速率
 
-日期：2026-09-23。状态：构建通过，板上性能未验证。
+日期：2026-09-23。状态：候选已上板短测，未达到长测门槛。
 
 基于 M11 r4 B2b 稳定基线（下行 1.10、上行 2.69 Mbit/s，均 600s），
 `net_80211` `d2c7d9f..7e8175c` 将单播数据帧从管理队列/6 Mbps
@@ -12,7 +12,11 @@ BE→低队列与芯片初始化中的 TRXDMA 映射一致，FREE_TXPG 轮询随
 本轮 `make all` 通过；ThreadX 镜像 sha256：
 `0b5095489003f5440a57d68352b1b64c10f21d20c82641e45c6340d0912a88c1`。
 `make freertos`、`make ktest`、`make gates`（含 K4、clean-room、依赖方向）均通过。
-该哈希只证明候选可构建，未部署到板卡。尚需逐级测试 24、36、54 Mbps
+后续修复 CMSIS `osKernelLock` 返回值契约并重建，板上 24、36、54 Mbps
+上行 30s 分别实测 5.46、5.48、5.58 Mbit/s，均完整结束且无 fatal；
+反向下行 30s 约 0.66 Mbit/s，未达到目标，故未启动 600s 验收。
+无线 `decryptcrc=0`，lwIP bridge `pbuf_fail=0/take_fail=0/input_fail=0`。
+尚需逐级测试 24、36、54 Mbps
 的关联/重传/双向 30s，再以最佳稳定档做两次冷启动、双向 600s、
 ping 20/20、INPKT/HEAP/无线错误计数对拍。目标为上行至少 9.7、
 下行至少 9.0 Mbit/s；若仍低，再根据服务器重传簇验证 RX 聚合候选。

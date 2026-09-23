@@ -170,26 +170,34 @@ uint32_t osKernelGetSysTimerFreq(void)
 
 int32_t osKernelLock(void)
 {
+	uint32_t previous;
+
 	if (kernel_state != osKernelRunning) {
 		return (int32_t)osError;
 	}
-	vTaskSuspendAll();
+	previous = kernel_lock_count;
+	if (previous == 0U) {
+		vTaskSuspendAll();
+	}
 	kernel_lock_count++;
-	return (int32_t)kernel_lock_count;
+	return (int32_t)previous;
 }
 
 int32_t osKernelUnlock(void)
 {
+	uint32_t previous;
+
 	if (kernel_state != osKernelRunning) {
 		return (int32_t)osError;
 	}
+	previous = kernel_lock_count;
 	if (kernel_lock_count > 0U) {
 		kernel_lock_count--;
 		if (kernel_lock_count == 0U) {
 			(void)xTaskResumeAll();
 		}
 	}
-	return (int32_t)kernel_lock_count;
+	return (int32_t)previous;
 }
 
 int32_t osKernelRestoreLock(int32_t lock)
@@ -204,7 +212,9 @@ int32_t osKernelRestoreLock(int32_t lock)
 		(void)osKernelUnlock();
 	}
 	while (kernel_lock_count < (uint32_t)lock) {
-		vTaskSuspendAll();
+		if (kernel_lock_count == 0U) {
+			vTaskSuspendAll();
+		}
 		kernel_lock_count++;
 	}
 	return (int32_t)kernel_lock_count;
