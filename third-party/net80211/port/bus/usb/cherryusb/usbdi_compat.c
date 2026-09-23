@@ -475,6 +475,24 @@ void usbd_get_xfer_status(struct usbd_xfer *xfer, void **priv, void **buffer,
 	}
 }
 
+/* RX bring-up forensics hooks (see usbdi.h).  The RX buffers are
+ * non-coherent on this port: without an invalidate before the driver
+ * reads, cached lines hide what the dongle DMAed in.  arm() writes a
+ * recognizable pattern and cleans it to DRAM so a completion that
+ * still reads the pattern proves the device never wrote that range. */
+void usbd_rx_buffer_invalidate(void *buffer, uint32_t length) {
+	if (buffer != NULL && length != 0U) {
+		usb_dcache_invalidate((uintptr_t) buffer, length);
+	}
+}
+
+void usbd_rx_buffer_arm(void *buffer, uint32_t length) {
+	if (buffer != NULL && length != 0U) {
+		memset(buffer, 0xa5, length);
+		usb_dcache_flush((uintptr_t) buffer, length);
+	}
+}
+
 /* ------------------------------------------------------------------ */
 /* async transfer plumbing */
 
