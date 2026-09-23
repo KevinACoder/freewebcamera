@@ -598,6 +598,12 @@ rtw88_chip_rx_work(struct work_struct *w)
 	struct sk_buff *rx_skb;
 	struct sk_buff *skb;
 	u32 pkt_offset, next_pkt, skb_len;
+	static unsigned rx_work_runs;
+
+	if (rx_work_runs < 8 || (rx_work_runs & 0xff) == 0)
+		printf("rtw88: rx work run %u, skbq %u\n",
+		    rx_work_runs, (unsigned) usb->rx_queue.qlen);
+	rx_work_runs++;
 	u8 *rx_desc, *rx_buf;
 	int limit;
 
