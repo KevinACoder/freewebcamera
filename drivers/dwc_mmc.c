@@ -1101,6 +1101,30 @@ void dwc_mmc_interrupt_handler(void *param)
 	dwc_mmc_event_handler_t handler;
 
 	status = DWMMC_READ_REG(base_addr, DWMMC_RINTSTS_OFFSET);
+
+	/* poll-transfer + SDIO-interrupt shape (M11 r4): the data path is
+	 * polled by its owning thread, which also clears RINTSTS/IDSTS as
+	 * it goes. The only event that may legally fire here is the SDIO
+	 * card interrupt - touching anything else (a mid-flight CMD53's
+	 * IDMAC RI, a CDONE/DTO the poll loop is about to consume) stops
+	 * live DMA or steals its completion bits and hangs every transfer.
+	 * The board showed exactly that: arm SDIO_INT and every CMD53
+	 * times out. */
+	if (DWMMC_READ_REG(base_addr, DWMMC_INTMASK_OFFSET) ==
+	    DWMMC_INTMSK_SDIO_INT) {
+		if (status & DWMMC_INTMSK_SDIO_INT) {
+			dwc_mmc_set_interrupt_mask(inst, DWMMC_INTMSK_SDIO_INT,
+						   false);
+			handler = inst->evt_handler[DWMMC_EVT_SDIO_INT];
+			if (handler != NULL) {
+				handler(inst->evt_args[DWMMC_EVT_SDIO_INT]);
+			}
+			DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET,
+					DWMMC_INTMSK_SDIO_INT);
+		}
+		return;
+	}
+
 	dma_status = DWMMC_READ_REG(base_addr, DWMMC_IDSTS_OFFSET);
 
 	if (status & DWMMC_INTMSK_CDONE) {
