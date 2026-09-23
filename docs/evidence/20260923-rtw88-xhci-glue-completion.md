@@ -289,3 +289,70 @@ demux 的描述符步进错位——walk 大部分落在错误偏移（pkt_len=0
   在 walk 后续；全零=CPU 读到陈旧零行，问题在 VA/PA 或 cache 属性）。
 - 核查清单仍开放：rx_pkt_desc_sz=24 对 8821CU USB 是否正确、
   next_pkt=round_up(skb_len,8) 步进、drvinfo_sz*8 换算。
+
+# 续轮 10（2026-09-25）：RX 全链路打通 —— rawdump 定案 → scan/connect/DHCP/ping/iperf 全过
+
+## 取证载体改造（net_80211 693d15f + b529198，fwc 镜像 4c4046d/30d0914/cce92f2）
+
+- `wlan rawdump` 命令 + 保留内存捕获环（16 槽 × (seq, actlen, head[64], mid[160])），
+  rxeof 在拷贝前捕获，彻底避开串口竞态。
+- `usbd_rx_buffer_arm()`：每次 RX submit 把两个捕获窗口填 0xa5 并 clean 到 DRAM；
+  `usbd_rx_buffer_invalidate()`：rxeof 读前 belt-and-braces invalidate
+  （fwc shim 实实现走 usb_dcache hooks；net_80211 侧 no-op，bus_dma 语义正确）。
+- shim 缓冲身份确认：usbd_transfer 直接把驱动 rx->buf 作 urb.transfer_buffer
+  （usbdi_compat.c:608），VA 一致，"两个 VA 错位"假说排除。
+- dynamic_rx_agg 弃 no-op：按主线 V1 形态（8821C 分派）实现——
+  0x10C 置 BIT_RXDMA_AGG_EN、0x283 清 BIT7、0x280 写16 size|to<<8，
+  disable = size 0 / timeout 1，interface_cfg 时显式调一次。
+- 打印限流：skipping short / bad packet / garbage frame / fc drop 全部
+  8 次 + 每 256/512 次一条（此前 printf 洪水把 115200 带宽打满导致整机卡死一轮）。
+- `wlan dbg` mask 解析修复：strtoul 忽略 base → parse_hex。
+
+## rawdump 定案（boot-065811，binary 08bc033e）
+
+- 小传输完美成型：actlen=213 = 24 desc + 32 drvinfo + 157 帧恰一包；
+  desc0 w0=0x8404009d → pkt_len=157 非零，帧头 fc=0x0080（beacon）；
+  mid 窗口 0xa5 原样 → DMA 只写实际字节，缓存路径正确。
+- 洪水真身：设备空闲持续冲刷 ~32KB 全零聚合缓冲（~70 次 × 1365 步零描述符
+  ≈ 96768 skip 计数 ✓），demux 嚼穿不丢真帧——是噪声不是丢帧。
+- 上轮"零描述符风暴"定性修正：真帧一直在小传输里正常到达；风暴是
+  空聚合缓冲冲刷 + demux 逐 24 字节爬行的合成现象。
+
+## 全阶梯实测（boot-070947，binary 9802ccf4）
+
+- `wlan scan 8`：**28 节点，QiQiJia 在列**（14:a3:2f:18:07:2c ch2412 rssi27，
+  虚拟口 e2:fd:e2:53:29:58 / QiQiJia_Wi-Fi5 :29:66）。
+- `wpa connect QiQiJia paopaojie520`：Associated → WPA Key negotiation
+  completed [PTK=CCMP GTK=CCMP] → CTRL-EVENT-CONNECTED。
+- DHCP 自动：`wl: ip=192.168.0.10 gw=192.168.0.1 mask=255.255.255.0
+  link=up dhcp_bound=yes`。
+- `ping 192.168.0.1 20`：全收，10-20ms（单发 90ms）。
+- `iperf3 192.168.0.18 600`（上行）：interval 稳定 1.7~2.7 Mbits/sec，
+  368s 无停摆（最终值见下）。
+
+## 遗留与注意
+
+- 上轮 scan 空表根因：首轮 select 失败（dongle 未 attach，bus2 枚举抖动
+  + 设备 gone 重枚举），scan 落在 rtw8189f（SDIO 线）上。时序必须
+  wpa start（触发枚举+if_init）→ select rtw88u → scan。
+- xHCI 整轮伴随零星 `bus2 ctrl timeout ... errorcode=-14`（枚举期），
+  重枚举自愈，不影响数据面。
+- 吞吐 ~2.3 Mbps 为当前 shim 栈水平（与 M7 urtwn 线一致）；RX 空缓冲
+  冲刷噪声仍在（无害），性能优化是后续独立议题（RX agg enable、
+  mbox 深度等）。
+
+## iperf 600s×2 终值与复验记录
+
+- **首轮（boot-070947，binary 9802ccf4）全 PASS**：
+  上行 `iperf3 done: total 1.95 Mbits/sec (146780160 bytes in 600 sec)`；
+  下行 `iperf3 done: total 0.95 Mbits/sec (71434400 bytes in 600 sec)`；
+  两向 600s 零停摆。
+- **复验轮 1（boot-073542）**：scan 35 节点含 QiQiJia → connect
+  （14:a3:2f:18:07:2c，PTK/GTK=CCMP）→ DHCP（192.168.0.10）→
+  ping 20 全收（~11ms）全通；**上行 210s 处
+  `lwip assert: tcpip_thread: invalid message (tcpip.c:221)`，tcpip 线程
+  挂死**（= M11 r4 移交的 TCPIP mbox 遗留问题在 rtw88-usb 高压力下复现，
+  非 xHCI/RX 路径回归）。usbstats 依旧零读数（M7P 已知计数器接线缺口）。
+- 遗留移交：① TCPIP mbox 消息损坏根因（复现口径：上行 iperf ≥200s）；
+  ② usbstats 计数器接线；③ RX 吞吐 0.95M 受空缓冲冲刷噪声拖累
+  （优化候选：RX agg enable=mbox 后面再看）。
