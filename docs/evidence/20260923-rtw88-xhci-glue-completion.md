@@ -100,3 +100,44 @@ fw download + validate ✓（连续多轮）→ RTL8821CU ready ✓ → chip par
 - net_80211 `feat-rtw8189f-sdio` `cf067ea`：vendor 寄存器读写失败可见化。
 - fwc-rtw88 `wip/rtw88-usb` `d43c543`（cmd ctx + 取证 + 镜像）、
   `2d9c8b6`（环回卷 STATUS 丢失修复）。XHCI_EVENT_DEBUG 已归 1。
+
+---
+
+# 续轮 2（2026-09-24 凌晨）：code=26 崩溃修复 + RX 证据链闭合，堆踩踏实锤
+
+## 已修并板验
+
+1. **complete_td 陈旧槽二次归还**（e5d7f95）：多 TRB TD（RX 64-TRB 聚合）完成时
+   只清事件落点槽的 urb，恢复路径的 Stopped 类迟到事件落在其余槽 → 同一 urb
+   二次归还 → shim worker 二次 SLIST_REMOVE 数据异常（上轮 fatal 的真因）。
+   修 = 入口守卫（urb==NULL/state!=0 丢弃）+ 完成时整段清 urb。
+2. rxeof 两个静默丢弃门加了计数+限流打印；net80211 icstats/lwip bridge 计数
+   （`wlan stats`）；`wlan dbg <mask>` 运行时开 rtw88 调试位；workqueue NULL
+   func 取证守卫（net_80211 9734995）。
+
+## RX 证据链（boot-020120，binary 5b1b9f7e）
+
+- USB 层 RX 完成数千笔、零 submit_fail；net80211 层 rx=0、扫描表空（除一条
+  全零占位节点）→ 帧死在 rxeof 两个静默门之间。
+- **主导流 = `rx drop len=32768`**：设备把 32K 缓冲聚满才 flush（短完成缺失）
+  → Linux 语义整缓冲必丢 → 已改为放行进 demux。
+- **`rx drop status=1`**（数百级）：第二类错误完成，error code 待定位。
+- **TLSF heap assert 复现两轮**（tlsf.c:462 block_next !block_is_last）→
+  堆踩踏实锤，与 NULL func workqueue fatal 同源。头号嫌疑：聚合满 32K 时
+  帧 DMA 越过缓冲边界（设备聚合行为 ≠ 驱动配置的 agg off）。
+
+## 下一轮入口（未修）
+
+1. **RX 聚合配置为何不生效**：`dynamic_rx_agg(false)` 写 0x280=0x0100 +
+   0x10C BIT2 每 2s（watchdog）都在写，设备仍聚满 32K 才 flush。对拍
+   NetBSD 侧同寄存器行为（board-proven 路径、同 dongle）找语义差/丢写。
+2. **堆踩踏定位**：满缓冲 DMA 越界假象成立的话，修复 1 即消失；否则给
+   RX 缓冲区加 canary 定位踩踏者。
+3. 堆修好 + RX 短包正常后：scan 应能看到节点 → wpa connect → DHCP →
+   ping → iperf 600s×2 + 补 2 轮冷启动。
+
+## 提交
+
+net_80211 `1381aba`+`0cb547c`（rxeof 取证/整缓冲放行）、`9734995`（workqueue
+守卫）；fwc-rtw88 `e5d7f95`（complete_td 守卫+整段清 + 镜像 + dbg 命令）。
+XHCI_EVENT_DEBUG=1。
