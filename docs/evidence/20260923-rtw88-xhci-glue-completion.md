@@ -58,3 +58,45 @@ slot 1 整体失聪。疑似固件下载触发设备侧 USB 自复位/总线毛�
 
 - 今日实测：modeswitch/枚举/附着/power-on 全链路（多轮冷启动复现）
 - 未验证：iperf（未到达）；固件下载及之后全部阶梯
+
+---
+
+# 续轮 2026-09-23（晚）：死亡窗口根因闭环 = 环回卷丢 STATUS TRB（设备无辜）
+
+## 取证链（boot-231647 起四轮冷启动）
+
+1. `xhci_do_command` 超时 dump（本轮新增）显示 USBSTS=0 干净、CRR 卡死 →
+   控制器健康、命令单元真停，排除 HSE/事件环自锁。
+2. 死亡窗 ep0 全事件：SA 写 TD 恰在 252..254 收尾（ep=255），DA 写批从
+   LINK 槽起批 → `xhci_ring_put` 的 LINK 写**吃掉一个载荷迭代**，STATUS
+   TRB 没上环 → 设备收 SETUP+DATA 后等 STATUS 永久挂起（假死）、主机 5s
+   超时、Stop EP 等 TD 退役挂死、CA 退不了、命令单元整体死亡。
+   **上轮"设备失聪/DDMA 页写楔死"结论全部推翻：设备从头到尾无辜。**
+3. 连带修复：命令环误用 -2 回卷策略（回卷被当 NOMEM，645s 撞墙）→
+   命令环改自然回卷 + 软件 dequeue 随完成推进（此前从不推进，~253 条
+   命令后空间核算永久判满）；pipe_recover 的 SET_TR_DEQ 失败改为上抛，
+   不再对硬件未重指的环武装 TD；do_command 并发上下文收敛到调用者栈。
+
+## 阶梯新位置（boot-005217，DEBUG=1）
+
+```
+fw download + validate ✓（连续多轮）→ RTL8821CU ready ✓ → chip param ✓
+→ wpa start：RX 信标流 ✓（rx_complete 数千，status=0 帧长 857/513/473，
+  32768=RX 聚合整缓冲）→ wpa connect QiQiJia：scan timed out ×2
+→ [新卡点] dci=9 Transfer Event code=26 (STOPPED_LENGTH_INVALID) 后
+  wlan worker 数据异常 fatal（FAR=0xaa0100c0）→ H2C 管道缓冲耗尽
+```
+
+## 下一轮入口（未修）
+
+- code=26 落在 kill/Stop-EP 完成路径：`xhci_complete_td` 对 stopped 类
+  事件与 shim worker 的交接存在 use-after/wild pointer（worker 栈回溯
+  ELR=0x0a0a63dc）。对照 usbh_kill_urb 的恰一次归还与 code=26 的 TD 配对。
+- 修通后预期：wpa connect 能扫到 QiQiJia（RX 已活），走认证/关联/4 次
+  握手 → DHCP → ping → iperf 600s×2 + 补 2 轮冷启动。
+
+## 提交
+
+- net_80211 `feat-rtw8189f-sdio` `cf067ea`：vendor 寄存器读写失败可见化。
+- fwc-rtw88 `wip/rtw88-usb` `d43c543`（cmd ctx + 取证 + 镜像）、
+  `2d9c8b6`（环回卷 STATUS 丢失修复）。XHCI_EVENT_DEBUG 已归 1。
