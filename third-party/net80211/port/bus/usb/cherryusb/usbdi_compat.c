@@ -603,6 +603,20 @@ void usbd_get_xfer_status(struct usbd_xfer *xfer, void **priv, void **buffer,
 	}
 }
 
+/* RX bring-up forensics hooks (see usbdi.h).  This build rides a
+ * stack that keeps the RX buffers coherent (bus_dma), so explicit
+ * maintenance would be wrong here; the fwc/cherryusb shim implements
+ * the real ones with its platform dcache hooks. */
+void usbd_rx_buffer_invalidate(void *buffer, uint32_t length) {
+	(void) buffer;
+	(void) length;
+}
+
+void usbd_rx_buffer_arm(void *buffer, uint32_t length) {
+	(void) buffer;
+	(void) length;
+}
+
 /* ------------------------------------------------------------------ */
 /* async transfer plumbing */
 
@@ -1298,17 +1312,23 @@ bool usb_task_pending(struct usbd_device *dev, struct usb_task *task) {
 /* ------------------------------------------------------------------ */
 /* workers */
 
-/* Watchdog pass: recover xfers whose NetBSD xfer timeout (armed at
- * submit, 5 s for urtwn TX) expired while in flight.  NetBSD's
- * usbd_xfer_timeout aborts the transfer and delivers USBD_TIMEOUT to
- * the driver callback once; without this the shim had no recovery at
- * all and one lost transfer leaked its driver buffer forever.  Killed
- * xfers come back through urb->complete with -USB_ERR_SHUTDOWN, which
- * maps to USBD_CANCELLED - the driver reclaims silently, so the
- * oerrors accounting of a real NetBSD timeout is not reproduced (the
- * wd_timeouts counter stands in for it).  Candidates are collected
- * under ipl_save() but killed outside it: usbh_kill_urb may take
- * milliseconds and synthesize completions. */
+/* Watchdog pass: recover PARKED xfers whose NetBSD xfer timeout expired
+ * while waiting for the pipe (they never reached the HCD, so handing
+ * USBD_TIMEOUT straight back is wire-side no-op and toggle-safe).
+ *
+ * Armed xfers are deliberately never killed.  A bulk OUT urb is stamped
+ * at arm time with the toggle of the packet AFTER the full transfer and
+ * the completion path writes that value back to the pipe for every
+ * status, CANCELLED included.  A watchdog kill of a partially consumed
+ * transfer therefore re-seeds the pipe with a toggle the device's
+ * expected sequence does not hold (k vs k' consumed packets, odd parity
+ * desyncs), bulk OUT has no other resync point, and the pipe is dead
+ * forever - while leaving the qTD chain armed lets the controller keep
+ * retrying; when the device wakes it consumes at its expected toggle
+ * and the transfer completes correctly (the HCD has no timeout of its
+ * own).  Same driver and firmware sustained 30 s @ 12.2 Mbit/s on
+ * NetBSD, which has no such kill either.  Teardown paths (pipe
+ * close/abort, xfer destroy) still kill: the pipes die right after. */
 static void usbd_watchdog_sweep(struct usbd_device *dev) {
 	struct usbd_xfer *overdue[8];
 	unsigned stuck_ms[8];
@@ -1319,11 +1339,11 @@ static void usbd_watchdog_sweep(struct usbd_device *dev) {
 
 	ipl = ipl_save();
 	SLIST_FOREACH(xfer, &dev->in_flight_xfers, wd_next) {
-		if ((xfer->in_flight || xfer->in_xq) &&
+		if (xfer->in_xq &&
 		    xfer->wd_deadline != 0U &&
 		    (int) (now - xfer->wd_deadline) >= 0) {
 			/* clear the deadline so the next sweep cannot
-			 * double-kill while the synthesized completion
+			 * double-complete while the synthesized completion
 			 * still sits in the ring */
 			stuck_ms[n] = now - xfer->wd_deadline + xfer->timeout;
 			xfer->wd_deadline = 0U;
@@ -1336,29 +1356,23 @@ static void usbd_watchdog_sweep(struct usbd_device *dev) {
 	ipl_restore(ipl);
 
 	for (i = 0; i < n; i++) {
-		if (overdue[i]->in_xq) {
-			/* parked xfers never reached the HCD: there is no
-			 * urb to kill, hand the timeout straight back */
-			wlan_usb_stats.q_timeout++;
-			wlan_port_serializer_lock();
-			ipl = ipl_save();
-			usbd_xq_unlink(overdue[i]->pipe, overdue[i]);
-			SLIST_REMOVE(&dev->in_flight_xfers, overdue[i],
-			    usbd_xfer, wd_next);
-			overdue[i]->on_wd = 0;
-			ipl_restore(ipl);
-			overdue[i]->in_xq = 0;
-			overdue[i]->status = USBD_TIMEOUT;
-			overdue[i]->actlen = 0;
-			usbd_ring_post(dev, overdue[i]);
-			wlan_port_serializer_unlock();
-			continue;
+		wlan_usb_stats.q_timeout++;
+		wlan_port_serializer_lock();
+		ipl = ipl_save();
+		usbd_xq_unlink(overdue[i]->pipe, overdue[i]);
+		SLIST_REMOVE(&dev->in_flight_xfers, overdue[i],
+		    usbd_xfer, wd_next);
+		overdue[i]->on_wd = 0;
+		ipl_restore(ipl);
+		overdue[i]->in_xq = 0;
+		overdue[i]->status = USBD_TIMEOUT;
+		overdue[i]->actlen = 0;
+		if (wlan_trace_lvl >= 1) {
+			printf("[wlan] usbdi xq timeout: %u ms parked "
+			    "(timeout=%u)\n", stuck_ms[i], overdue[i]->timeout);
 		}
-		wlan_usb_stats.kill_calls++;
-		wlan_usb_stats.wd_timeouts++;
-		printf("[wlan] usbdi watchdog: killing xfer stuck %u ms "
-		    "(timeout=%u)\n", stuck_ms[i], overdue[i]->timeout);
-		(void) usbh_kill_urb(&overdue[i]->urb);
+		usbd_ring_post(dev, overdue[i]);
+		wlan_port_serializer_unlock();
 	}
 }
 

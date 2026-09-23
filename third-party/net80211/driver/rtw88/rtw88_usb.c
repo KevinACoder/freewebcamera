@@ -68,6 +68,7 @@ __KERNEL_RCSID(0, "$NetBSD$");
 
 static void	rtw88_usb_rxeof(struct usbd_xfer *, void *, usbd_status);
 static void	rtw88_usb_rx_submit(struct rtw88_rx_xfer *);
+static void	rtw88_usb_dynamic_rx_agg(struct rtw_dev *, bool);
 
 #define	RTW_USB_CMD_READ	0xc0
 #define	RTW_USB_CMD_WRITE	0x40
@@ -605,6 +606,84 @@ rtw88_usb_write_data_h2c(struct rtw_dev *rtwdev, u8 *buf, u32 size)
  * descriptor and a driver info area in front and padded to 8 bytes; the
  * demultiplexing is done on the workqueue (see rtw88_chip.c).
  */
+/*
+ * Raw RX capture ring (bring-up forensics 2026-09-25).  The demux's
+ * serial dump raced the printf flood on the console, so the ground
+ * truth moves into retained memory: rxeof stores actlen plus two
+ * windows of the DMA buffer before the skb copy, and `wlan rawdump`
+ * prints the ring on demand.  The head of every RX buffer is armed
+ * with a pattern after the copy (usbd_rx_buffer_arm()); a capture that
+ * still finds the pattern there proves DMA never wrote that offset.
+ */
+#define RTW88_RAWCAP_SLOTS	16
+#define RTW88_RAWCAP_HEAD	64
+/* frame start = 24 desc + 32 drvinfo; 160 bytes cover the 802.11
+ * header + fixed fields + the first IEs (SSID) of a beacon */
+#define RTW88_RAWCAP_MID_OFF	56
+#define RTW88_RAWCAP_MID	160
+
+struct rtw88_rawcap_slot {
+	u_int32_t seq;
+	u_int32_t actlen;
+	u_int8_t head[RTW88_RAWCAP_HEAD];
+	u_int8_t mid[RTW88_RAWCAP_MID];
+};
+
+static struct rtw88_rawcap_slot rtw88_rawcap[RTW88_RAWCAP_SLOTS];
+static u_int32_t rtw88_rawcap_seq;
+
+static void
+rtw88_usb_rx_capture(struct rtw88_rx_xfer *rx, u_int32_t len)
+{
+	struct rtw88_rawcap_slot *cap;
+
+	cap = &rtw88_rawcap[rtw88_rawcap_seq % RTW88_RAWCAP_SLOTS];
+	cap->seq = ++rtw88_rawcap_seq;
+	cap->actlen = len;
+	memcpy(cap->head, rx->buf, sizeof(cap->head));
+	memcpy(cap->mid, rx->buf + RTW88_RAWCAP_MID_OFF, sizeof(cap->mid));
+}
+
+/* shell-side dump (`wlan rawdump`); prints oldest to newest */
+void
+rtw88_usb_rawdump(void)
+{
+	struct rtw88_rawcap_slot *cap;
+	u_int32_t base, i, j;
+	const u_int8_t *p;
+
+	base = (rtw88_rawcap_seq >= RTW88_RAWCAP_SLOTS)
+	    ? rtw88_rawcap_seq - RTW88_RAWCAP_SLOTS + 1 : 1;
+	printf("rtw88: rawcap seq=%u (slots %u..%u)\n", rtw88_rawcap_seq,
+	    rtw88_rawcap_seq >= RTW88_RAWCAP_SLOTS
+	    ? base : 0, rtw88_rawcap_seq);
+	for (i = 0; i < RTW88_RAWCAP_SLOTS; i++) {
+		u_int32_t seq = base + i;
+
+		if (seq > rtw88_rawcap_seq)
+			break;
+		cap = &rtw88_rawcap[(seq - 1) % RTW88_RAWCAP_SLOTS];
+		printf("rawcap[%u] actlen=%u head:\n", cap->seq, cap->actlen);
+		for (j = 0; j < RTW88_RAWCAP_HEAD; j += 16) {
+			p = &cap->head[j];
+			printf(" %02x %02x %02x %02x %02x %02x %02x %02x "
+			    "%02x %02x %02x %02x %02x %02x %02x %02x\n",
+			    p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
+			    p[8], p[9], p[10], p[11], p[12], p[13], p[14],
+			    p[15]);
+		}
+		printf("rawcap[%u] mid@%u:\n", cap->seq, RTW88_RAWCAP_MID_OFF);
+		for (j = 0; j < RTW88_RAWCAP_MID; j += 16) {
+			p = &cap->mid[j];
+			printf(" %02x %02x %02x %02x %02x %02x %02x %02x "
+			    "%02x %02x %02x %02x %02x %02x %02x %02x\n",
+			    p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
+			    p[8], p[9], p[10], p[11], p[12], p[13], p[14],
+			    p[15]);
+		}
+	}
+}
+
 static void
 rtw88_usb_rx_submit(struct rtw88_rx_xfer *rx)
 {
@@ -612,6 +691,10 @@ rtw88_usb_rx_submit(struct rtw88_rx_xfer *rx)
 
 	if (rx->xfer == NULL)
 		return;
+	/* arm both capture windows so a later capture that still finds
+	 * the pattern proves DMA never wrote that offset */
+	usbd_rx_buffer_arm(rx->buf, RTW88_RAWCAP_HEAD);
+	usbd_rx_buffer_arm(rx->buf + RTW88_RAWCAP_MID_OFF, RTW88_RAWCAP_MID);
 	usbd_setup_xfer(rx->xfer, rx, rx->buf, RTW88_RX_BUFSZ,
 	    USBD_SHORT_XFER_OK, USBD_NO_TIMEOUT, rtw88_usb_rxeof);
 	err = usbd_transfer(rx->xfer);
@@ -644,6 +727,18 @@ rtw88_usb_rxeof(struct usbd_xfer *xfer, void *priv, usbd_status status)
 	}
 
 	usbd_get_xfer_status(xfer, NULL, NULL, &len, NULL);
+
+	/*
+	 * Belt-and-braces invalidate + ground-truth capture (2026-09-25):
+	 * the HCD path invalidates at giveback, but the zero-descriptor
+	 * storm survived it, so the capture below must read provably
+	 * fresh DRAM.  The arm pattern written at submit time tells the
+	 * two cases apart: pattern still there == DMA never wrote, zeros
+	 * with the pattern gone == DMA wrote (zero descriptors are then
+	 * real firmware output, a layout question).
+	 */
+	usbd_rx_buffer_invalidate(rx->buf, len);
+	rtw88_usb_rx_capture(rx, len);
 
 	/*
 	 * Bring-up forensics (2026-09-24): with the RX aggregate timeout
@@ -756,24 +851,49 @@ rtw88_usb_interface_cfg(struct rtw_dev *rtwdev)
 	rtw_write8(rtwdev, REG_RXDMA_MODE, rxdma);
 	rtw_write16_set(rtwdev, REG_TXDMA_OFFSET_CHK, BIT_DROP_DATA_EN);
 
-	rtw_info(rtwdev, "interface_cfg exit: 0x290=0x%02x\n",
-	    rtw_read8(rtwdev, REG_RXDMA_MODE));
+	/* deterministic RX delivery before the first transfer: the
+	 * previous no-op left these registers at firmware defaults and
+	 * produced the zero-descriptor storm */
+	rtw88_usb_dynamic_rx_agg(rtwdev, false);
+
+	rtw_info(rtwdev, "interface_cfg exit: 0x290=0x%02x agg 0x10c=0x%02x 0x280=0x%04x\n",
+	    rtw_read8(rtwdev, REG_RXDMA_MODE),
+	    rtw_read8(rtwdev, REG_TXDMA_PQ_MAP),
+	    rtw_read16(rtwdev, REG_RXDMA_AGG_PG_TH));
 }
 
+/*
+ * Mainline rtw88-usb V1 shape (8821C dispatches here): the aggregate
+ * enable bit in REG_TXDMA_PQ_MAP is always on, the page threshold and
+ * timeout in REG_RXDMA_AGG_PG_TH select delivery granularity --
+ * size 0 / timeout 1 delivers per packet, size 5 / timeout 0x20
+ * aggregates while traffic flows (watchdog).
+ *
+ * Board history: an earlier round correlated exactly these disable
+ * values with 32K-full transfers, but that round ran on an actlen path
+ * since proven broken, and the no-op that followed it left the
+ * registers at unknown firmware defaults and produced the
+ * zero-descriptor storm.  Write the mainline values and let the raw
+ * capture ring arbitrate.
+ */
 static void
 rtw88_usb_dynamic_rx_agg(struct rtw_dev *rtwdev, bool enable)
 {
-	/*
-	 * 2026-09-24: leave RX aggregation alone entirely.  Mainline
-	 * rtw88-usb has no dynamic_rx_agg and never touches these
-	 * registers; the firmware default delivers one packet per USB
-	 * transfer.  Setting BIT_RXDMA_AGG_EN here (with size 0 /
-	 * timeout 1) made the device aggregate until the host buffer was
-	 * completely full -- 32768-byte transfers only, every one of them
-	 * rejected by the full-buffer gate, so net80211 never saw a
-	 * beacon (board evidence 2026-09-24, boot-020120).
-	 */
-	(void)enable;
+	u8 size, timeout;
+	u16 val16;
+
+	rtw_write8_set(rtwdev, REG_TXDMA_PQ_MAP, BIT_RXDMA_AGG_EN);
+	rtw_write8_clr(rtwdev, REG_RXDMA_AGG_PG_TH + 3, BIT(7));
+
+	if (enable) {
+		size = 0x5;
+		timeout = 0x20;
+	} else {
+		size = 0x0;
+		timeout = 0x1;
+	}
+	val16 = (u16)(size | (timeout << 8));
+	rtw_write16(rtwdev, REG_RXDMA_AGG_PG_TH, val16);
 }
 
 static const struct rtw_hci_ops rtw88_usb_ops = {

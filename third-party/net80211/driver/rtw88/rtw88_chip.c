@@ -648,19 +648,42 @@ rtw88_chip_rx_work(struct work_struct *w)
 			if (skb_len > max_skb_len ||
 			    (u32)(rx_desc - rx_skb->data) + skb_len >
 			    rx_skb->len) {
-				rtw_dbg(rtwdev, RTW_DBG_USB,
-				    "bad packet: skb_len %u len %u drvinfo %u "
-				    "shift %u c2h %d xfer %u off %u\n",
-				    skb_len, pkt_stat.pkt_len,
-				    pkt_stat.drv_info_sz, pkt_stat.shift,
-				    pkt_stat.is_c2h, rx_skb->len,
-				    (u32)(rx_desc - rx_skb->data));
+				static unsigned bad_pkt_prints;
+
+				bad_pkt_prints++;
+				if (bad_pkt_prints <= 8 ||
+				    (bad_pkt_prints & 0xff) == 0) {
+					rtw_dbg(rtwdev, RTW_DBG_USB,
+					    "bad packet: skb_len %u len %u "
+					    "drvinfo %u shift %u c2h %d "
+					    "xfer %u off %u (%u)\n",
+					    skb_len, pkt_stat.pkt_len,
+					    pkt_stat.drv_info_sz, pkt_stat.shift,
+					    pkt_stat.is_c2h, rx_skb->len,
+					    (u32)(rx_desc - rx_skb->data),
+					    bad_pkt_prints);
+				}
 				break;
 			}
 			if (pkt_stat.pkt_len <= FCS_LEN && !pkt_stat.is_c2h) {
-				rtw_dbg(rtwdev, RTW_DBG_USB,
-				    "skipping short packet (%u)\n",
-				    pkt_stat.pkt_len);
+				/*
+				 * Rate limited hard: the idle dongle keeps
+				 * delivering transfers full of empty
+				 * descriptors, and printing each one eats
+				 * the whole 115200 console bandwidth (the
+				 * raw capture ring is the evidence, not
+				 * this line).
+				 */
+				static unsigned short_pkt_prints;
+
+				short_pkt_prints++;
+				if (short_pkt_prints <= 8 ||
+				    (short_pkt_prints & 0x1ff) == 0) {
+					rtw_dbg(rtwdev, RTW_DBG_USB,
+					    "skipping short packet (%u) (%u)\n",
+					    pkt_stat.pkt_len,
+					    short_pkt_prints);
+				}
 				goto next;
 			}
 
@@ -690,17 +713,31 @@ rtw88_chip_rx_work(struct work_struct *w)
 				 */
 				if (skb->len < 16 ||
 				    skb->len > RTW88_RX_FRAME_MAX) {
-					rtw_dbg(rtwdev, RTW_DBG_USB,
-					    "dropping garbage frame (len %u)\n",
-					    skb->len);
+					static unsigned garbage_prints;
+
+					garbage_prints++;
+					if (garbage_prints <= 8 ||
+					    (garbage_prints & 0x1ff) == 0) {
+						rtw_dbg(rtwdev, RTW_DBG_USB,
+						    "dropping garbage frame "
+						    "(len %u) (%u)\n",
+						    skb->len, garbage_prints);
+					}
 					rtw88_skb_free(skb);
 					goto next;
 				}
 				fc = le16toh(*(uint16_t *)skb->data);
 				if ((fc & 0x0003) != 0) {
-					rtw_dbg(rtwdev, RTW_DBG_USB,
-					    "dropping frame with fc 0x%04x "
-					    "(len %u)\n", fc, skb->len);
+					static unsigned fc_prints;
+
+					fc_prints++;
+					if (fc_prints <= 8 ||
+					    (fc_prints & 0x1ff) == 0) {
+						rtw_dbg(rtwdev, RTW_DBG_USB,
+						    "dropping frame with fc "
+						    "0x%04x (len %u) (%u)\n",
+						    fc, skb->len, fc_prints);
+					}
 					rtw88_skb_free(skb);
 					goto next;
 				}
