@@ -246,6 +246,26 @@ rtw88_workqueue_worker(void *arg)
 		w = item->wi_work;
 		kmem_free(item, sizeof(*item));
 
+		/*
+		 * Forensics (2026-09-24 board fatal, jump-to-0 from this
+		 * call): a corrupted wk_func means the work_struct memory
+		 * was stomped or the item pointed at freed storage.  Dump
+		 * the suspect instead of dying so the run keeps producing
+		 * evidence; the raw words identify the victim by its known
+		 * static address (rx_work/tx_work/call pool slot).
+		 * net_80211 9734995 同一修复的镜像侧移植。
+		 */
+		if (w == NULL || w->wk_func == NULL) {
+			const volatile uint32_t *raw =
+			    (const volatile uint32_t *)(w != NULL ? w : &w);
+			unsigned int i;
+
+			printf("rtw88: work with NULL func! w=%p "
+			    "raw=%08x %08x %08x %08x %08x %08x %08x %08x\n",
+			    (void *)w, raw[0], raw[1], raw[2], raw[3],
+			    raw[4], raw[5], raw[6], raw[7]);
+			continue;
+		}
 		atomic_store_relaxed(&w->wk_running, 1);
 		w->wk_func(w);
 		atomic_store_relaxed(&w->wk_running, 0);

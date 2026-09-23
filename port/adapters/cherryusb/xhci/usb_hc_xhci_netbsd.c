@@ -2093,11 +2093,22 @@ static void xhci_complete_td(struct xhci_hcd *hcd, struct xhci_dev *dev,
                              uint32_t residual, uint32_t code)
 {
     struct usbh_urb *urb = td->urb;
-    uint32_t want = urb->transfer_buffer_length;
+    uint32_t want;
     uint32_t got;
     int error;
     int killed;
     uint32_t save;
+
+    /* 迟到/重复事件守卫: Stop EP + Set TR Deq 恢复会让被停 TD 的每个
+     * TRB 槽都可能收到一次终态事件(code=26/Stopped 类), 环复位后更是
+     * 落在清零槽上。槽空(urb=NULL)或已完成(state!=0)一律丢弃 —— 否则
+     * 同一 urb 被二次归还, shim worker 二次 SLIST_REMOVE 数据异常
+     * (2026-09-24 板验 fatal, FAR=0xaa0100c0, 8821CU RX 64-TRB 聚合
+     * TD 的其余槽副本未被清空正是复现条件)。 */
+    if (urb == NULL || td->state != 0U) {
+        return;
+    }
+    want = urb->transfer_buffer_length;
 
     if (code == TRB_CODE_SUCCESS || code == TRB_CODE_SHORT_PACKET) {
         got = want - residual;
@@ -2160,9 +2171,23 @@ static void xhci_complete_td(struct xhci_hcd *hcd, struct xhci_dev *dev,
         ring->halted = 1U;
     }
     killed = (ring->killing == urb);
+    /* 整段清 urb: 多 TRB TD(RX 聚合 64 槽)每个槽都存有 urb 副本, 只清
+     * 事件落点槽的话, 恢复路径的迟到事件落在其余槽就会拿旧副本二次
+     * 归还(见函数头守卫注释)。state 保留: 同步等待靠首槽 state 判完成,
+     * actual/error 已镜像 */
+    {
+        uint32_t i = td->first_idx;
+
+        for (;;) {
+            ring->tds[i].urb = NULL;
+            if (i == td->last_idx) {
+                break;
+            }
+            i = (i + 1U) % ring->num_trbs;
+        }
+    }
     xhci_ring_unlock(ring, save);
 
-    td->urb = NULL;
     if (!killed) {
         xhci_giveback(urb, (error == 0) ? (int)got : error, got);
         /* 武装队列头: 完成一个 pop 下一个(Linux urb_list 语义)。建环失败

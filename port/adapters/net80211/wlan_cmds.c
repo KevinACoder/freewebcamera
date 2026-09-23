@@ -247,6 +247,16 @@ static int cmd_wlan(int argc, char **argv)
 		return 0;
 	}
 
+	if (argc >= 2 && strcmp(argv[1], "dbg") == 0 && argc == 3) {
+		/* runtime rtw88 debug mask (RTW_DBG_USB|RX|... bits from
+		 * dist/main.h); compiled in only with CONFIG_RTW88_DEBUG */
+		extern unsigned int rtw_debug_mask;
+		rtw_debug_mask = (unsigned int) strtoul(argv[2], NULL, 0);
+		csh_printf(csh, "wlan: rtw_debug_mask=0x%x\r\n",
+			   rtw_debug_mask);
+		return 0;
+	}
+
 	if (argc >= 2 && strcmp(argv[1], "select") == 0) {
 		/* several adapters can be attached at once (USB dongle +
 		 * SDIO module); the active one owns wlan up/scan/xmit */
@@ -265,7 +275,7 @@ static int cmd_wlan(int argc, char **argv)
 		   "wlan trace [0|1|2] | wlan usbstats | wlan stats | "
 		   "wlan sdreg | "
 		   "wlan reg read|write|txq | wlan calib [0|1] | "
-		   "wlan ra [0|1] | wlan fwfix\r\n");
+		   "wlan ra [0|1] | wlan fwfix | wlan dbg <mask>\r\n");
 	return 0;
 }
 

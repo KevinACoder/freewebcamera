@@ -631,6 +631,12 @@ rtw88_usb_rxeof(struct usbd_xfer *xfer, void *priv, usbd_status status)
 		return;
 
 	if (status != USBD_NORMAL_COMPLETION) {
+		/* forensics 2026-09-24: name the gate that eats RX frames */
+		usb->rx_status_drops++;
+		if (usb->rx_status_drops <= 8 ||
+		    (usb->rx_status_drops & 0x7f) == 0)
+			printf("rtw88: rx drop status=%d (%u)\n",
+			    (int) status, usb->rx_status_drops);
 		if (status == USBD_STALLED)
 			usbd_clear_endpoint_stall_async(usb->rx_pipe);
 		rtw88_usb_rx_submit(rx);
@@ -640,15 +646,22 @@ rtw88_usb_rxeof(struct usbd_xfer *xfer, void *priv, usbd_status status)
 	usbd_get_xfer_status(xfer, NULL, NULL, &len, NULL);
 
 	/*
-	 * Linux's rtw_usb_read_port_complete() rejects transfers that are
-	 * shorter than a receive descriptor or that fill the whole buffer.
-	 * A short transfer means the demux would read the descriptor out of
-	 * stray bytes; a full-buffer transfer means a packet was split across
-	 * URBs, so the demux would walk a truncated run and lose the packets
-	 * behind it.  Both produce the "skipping short packet / bad packet"
-	 * storm, so drop them exactly like Linux does.
+	 * Bring-up forensics (2026-09-24): with the RX aggregate timeout
+	 * not yet proven effective on this stack the device flushes only
+	 * whole 32K buffers; Linux rejects those because one frame may be
+	 * split at the buffer end, but the demux's per-frame sanity gates
+	 * (desc walk + fc/length checks) already bound that damage, and
+	 * dropping everything here starves net80211 of every beacon.
+	 * Hand full buffers to the demux; count them either way.
 	 */
-	if (len < RTW88_RX_MIN_LEN || len >= RTW88_RX_BUFSZ) {
+	if (len >= RTW88_RX_BUFSZ)
+		usb->rx_full_buffers++;
+	if (len < RTW88_RX_MIN_LEN) {
+		usb->rx_len_drops++;
+		if (usb->rx_len_drops <= 8 ||
+		    (usb->rx_len_drops & 0x7f) == 0)
+			printf("rtw88: rx drop len=%u (%u)\n",
+			    len, usb->rx_len_drops);
 		rtw88_usb_rx_submit(rx);
 		return;
 	}

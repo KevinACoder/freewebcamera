@@ -128,6 +128,9 @@ struct rtw88_usb {
 	unsigned int		rd_failures;	/* vendor reg read failed */
 	unsigned int		wr_failures;	/* vendor reg write failed */
 	unsigned int		regsec_failures; /* 0x4e0 write failed */
+	unsigned int		rx_status_drops; /* rxeof: non-normal status */
+	unsigned int		rx_len_drops;	/* rxeof: len gate */
+	unsigned int		rx_full_buffers; /* rxeof: whole 32K buffers */
 };
 
 struct rtw88_chip {
