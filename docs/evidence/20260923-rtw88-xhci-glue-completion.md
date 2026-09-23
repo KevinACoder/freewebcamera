@@ -237,3 +237,19 @@ net_80211 `19ff73f`+`9257cc1`；fwc-rtw88 镜像 + worker fatal 定位记录
       乱码→校准/偏移问题）;
   (c) actlen 的来源核对（residual 计算若错,walk 偏移全错）。
 - 聚合主线对齐（no-op）保留；`wlan dbg` argv bug 仍待修。
+
+# 续轮 7：demux 洪水实测（boot-031840，binary e9ee103e）
+
+- 首帧 dump 打印（rx raw len=）被日志洪水冲出环形缓冲,未捕获——下轮
+  开机后需立即扫描并在前几秒内抓取（或将 dump 改为写入固定内存地址,
+  停机后经 JTAG/内存 dump 读取,彻底避开串口洪水）。
+- 实测洪水形态：demux 每秒数百帧、绝大多数 `skipping short packet (0)`
+  （pkt_len=0 零描述符）+ `rx buffer allocation failed` 交织（堆分配
+  失败 + 双线程 printf 串口行互踩）。
+- 结论修正：聚合修复后设备改为**高频零描述符短传输流**（数千/秒）,
+  不再是 32K 整缓冲。这更接近"每包一传输"但内容/长度字段全错 ——
+  头号嫌疑回到 (c) actlen/residual 计算与 RX 描述符布局不匹配
+  （get=want-residual 对 SHORT 事件在多 TRB TD 的语义 + 描述符
+  pkt_len 字段读取偏移),其次 (a) VA/PA。
+- 待做：把首帧 dump 改为写入保留内存而非 printf；核对
+  rtw_rx_query_rx_desc 的 desc 解析偏移 vs 实际 actlen。
