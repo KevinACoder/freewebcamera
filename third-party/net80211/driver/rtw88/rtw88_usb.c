@@ -111,9 +111,14 @@ rtw88_usb_reg_sec(struct rtw_dev *rtwdev, u32 addr, __le32 *data)
 
 	err = usbd_do_request_flags(usb->udev, &req, data, 0, NULL,
 	    RTW_USB_REG_SEC_TIMEOUT);
-	if (err != USBD_NORMAL_COMPLETION)
-		rtw_warn(rtwdev, "%s: reg 0x%x write failed: %s\n", __func__,
-		    0x4e0, usbd_errstr(err));
+	if (err != USBD_NORMAL_COMPLETION) {
+		usb->regsec_failures++;
+		if (usb->regsec_failures <= 16 ||
+		    (usb->regsec_failures % 128) == 0)
+			rtw_warn(rtwdev, "%s: reg 0x%x write failed (%u): %s\n",
+			    __func__, 0x4e0, usb->regsec_failures,
+			    usbd_errstr(err));
+	}
 }
 
 static u32
@@ -143,9 +148,18 @@ rtw88_usb_read(struct rtw_dev *rtwdev, u32 addr, u16 len)
 	err = usbd_do_request_flags(usb->udev, &req, data, 0, &actlen,
 	    RTW_USB_VENQT_TIMEOUT);
 	if (err != USBD_NORMAL_COMPLETION) {
-		rtw_dbg(rtwdev, RTW_DBG_USB,
-		    "%s: read 0x%x len %u failed: %s\n", __func__, addr, len,
-		    usbd_errstr(err));
+		usb->rd_failures++;
+		/*
+		 * rtw_dbg stays invisible in normal builds: a failing read
+		 * returns 0, and every check_hw_ready() polling FOR a zero
+		 * bit then "passes" -- that made firmware download results
+		 * unfalsifiable.  Keep the return value (the mac layer's
+		 * error path depends on it) but make the failure loud.
+		 */
+		if (usb->rd_failures <= 16 || (usb->rd_failures % 128) == 0)
+			rtw_err(rtwdev, "%s: read 0x%x len %u failed (%u): %s\n",
+			    __func__, addr, len, usb->rd_failures,
+			    usbd_errstr(err));
 		return 0;
 	}
 
@@ -197,10 +211,16 @@ rtw88_usb_write(struct rtw_dev *rtwdev, u32 addr, u32 val, int len)
 
 	err = usbd_do_request_flags(usb->udev, &req, data, 0, NULL,
 	    RTW_USB_VENQT_TIMEOUT);
-	if (err != USBD_NORMAL_COMPLETION)
-		rtw_dbg(rtwdev, RTW_DBG_USB,
-		    "%s: write 0x%x len %d failed: %s\n", __func__, addr, len,
-		    usbd_errstr(err));
+	if (err != USBD_NORMAL_COMPLETION) {
+		usb->wr_failures++;
+		/* same visibility argument as the read side: a dropped write
+		 * (register security / DDMA clock enable) is undetectable
+		 * downstream and used to leave nothing in the log */
+		if (usb->wr_failures <= 16 || (usb->wr_failures % 128) == 0)
+			rtw_err(rtwdev, "%s: write 0x%x len %d failed (%u): %s\n",
+			    __func__, addr, len, usb->wr_failures,
+			    usbd_errstr(err));
+	}
 
 	rtw88_usb_reg_sec(rtwdev, addr, data);
 }

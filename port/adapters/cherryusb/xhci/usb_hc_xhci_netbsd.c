@@ -201,6 +201,18 @@ struct xhci_dev {
     uint32_t ctxsz;
 };
 
+/* 命令完成上下文: do_command 的等待者把栈上 ctx 挂到 hcd->cmd_waiter,
+ * 事件消费者按 TRB 物理地址配对后回填。生命周期仅限 do_command 调用内:
+ * 成功路径 done=1 是消费者对 ctx 的最后一笔写(RELEASE, code/slot_id 先于
+ * 它), 等待者读到即可收栈; 超时路径必须先占事件环闸门再摘 cmd_waiter,
+ * 防止消费者拿着旧指针写已失效的栈。 */
+struct xhci_cmd_ctx {
+    volatile uint32_t done;
+    uint32_t code;
+    uint8_t slot_id;
+    uint32_t trb_addr;
+};
+
 struct xhci_hcd {
     struct usbh_bus *bus;
     uintptr_t capbase;
@@ -219,13 +231,16 @@ struct xhci_hcd {
     uint8_t event_cs;
     volatile uint32_t evt_busy;
     volatile uint32_t evt_pending;
-    /* 命令环(一次一条, NetBSD sc_command_addr 语义) */
+    /* 命令环(一次一条, NetBSD sc_command_addr 语义)。完成状态经 cmd_waiter
+     * 回填到发命令者的栈上上下文: 旧版全局 cmd_done/cmd_trb_addr 在多线程
+     * 并发发命令(hub 枚举 / worker 看门狗 kill / taskq ctrl)时会互相作废
+     * ——后写者抹掉先写者的配对地址, 先写者超时后的 CA+环复位又把后写者
+     * 在飞命令一并作废。 */
     struct xhci_ring cmd_ring;
     volatile uint32_t cmd_busy;
-    volatile uint32_t cmd_done;
-    uint32_t cmd_code;
-    uint8_t cmd_slot_id;
-    uint32_t cmd_trb_addr;     /* 已入队命令 TRB 的物理地址(完成配对) */
+    struct xhci_cmd_ctx *volatile cmd_waiter; /* 在飞命令的完成上下文 */
+    volatile uint32_t in_event;  /* 事件环消费中: giveback 回调禁同步 submit/kill */
+    uint32_t hse_count;          /* USBSTS.HSE 观测计数(打印限流) */
     /* DCBAA + slots */
     uint64_t *dcbaa;
     struct xhci_dev devs[XHCI_MAX_SLOTS];
@@ -447,45 +462,80 @@ static void xhci_event_process(struct xhci_hcd *hcd);
  * 命令环复位重挂)。
  */
 static int xhci_do_command(struct xhci_hcd *hcd, const struct xhci_trb *trb,
-                           uint32_t timeout_ms)
+                           uint32_t timeout_ms, struct xhci_cmd_ctx *ctx)
 {
     struct xhci_td td;
     struct xhci_trb cmd = *trb;
     int idx;
     uint32_t t;
 
-    if (hcd->cmd_busy != 0U) {
+    /* 不变量哨兵: giveback 回调全部设计为非阻塞投递(shim ring-post /
+     * hub 唤醒 / modeswitch 信号量)。谁在事件上下文里同步发命令, 完成事件
+     * 就只能由同一 event_process 循环消费 —— 自死锁, 必须当场报出。 */
+    if (hcd->in_event != 0U) {
+        USB_LOG_ERR("xhci: command type=%u issued in event context!\r\n",
+                    TRB3_TYPE_GET(cmd.dw3));
+    }
+
+    if (__atomic_test_and_set(&hcd->cmd_busy, __ATOMIC_ACQUIRE)) {
         return -USB_ERR_BUSY;
     }
-    hcd->cmd_busy = 1U;
-    hcd->cmd_done = 0U;
-    hcd->cmd_code = 0U;
-    hcd->cmd_slot_id = 0U;
-
-    memset(&td, 0, sizeof(td));
+    memset(ctx, 0, sizeof(*ctx));
     idx = xhci_ring_put(&hcd->cmd_ring, &cmd, 1U, &td);
     if (idx < 0) {
-        hcd->cmd_busy = 0U;
+        __atomic_clear(&hcd->cmd_busy, __ATOMIC_RELEASE);
         return -USB_ERR_NOMEM;
     }
-    hcd->cmd_trb_addr = (uint32_t)(uintptr_t)&hcd->cmd_ring.trbs[idx];
+    ctx->trb_addr = (uint32_t)(uintptr_t)&hcd->cmd_ring.trbs[idx];
+    __atomic_store_n(&hcd->cmd_waiter, ctx, __ATOMIC_RELEASE);
     xhci_dcache_clean(hcd->cmd_ring.trbs, hcd->cmd_ring.num_trbs * TRB_SIZE);
     *(volatile uint32_t *)hcd->db = 0U; /* doorbell 0, target 0 = 命令环 */
 
     t = 0U;
     while (t < timeout_ms) {
         xhci_event_process(hcd);
-        if (hcd->cmd_done != 0U) {
+        if (__atomic_load_n(&ctx->done, __ATOMIC_ACQUIRE) != 0U) {
             break;
         }
         usb_osal_msleep(1);
         t++;
     }
-    if (hcd->cmd_done == 0U) {
-        /* NetBSD xhci_abort_command: 写 CRCR.CA, 等 CRR 自清, 复位环 */
+    if (ctx->done == 0U) {
+        /* 超时收尾: 先独占事件环闸门, 保证没有消费者还握着 ctx, 再复查
+         * 一次(竞态完成)并摘 cmd_waiter, 之后栈上 ctx 才允许失效 */
+        while (__atomic_exchange_n(&hcd->evt_busy, 1U, __ATOMIC_ACQ_REL) != 0U) {
+            usb_osal_msleep(1);
+        }
+        if (__atomic_load_n(&ctx->done, __ATOMIC_ACQUIRE) == 0U) {
+            hcd->cmd_waiter = NULL;
+        }
+        __atomic_store_n(&hcd->evt_busy, 0U, __ATOMIC_RELEASE);
+    } else {
+        __atomic_store_n(&hcd->cmd_waiter, NULL, __ATOMIC_RELEASE);
+        __atomic_clear(&hcd->cmd_busy, __ATOMIC_RELEASE);
+    }
+    if (ctx->done == 0U) {
+        /* NetBSD xhci_abort_command: 写 CRCR.CA, 等 CRR 自清, 复位环。
+         * 取证 dump: HSE/HCH/CNR 区分控制器停摆与软件漏事件; CA 写后
+         * CRR 是否自清区分命令单元真停与完成事件丢失。
+         * 注意全程仍持有 cmd_busy: 并发新命令若此刻入队, 会被 CA/环
+         * 复位一并作废 —— 那正是本修复要消除的互相破坏。 */
+        uint32_t usbsts = xhci_r32(hcd, XHCI_USBSTS);
         uint32_t crcr = xhci_r32(hcd, XHCI_CRCR_LO);
         uint32_t i;
 
+        USB_LOG_ERR("xhci: cmd timeout type=%u slot=%u ep=%u "
+                    "USBSTS=%08x%s%s%s%s USBCMD=%08x IMAN=%08x CRCR=%08x "
+                    "swring(ep=%u cs=%u)\r\n",
+                    TRB3_TYPE_GET(cmd.dw3), TRB3_SLOT_ID_GET(cmd.dw3),
+                    TRB3_EP_ID_GET(cmd.dw3), usbsts,
+                    (usbsts & XHCI_STS_HSE) != 0U ? " HSE" : "",
+                    (usbsts & XHCI_STS_HCH) != 0U ? " HCH" : "",
+                    (usbsts & XHCI_STS_CNR) != 0U ? " CNR" : "",
+                    (usbsts & XHCI_STS_HCE) != 0U ? " HCE" : "",
+                    xhci_r32(hcd, XHCI_USBCMD),
+                    xhci_r32_rts(hcd, XHCI_IMAN(0)), crcr,
+                    hcd->cmd_ring.ep, hcd->cmd_ring.cs);
         xhci_w32(hcd, XHCI_CRCR_LO, crcr | XHCI_CRCR_LO_CA);
         for (i = 0U; i < 500U; i++) {
             if ((xhci_r32(hcd, XHCI_CRCR_LO) & XHCI_CRCR_LO_CRR) == 0U) {
@@ -493,16 +543,19 @@ static int xhci_do_command(struct xhci_hcd *hcd, const struct xhci_trb *trb,
             }
             usb_osal_msleep(1);
         }
+        if (i == 500U) {
+            USB_LOG_ERR("xhci: CRCR.CA did not retire (CRR stuck), "
+                        "command unit dead\r\n");
+        }
         hcd->cmd_ring.ep = 0;
         hcd->cmd_ring.cs = 1;
         xhci_w32(hcd, XHCI_CRCR_LO,
                  (uint32_t)(uintptr_t)hcd->cmd_ring.trbs | XHCI_CRCR_LO_RCS);
-        hcd->cmd_busy = 0U;
         USB_LOG_ERR("command timeout (type=%u)\r\n", TRB3_TYPE_GET(cmd.dw3));
+        __atomic_clear(&hcd->cmd_busy, __ATOMIC_RELEASE);
         return -USB_ERR_TIMEOUT;
     }
-    hcd->cmd_busy = 0U;
-    if (hcd->cmd_code != TRB_CODE_SUCCESS) {
+    if (ctx->code != TRB_CODE_SUCCESS) {
         return -USB_ERR_IO;
     }
     return 0;
@@ -511,25 +564,27 @@ static int xhci_do_command(struct xhci_hcd *hcd, const struct xhci_trb *trb,
 static int xhci_cmd_enable_slot(struct xhci_hcd *hcd, uint8_t *slot_id)
 {
     struct xhci_trb trb;
+    struct xhci_cmd_ctx ctx;
     int ret;
 
     memset(&trb, 0, sizeof(trb));
     trb.dw3 = TRB3_TYPE_SET(TRB_TYPE_ENABLE_SLOT);
-    ret = xhci_do_command(hcd, &trb, CMD_TIMEOUT_MS);
+    ret = xhci_do_command(hcd, &trb, CMD_TIMEOUT_MS, &ctx);
     if (ret != 0) {
         return ret;
     }
-    *slot_id = hcd->cmd_slot_id;
+    *slot_id = ctx.slot_id;
     return 0;
 }
 
 static int xhci_cmd_disable_slot(struct xhci_hcd *hcd, uint8_t slot_id)
 {
     struct xhci_trb trb;
+    struct xhci_cmd_ctx ctx;
 
     memset(&trb, 0, sizeof(trb));
     trb.dw3 = TRB3_TYPE_SET(TRB_TYPE_DISABLE_SLOT) | TRB3_SLOT_ID(slot_id);
-    return xhci_do_command(hcd, &trb, CMD_TIMEOUT_MS);
+    return xhci_do_command(hcd, &trb, CMD_TIMEOUT_MS, &ctx);
 }
 
 /* ---- 端点恢复命令三件套(NetBSD xhci_reset_endpoint / xhci_stop_endpoint_cmd
@@ -549,22 +604,24 @@ static int xhci_cmd_reset_ep(struct xhci_hcd *hcd, struct xhci_dev *dev,
                              uint32_t dci)
 {
     struct xhci_trb trb;
+    struct xhci_cmd_ctx ctx;
 
     memset(&trb, 0, sizeof(trb));
     trb.dw3 = TRB3_TYPE_SET(TRB_TYPE_RESET_EP) | TRB3_SLOT_ID(dev->slot_id) |
               TRB3_EP_ID(dci);
-    return xhci_do_command(hcd, &trb, CMD_TIMEOUT_MS);
+    return xhci_do_command(hcd, &trb, CMD_TIMEOUT_MS, &ctx);
 }
 
 static int xhci_cmd_stop_ep(struct xhci_hcd *hcd, struct xhci_dev *dev,
                             uint32_t dci)
 {
     struct xhci_trb trb;
+    struct xhci_cmd_ctx ctx;
 
     memset(&trb, 0, sizeof(trb));
     trb.dw3 = TRB3_TYPE_SET(TRB_TYPE_STOP_EP) | TRB3_SLOT_ID(dev->slot_id) |
               TRB3_EP_ID(dci);
-    return xhci_do_command(hcd, &trb, CMD_TIMEOUT_MS);
+    return xhci_do_command(hcd, &trb, CMD_TIMEOUT_MS, &ctx);
 }
 
 /* Dequeue 指针指回环基址, DCS=新消费者 cycle(NetBSD xhci_set_dequeue:
@@ -573,13 +630,14 @@ static int xhci_cmd_set_tr_dequeue(struct xhci_hcd *hcd, struct xhci_dev *dev,
                                    uint32_t dci, struct xhci_ring *ring)
 {
     struct xhci_trb trb;
+    struct xhci_cmd_ctx ctx;
 
     memset(&trb, 0, sizeof(trb));
     trb.dw0 = (uint32_t)(uintptr_t)ring->trbs | 1U; /* DCS=1 */
     trb.dw1 = (uint32_t)((uintptr_t)ring->trbs >> 32);
     trb.dw3 = TRB3_TYPE_SET(TRB_TYPE_SET_TR_DEQUEUE) |
               TRB3_SLOT_ID(dev->slot_id) | TRB3_EP_ID(dci);
-    return xhci_do_command(hcd, &trb, CMD_TIMEOUT_MS);
+    return xhci_do_command(hcd, &trb, CMD_TIMEOUT_MS, &ctx);
 }
 
 /*
@@ -955,6 +1013,7 @@ static int xhci_cmd_address_device(struct xhci_hcd *hcd, struct xhci_dev *dev,
                                    uint8_t bsr, uint8_t usb_addr, uint16_t mps)
 {
     struct xhci_trb trb;
+    struct xhci_cmd_ctx ctx;
     int ret;
 
     xhci_setup_ep0_input_ctx(dev, mps);
@@ -976,7 +1035,7 @@ static int xhci_cmd_address_device(struct xhci_hcd *hcd, struct xhci_dev *dev,
     trb.dw3 = TRB3_TYPE_SET(TRB_TYPE_ADDRESS_DEV) | TRB3_SLOT_ID(dev->slot_id) |
               (bsr ? TRB3_BSR : 0U);
 
-    ret = xhci_do_command(hcd, &trb, CMD_TIMEOUT_MS);
+    ret = xhci_do_command(hcd, &trb, CMD_TIMEOUT_MS, &ctx);
     if (bsr == 0U) {
         /* 校验输出上下文: 控制器应已把 slot 置 ADDRESSED 并回报分配地址 */
         uint32_t dw3, st, hw_addr;
@@ -999,7 +1058,7 @@ static int xhci_cmd_address_device(struct xhci_hcd *hcd, struct xhci_dev *dev,
     }
     if (ret != 0) {
         USB_LOG_ERR("Address Device (bsr=%u addr=%u) failed, code=%u\r\n",
-                    bsr, usb_addr, hcd->cmd_code);
+                    bsr, usb_addr, ctx.code);
         return ret;
     }
     dev->ep0_mps_hw = mps;
@@ -1010,6 +1069,7 @@ static int xhci_cmd_evaluate_context(struct xhci_hcd *hcd, struct xhci_dev *dev,
                                      uint16_t mps)
 {
     struct xhci_trb trb;
+    struct xhci_cmd_ctx ctx;
     int ret;
 
     xhci_setup_ep0_input_ctx(dev, mps);
@@ -1020,9 +1080,9 @@ static int xhci_cmd_evaluate_context(struct xhci_hcd *hcd, struct xhci_dev *dev,
     trb.dw2 = 0;
     trb.dw3 = TRB3_TYPE_SET(TRB_TYPE_EVALUATE_CTX) | TRB3_SLOT_ID(dev->slot_id);
 
-    ret = xhci_do_command(hcd, &trb, CMD_TIMEOUT_MS);
+    ret = xhci_do_command(hcd, &trb, CMD_TIMEOUT_MS, &ctx);
     if (ret != 0) {
-        USB_LOG_ERR("Evaluate Context failed, code=%u\r\n", hcd->cmd_code);
+        USB_LOG_ERR("Evaluate Context failed, code=%u\r\n", ctx.code);
         return ret;
     }
     dev->ep0_mps_hw = mps;
@@ -1044,6 +1104,7 @@ static int xhci_cmd_configure_ep(struct xhci_hcd *hcd, struct xhci_dev *dev,
     uint8_t interval = (is_intr && ep->bInterval > 0U) ? (ep->bInterval - 1U) : 0U;
     uint8_t burst = (uint8_t)((ep->wMaxPacketSize >> 11) & 0x3U);
     struct xhci_trb trb;
+    struct xhci_cmd_ctx ctx;
     int ret;
 
     memset(dev->input_ctx, 0, words * (2U + XHCI_MAX_DCI) * 4U);
@@ -1080,10 +1141,10 @@ static int xhci_cmd_configure_ep(struct xhci_hcd *hcd, struct xhci_dev *dev,
     trb.dw2 = 0;
     trb.dw3 = TRB3_TYPE_SET(TRB_TYPE_CONFIGURE_EP) | TRB3_SLOT_ID(dev->slot_id);
 
-    ret = xhci_do_command(hcd, &trb, CMD_TIMEOUT_MS);
+    ret = xhci_do_command(hcd, &trb, CMD_TIMEOUT_MS, &ctx);
     if (ret != 0) {
         USB_LOG_ERR("Configure EP (dci=%u) failed, code=%u\r\n", dci,
-                    hcd->cmd_code);
+                    ctx.code);
         return ret;
     }
     dev->ep_configured |= (1U << dci);
@@ -2142,6 +2203,7 @@ static void xhci_event_process(struct xhci_hcd *hcd)
         hcd->evt_pending = 1;
         return;
     }
+    hcd->in_event = 1U;
     do {
         hcd->evt_pending = 0;
 
@@ -2160,14 +2222,20 @@ static void xhci_event_process(struct xhci_hcd *hcd)
             case TRB_TYPE_TRANSFER:
                 xhci_handle_transfer_event(hcd, ev);
                 break;
-            case TRB_TYPE_CMD_COMPLETE:
-                /* 按 TRB 物理地址配对(NetBSD sc_command_addr 语义) */
-                if ((uint32_t)(uintptr_t)ev->dw0 == hcd->cmd_trb_addr) {
-                    hcd->cmd_code = TRB2_CODE_GET(ev->dw2);
-                    hcd->cmd_slot_id = (uint8_t)TRB3_SLOT_ID_GET(ev->dw3);
-                    hcd->cmd_done = 1;
+            case TRB_TYPE_CMD_COMPLETE: {
+                /* 按 TRB 物理地址配对(NetBSD sc_command_addr 语义),
+                 * 回填发命令者栈上上下文; cmd_waiter 已摘除的迟到完成
+                 * (CA 中止/超时后)在此安全丢弃 */
+                struct xhci_cmd_ctx *cw = hcd->cmd_waiter;
+
+                if (cw != NULL &&
+                    (uint32_t)(uintptr_t)ev->dw0 == cw->trb_addr) {
+                    cw->code = TRB2_CODE_GET(ev->dw2);
+                    cw->slot_id = (uint8_t)TRB3_SLOT_ID_GET(ev->dw3);
+                    __atomic_store_n(&cw->done, 1U, __ATOMIC_RELEASE);
                 }
                 break;
+            }
             case TRB_TYPE_PORT_STATUS: {
                 uint8_t port = (uint8_t)((ev->dw0 >> 24) & 0xFFU);
 
@@ -2199,6 +2267,7 @@ static void xhci_event_process(struct xhci_hcd *hcd)
         }
     } while (hcd->evt_pending);
 
+    hcd->in_event = 0U;
     __atomic_store_n(&hcd->evt_busy, 0U, __ATOMIC_RELEASE);
 }
 
@@ -2395,6 +2464,15 @@ void USBH_IRQHandler(uint8_t busid)
     usbsts = xhci_r32(hcd, XHCI_USBSTS);
     if ((usbsts & (XHCI_STS_HSE | XHCI_STS_EINT | XHCI_STS_PCD | XHCI_STS_HCE)) == 0U) {
         return;
+    }
+    if ((usbsts & XHCI_STS_HSE) != 0U) {
+        /* 旧版静默 RW1C 掩盖控制器级错误: HSE 之后命令/事件机器可能
+         * 整体停摆, 必须 visible(固件下载期设备死亡窗的取证位) */
+        hcd->hse_count++;
+        if (hcd->hse_count <= 8U || (hcd->hse_count & 0x3FU) == 0U) {
+            USB_LOG_ERR("xhci: USBSTS Host System Error (count=%u)\r\n",
+                        hcd->hse_count);
+        }
     }
     xhci_w32(hcd, XHCI_USBSTS, usbsts & ~XHCI_STS_RSVDP0);
     iman = xhci_r32_rts(hcd, XHCI_IMAN(0));

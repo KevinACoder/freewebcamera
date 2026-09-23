@@ -125,6 +125,9 @@ struct rtw88_usb {
 	unsigned int		tx_reclaimed;	/* buffers returned by submit */
 	unsigned int		txeof_errors;	/* completion with error status */
 	unsigned int		tx_reports;	/* skbs queued for fw TX report */
+	unsigned int		rd_failures;	/* vendor reg read failed */
+	unsigned int		wr_failures;	/* vendor reg write failed */
+	unsigned int		regsec_failures; /* 0x4e0 write failed */
 };
 
 struct rtw88_chip {

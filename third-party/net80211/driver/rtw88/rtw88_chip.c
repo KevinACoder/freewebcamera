@@ -491,9 +491,10 @@ rtw88_chip_tx_stats(const struct rtw88_chip *chip, char *buf, size_t len)
 
 	snprintf(buf, len,
 	    "usb: nofree=%u qdepth_max=%u reclaimed=%u txeof_err=%u "
-	    "reports=%u\n",
+	    "reports=%u rd_fail=%u wr_fail=%u regsec_fail=%u\n",
 	    usb->tx_nofree, usb->tx_qdepth_max, usb->tx_reclaimed,
-	    usb->txeof_errors, usb->tx_reports);
+	    usb->txeof_errors, usb->tx_reports,
+	    usb->rd_failures, usb->wr_failures, usb->regsec_failures);
 }
 
 void
