@@ -122,6 +122,11 @@ static struct ehci_qh_hw *ehci_qh_alloc(struct usbh_bus *bus)
         qh = &ehci_qh_pool[bus->hcd.hcd_id][i];
         if (!qh->inuse) {
             qh->inuse = true;
+            /* Clear the completion flags together with the slot claim, so
+             * the iaad walk can never observe an in-use slot carrying
+             * residue from its previous tenant. */
+            qh->remove_in_iaad = 0;
+            qh->killed = 0;
             usb_osal_leave_critical_section(flags);
 
             memset(&qh->hw, 0, sizeof(struct ehci_qh));
@@ -130,7 +135,6 @@ static struct ehci_qh_hw *ehci_qh_alloc(struct usbh_bus *bus)
             qh->hw.overlay.alt_next_qtd = QTD_LIST_END;
             qh->urb = NULL;
             qh->first_qtd = QTD_LIST_END;
-            qh->remove_in_iaad = 0;
 
             return qh;
         }
@@ -718,6 +722,10 @@ static struct ehci_qh_hw *ehci_intr_urb_init(struct usbh_bus *bus, struct usbh_u
     return qh;
 }
 
+static volatile uint32_t s_ehci_dbg_killed_consume;
+static volatile uint32_t s_ehci_dbg_bulk_done;
+static volatile uint32_t s_ehci_dbg_kill_seq;
+
 static void ehci_urb_waitup(struct usbh_bus *bus, struct usbh_urb *urb)
 {
     struct ehci_qh_hw *qh;
@@ -725,8 +733,21 @@ static void ehci_urb_waitup(struct usbh_bus *bus, struct usbh_urb *urb)
     qh = (struct ehci_qh_hw *)urb->hcpriv;
 
     if (qh->killed == 1U) {
+        /* Kill handshake: hand the slot back to the killer. The iaad flag
+         * must go with it, or the slot stays flagged after it is freed and
+         * every later iaad replays waitup on dead or rebound state. */
+        qh->remove_in_iaad = 0;
         qh->killed = 2U;
+        s_ehci_dbg_killed_consume++;
+        if (s_ehci_dbg_killed_consume <= 8U) {
+            USB_LOG_RAW("[ehci-dbg] waitup killed handshake #%u urb=%p\r\n",
+                        s_ehci_dbg_killed_consume, (void *)urb);
+        }
         return;
+    }
+
+    if (USB_GET_ENDPOINT_TYPE(urb->ep->bmAttributes) == USB_ENDPOINT_TYPE_BULK) {
+        s_ehci_dbg_bulk_done++;
     }
 
     qh->remove_in_iaad = 0;
@@ -1446,6 +1467,12 @@ int usbh_kill_urb(struct usbh_urb *urb)
 
     bus = urb->hport->bus;
 
+    uint32_t kill_seq = ++s_ehci_dbg_kill_seq;
+    if (kill_seq <= 8U) {
+        USB_LOG_RAW("[ehci-dbg] kill#%u urb=%p bulk_done=%u\r\n",
+                    kill_seq, (void *)urb, s_ehci_dbg_bulk_done);
+    }
+
 #ifdef CONFIG_USB_EHCI_WITH_OHCI
     if (EHCI_HCOR->portsc[urb->hport->port - 1] & EHCI_PORTSC_OWNER) {
         return ohci_kill_urb(urb);
@@ -1507,9 +1534,22 @@ int usbh_kill_urb(struct usbh_urb *urb)
         while (qh->killed != 2) {
             timeout++;
             if (timeout > 200000U) {
+                /* The iaad was consumed before killed went to 1, so no
+                 * interrupt will ever finish the handshake. If the slot
+                 * still belongs to this urb the kill owns the completion;
+                 * if a concurrent completion already finished the urb,
+                 * touching the slot again would double-free it. */
+                flags = usb_osal_enter_critical_section();
+                bool orphan = (qh->inuse && qh->urb == urb && urb->hcpriv == qh);
                 qh->remove_in_iaad = 0;
                 qh->killed = 0;
-                return -USB_ERR_TIMEOUT;
+                usb_osal_leave_critical_section(flags);
+                if (!orphan) {
+                    return -USB_ERR_TIMEOUT;
+                }
+                USB_LOG_RAW("[ehci-dbg] kill handshake timeout, orphan completion urb=%p\r\n",
+                            (void *)urb);
+                break;
             }
         }
     } else {
@@ -1609,7 +1649,9 @@ void USBH_IRQHandler(uint8_t busid)
     if (usbsts & EHCI_USBSTS_IAA) {
         for (uint8_t index = 0; index < CONFIG_USB_EHCI_QH_NUM; index++) {
             struct ehci_qh_hw *qh = &ehci_qh_pool[bus->hcd.hcd_id][index];
-            if (qh->remove_in_iaad) {
+            /* Only a live, armed transfer may carry the iaad flag; skip
+             * anything else instead of replaying waitup on it. */
+            if (qh->remove_in_iaad && qh->inuse && qh->urb) {
                 ehci_urb_waitup(bus, qh->urb);
             }
         }
