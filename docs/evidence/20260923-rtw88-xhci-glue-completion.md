@@ -253,3 +253,26 @@ net_80211 `19ff73f`+`9257cc1`；fwc-rtw88 镜像 + worker fatal 定位记录
   pkt_len 字段读取偏移),其次 (a) VA/PA。
 - 待做：把首帧 dump 改为写入保留内存而非 printf；核对
   rtw_rx_query_rx_desc 的 desc 解析偏移 vs 实际 actlen。
+
+# 续轮 8（2026-09-24）：RX 内容实证 —— 真实 802.11 帧在缓冲里，demux 描述符步进错位
+
+boot-032652 抓到 parse 循环 bad-packet 门的实弹打印（本次未设 mask 仍可见，
+说明这些打印走的是 rtw_err/rtw_warn 路径而非 rtw_dbg）：
+
+- `bad packet: skb_len 13340 len 13307 drvinfo 8 shift 1 c2h 1 xfer 1015 off 632`
+- `dropping frame with fc 0x0902 (len 258)`  ← 真实 QoS 数据帧被 sanity 门丢
+- `bad packet: skb_len 9067 len 8985 drvinfo 56 shift 2 c2h 0 xfer 726 off 640`
+
+结论：**设备交付的数据内容是真实 802.11 帧**（能看到合法帧头），但
+demux 的描述符步进错位——walk 大部分落在错误偏移（pkt_len=0 / 巨大
+垃圾值），偶尔撞上真帧又被 fc&3 数据帧门丢弃。
+
+## 下一轮定位点（收窄到一处）
+
+`rtw88_chip_rx_work` 的 walk 三要素 vs 实际设备格式：
+1. `pkt_desc_sz`（8821CU USB 的 RX desc 实际 = 24 字节？核对
+   chip->rx_pkt_desc_sz 的 8821C 赋值）；
+2. `next_pkt = round_up(skb_len, 8)` 步进 + `drvinfo_sz/shift` 解析
+   （打印显示 drvinfo 8/56、shift 1/2 —— 56 明显异常）；
+3. `rx raw len=360` 首帧：24 desc + ~336 beacon 的分布核对。
+对拍 NetBSD 侧同函数（if_rtw88 + rtw88_chip 的 net80211 版本）即可定案。
