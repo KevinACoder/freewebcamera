@@ -48,16 +48,36 @@ static const uint32_t s_ehci_irq[USBH_EHCI_NUM] = {
 #define EHCI_IRQ_DISPATCH(busid)	USBH_IRQHandler(busid)
 #endif
 
+/* The EHCI completion scan mutates the same shared state (async ring,
+ * pool freelists, urb fields) the submit path guards with the osal
+ * critical section (which on this port is _tx_thread_smp_protect - the
+ * thread side is covered).  The IRQ side never took it: on the 4-core
+ * build the interrupt lands on core 0 while submits run on other
+ * cores, so scan/unlink/waitup ran fully exposed to an in-flight arm.
+ * Under full-rate bulk that window tore the async ring and double-granted
+ * pool slots (evidence 20260923-fullrate-instability-two-signatures.md).
+ * Serializing the dispatch closes it; hold time is the scan itself
+ * (us-scale - completions only post to the shim's SPSC ring here), and
+ * nothing in the held region sleeps (audited 20260923). */
+static void usbh_ehci_irq_cs(uint8_t busid)
+{
+	size_t flags = usb_osal_enter_critical_section();
+
+	EHCI_IRQ_DISPATCH(busid);
+
+	usb_osal_leave_critical_section(flags);
+}
+
 /* The CMSIS irq_ctrl handler carries no argument, so each bus gets its own
  * trampoline closing over the busid. */
 static void usbh_ehci0_isr(void)
 {
-	EHCI_IRQ_DISPATCH(0U);
+	usbh_ehci_irq_cs(0U);
 }
 
 static void usbh_ehci1_isr(void)
 {
-	EHCI_IRQ_DISPATCH(1U);
+	usbh_ehci_irq_cs(1U);
 }
 
 static void (*const s_ehci_isr[USBH_EHCI_NUM])(void) = {
