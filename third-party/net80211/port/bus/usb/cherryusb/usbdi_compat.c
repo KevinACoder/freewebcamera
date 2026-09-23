@@ -199,6 +199,7 @@ static struct wlan_usb_stats {
 	unsigned in_flight_peak;/* max xfers handed to the HCD at once */
 	unsigned ctrl_fail;	/* control xfers failed after retries */
 	unsigned ctrl_retry;	/* control xfer re-submissions after timeout */
+	unsigned stall_clear;	/* CLEAR_FEATURE(ENDPOINT_HALT) sent (bulk) */
 	unsigned task_drop;	/* usb_add_task: task ring full, task lost */
 	unsigned task_busy;	/* usb_add_task: already queued (normal) */
 } wlan_usb_stats;
@@ -377,9 +378,7 @@ void usbd_abort_pipe(struct usbd_pipe *pipe) {
 }
 
 void usbd_clear_endpoint_stall_async(struct usbd_pipe *pipe) {
-	/* the host-side clear-feature is handled on the cherryusb stall
-	 * recovery path; returning lets the driver keep re-arming rx */
-	(void) pipe;
+	(void) usbd_pipe_clear_halt(pipe);
 }
 
 /* ------------------------------------------------------------------ */
@@ -537,6 +536,14 @@ static void usbd_shim_urb_work(struct usbd_xfer *xfer) {
 	cb = xfer->callback;
 	priv = xfer->priv;
 	status = xfer->status;
+	if (status == USBD_STALLED && xfer->pipe != NULL &&
+	    (xfer->pipe->ed.bmAttributes & 0x03U) == USB_ENDPOINT_TYPE_BULK) {
+		/* the HCD never recovers a halted bulk endpoint on its
+		 * own; clear the halt so the driver's re-arm actually
+		 * reaches the device instead of completing STALLED
+		 * forever */
+		(void) usbd_pipe_clear_halt(xfer->pipe);
+	}
 	if (cb != NULL) {
 		/* Run the driver callback under the port serializer, the
 		 * port's replacement for the splnet() discipline of the
@@ -574,6 +581,20 @@ usbd_status usbd_transfer(struct usbd_xfer *xfer) {
 	usbh_bulk_urb_fill(&xfer->urb, hport, xfer->pipe->cherry_ep,
 		xfer->buffer, xfer->length,
 		0 /* timeout=0: asynchronous */, usbd_shim_urb_complete, xfer);
+	{
+		/* USBD_FORCE_SHORT_XFER: bulk OUT of an exact multiple of
+		 * the max packet size terminates with a zero-length
+		 * packet (the HCD appends it from this flag); without it
+		 * the device-side bulk FIFO can hold the last full packet
+		 * waiting for a short-packet delimiter */
+		uint16_t mps = USB_GET_MAXPACKETSIZE(xfer->pipe->cherry_ep->wMaxPacketSize);
+
+		if ((xfer->flags & USBD_FORCE_SHORT_XFER) != 0U &&
+		    xfer->length != 0U && mps != 0U &&
+		    (xfer->length % mps) == 0U) {
+			xfer->urb.transfer_flags = USBH_URB_ZERO_PACKET;
+		}
+	}
 
 	xfer->status = USBD_IN_PROGRESS;
 	xfer->actlen = 0;
@@ -626,6 +647,34 @@ usbd_status usbd_transfer(struct usbd_xfer *xfer) {
 
 static usbd_status usbd_ctrl_xfer(struct usbd_device *dev,
 	usb_device_request_t *req, void *data, int *actlen);
+
+/* bulk STALL recovery: CLEAR_FEATURE(ENDPOINT_HALT) returns both sides
+ * to DATA0.  Nothing in cherryusb ever sent one (its clear-feature paths
+ * only cover hub port features), so a halted bulk endpoint used to stay
+ * dead forever; the completion worker and the driver's
+ * usbd_clear_endpoint_stall_async both come through here. */
+static usbd_status usbd_pipe_clear_halt(struct usbd_pipe *pipe) {
+	usb_device_request_t req;
+	usbd_status err;
+
+	if (pipe == NULL || pipe->dev == NULL || pipe->dev->hport == NULL) {
+		return USBD_INVAL;
+	}
+	req.bmRequestType = UT_WRITE_ENDPOINT;
+	req.bRequest = UR_CLEAR_FEATURE;
+	USETW(req.wValue, UF_ENDPOINT_HALT);
+	USETW(req.wIndex, pipe->ed.bEndpointAddress);
+	USETW(req.wLength, 0);
+	err = usbd_ctrl_xfer(pipe->dev, &req, NULL, NULL);
+	if (err == USBD_NORMAL_COMPLETION) {
+		/* clear-halt resets the endpoint toggle to DATA0 on both
+		 * sides; the EHCI port takes its next start toggle from
+		 * the pipe (bulk OUT) or resyncs from the wire (bulk IN) */
+		pipe->data_toggle = 0;
+		wlan_usb_stats.stall_clear++;
+	}
+	return err;
+}
 /* control-transfer trace counter, reset by wlan_usbdi_trace_reset() */
 static unsigned wlan_ctrl_trace_seq;
 void wlan_usbdi_trace_reset(void);
@@ -856,8 +905,9 @@ void wlan_usbdi_stats_dump(void) {
 	    wlan_usb_stats.rx_submit, wlan_usb_stats.rx_complete,
 	    wlan_usb_stats.wd_timeouts);
 	printf("[wlan] usbstats: ctrl_fail=%u ctrl_retry=%u "
-	    "task_drop=%u task_busy=%u\n",
+	    "stall_clear=%u task_drop=%u task_busy=%u\n",
 	    wlan_usb_stats.ctrl_fail, wlan_usb_stats.ctrl_retry,
+	    wlan_usb_stats.stall_clear,
 	    wlan_usb_stats.task_drop, wlan_usb_stats.task_busy);
 }
 

@@ -94,7 +94,7 @@
 #define MEMP_NUM_TCP_PCB                16
 #define MEMP_NUM_TCP_PCB_LISTEN         4
 /* >= TCP_SND_QUEUELEN, per lwIP's own sizing rule. */
-#define MEMP_NUM_TCP_SEG                64
+#define MEMP_NUM_TCP_SEG                128
 #define MEMP_NUM_UDP_PCB                8
 #define MEMP_NUM_RAW_PCB                8
 #define MEMP_NUM_NETBUF                 32
@@ -107,10 +107,12 @@
 /* --- TCP ------------------------------------------------------------------ */
 
 #define TCP_MSS                         1460
-#define TCP_WND                         (8 * TCP_MSS)
-#define TCP_SND_BUF                     (8 * TCP_MSS)
-/* Must be >= 4 * TCP_SND_BUF / TCP_MSS: 4 * 11680 / 1460 = 32. */
-#define TCP_SND_QUEUELEN                32
+/* 8*MSS x ~40ms air RTT capped iperf uplink at ~2 Mbit/s (BDP); 32*MSS
+ * lets the same link reach its air-rate ceiling */
+#define TCP_WND                         (32 * TCP_MSS)
+#define TCP_SND_BUF                     (32 * TCP_MSS)
+/* Must be >= 4 * TCP_SND_BUF / TCP_MSS: 4 * 46720 / 1460 = 128. */
+#define TCP_SND_QUEUELEN                128
 #define TCP_QUEUE_OOSEQ                 0
 #define LWIP_WND_SCALE                  0
 #define LWIP_TCP_SACK_OUT               0

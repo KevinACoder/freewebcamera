@@ -76,8 +76,11 @@
 /* capability registers sit at the controller base (no vendor offset) */
 #define CONFIG_USB_EHCI_HCCR_OFFSET        0
 #define CONFIG_USB_EHCI_FRAME_LIST_SIZE    1024
-/* one ctrl urb (3 qtds) + rx pump + up to 2 tx pipes in flight */
-#define CONFIG_USB_EHCI_QH_NUM             16
+/* one ctrl urb (3 qtds) + rx pump + up to 2 tx pipes in flight; the
+ * per-endpoint FIFO keeps one QH per endpoint in the ring, so the
+ * ceiling is endpoints, not in-flight transfers - headroom for the
+ * USB-attached NIC plus any other class on the same bus */
+#define CONFIG_USB_EHCI_QH_NUM             32
 #define CONFIG_USB_EHCI_QTD_NUM            (CONFIG_USB_EHCI_QH_NUM * 3)
 #define CONFIG_USB_EHCI_ITD_NUM            4
 /* standard EHCI 1.0: software sets CONFIGFLAG to take over the root ports */
