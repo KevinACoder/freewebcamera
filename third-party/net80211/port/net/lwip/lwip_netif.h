@@ -24,6 +24,11 @@ void wlan_lwip_assoc_notify(int assoc);
  * like the embox netdev bridge did. Returns 0 when the netif exists. */
 int wlan_lwip_ensure(void);
 
+/* Drop/post counters of the data_rx bridge: posted frames plus each
+ * silent-loss point (assoc gate, pbuf_alloc, pbuf_take, mbox input).
+ * Snapshot twice and diff across a wedged flow. */
+void wlan_lwip_bridge_dump(void);
+
 #endif /* LWIP_NETIF_H_ */
 
 /* disable the DHCP started on ASSOC so a static address sticks */

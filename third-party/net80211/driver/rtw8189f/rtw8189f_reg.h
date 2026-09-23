@@ -361,6 +361,7 @@
  * the first 32 bytes, HW sequence numbers enabled via REG_HWSEQ_CTRL).
  */
 #define RTW8189F_TXDESC_SIZE			40
+#define RTW8189F_TXDESC_QSEL_BE			0x00
 #define RTW8189F_TXDESC_QSEL_MGNT		0x12
 
 /* dword0: [15:0] packet size, [23:16] offset (= descriptor size). */
@@ -390,6 +391,9 @@
 /* TX rate indices (DESC8188F_RATE*) and rate-adaptive table ids. */
 #define RTW8189F_RATE_1M			0x00
 #define RTW8189F_RATE_6M			0x04
+#define RTW8189F_RATE_24M			0x08
+#define RTW8189F_RATE_36M			0x09
+#define RTW8189F_RATE_54M			0x0b
 #define RTW8189F_RATEID_G			7	/* RATEID_IDX_G */
 
 #endif /* !_DEV_SDMMC_RTW8189F_REG_H_ */
