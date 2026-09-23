@@ -126,6 +126,12 @@ extern const size_t rtw8189ffw_size;
 extern const uint8_t rtw8821c_fw_data[];
 extern const size_t rtw8821c_fw_size;
 
+/* builds the USB class hook's VID/PID match table from
+ * wlan_chip_drivers[]; must run before the hub thread enumerates
+ * (the library's own lanes call it from net_bridge.c, which this
+ * port does not compile) */
+extern void usbh_wlan_class_init(void);
+
 /* ------------------------------------------------------------------ */
 
 static int wlan_started;
@@ -158,6 +164,7 @@ int wlan_start(void) {
 		(size_t) rtw8821c_fw_size) != 0) {
 		return -1;
 	}
+	usbh_wlan_class_init();
 	wlan_started = 1;
 	return 0;
 }

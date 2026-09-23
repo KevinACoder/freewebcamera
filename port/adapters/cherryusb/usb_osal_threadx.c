@@ -35,8 +35,11 @@
 /* Sized for two hub threads (TCB + 64 KiB stack each - the net80211
  * attach chain runs there and is the deepest call stack in the image),
  * the reaper, the EHCI descriptor pools and the core's per-device
- * allocations, with room to spare. */
-#define USB_OSAL_POOL_BYTES	(512u * 1024u)
+ * allocations, with room to spare.
+ * NET80211_PORT(L): 1 MiB - three wlan adapters mean six per-device
+ * worker threads (2 x 32 KiB stacks each) on top of the four hub
+ * threads; 512 KiB ran out the moment the third dongle attached. */
+#define USB_OSAL_POOL_BYTES	(1024u * 1024u)
 
 static uint8_t usb_osal_pool_mem[USB_OSAL_POOL_BYTES]
 	__attribute__((aligned(16)));

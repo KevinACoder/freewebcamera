@@ -646,8 +646,24 @@ static void usbh_hub_events(struct usbh_hub *hub)
 
                     USB_LOG_INFO("New %s device on Bus %u, Hub %u, Port %u connected\r\n", speed_table[speed], hub->bus->busid, hub->index, port + 1);
 
-                    if (usbh_enumerate(child) < 0) {
-                        USB_LOG_ERR("Port %u enumerate fail\r\n", child->port);
+                    ret = usbh_enumerate(child);
+                    if (ret < 0) {
+                        /* Devices switching personality (modeswitch
+                         * dongles) reconnect while their new firmware
+                         * is still booting: the first enumeration times
+                         * out on ep0, and resetting the port in the
+                         * middle of that boot makes some fall back to
+                         * their ROM personality.  Wait and retry without
+                         * touching the port; if the device did fall
+                         * back, enumerating it re-runs the modeswitch
+                         * hook, which detaches it for another round. */
+                        for (unsigned r = 0; r < 3 && ret < 0; r++) {
+                            usb_osal_msleep(2000);
+                            ret = usbh_enumerate(child);
+                        }
+                        if (ret < 0) {
+                            USB_LOG_ERR("Port %u enumerate fail\r\n", child->port);
+                        }
                     }
                 } else {
                     /** some USB 3.0 ip may failed to enable USB 2.0 port for USB 3.0 device */

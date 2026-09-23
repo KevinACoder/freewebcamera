@@ -477,6 +477,15 @@ static int xhci_cmd_enable_slot(struct xhci_hcd *hcd, uint8_t *slot_id)
     return 0;
 }
 
+static int xhci_cmd_disable_slot(struct xhci_hcd *hcd, uint8_t slot_id)
+{
+    struct xhci_trb trb;
+
+    memset(&trb, 0, sizeof(trb));
+    trb.dw3 = TRB3_TYPE_SET(TRB_TYPE_DISABLE_SLOT) | TRB3_SLOT_ID(slot_id);
+    return xhci_do_command(hcd, &trb, CMD_TIMEOUT_MS);
+}
+
 /* NetBSD xhci_host_dequeue: 重编程 ep 上下文前把传输环归零(TRB/td 全清,
  * ep=0, cs=1) - 否则已消费的 TRB 带着 cycle=1 在重臂的 dequeue 上"复活",
  * 控制器会重放旧 TD(2026-09-20: SET_ADDRESS Transaction Error 的根因) */
@@ -696,6 +705,8 @@ static struct xhci_dev *xhci_get_dev(struct xhci_hcd *hcd, struct usbh_hubport *
  * SET_ADDRESS, 故这里不能像 NetBSD 一样单步 BSR=0)。MPS 取 CherryUSB 按
  * 速度预设的 ep0 默认值(HS/FS=64)。
  */
+static void xhci_port_disconnect(struct xhci_hcd *hcd, uint8_t port);
+
 static int xhci_setup_slot(struct xhci_hcd *hcd, struct usbh_hubport *hport)
 {
     struct xhci_dev *dev;
@@ -706,6 +717,9 @@ static int xhci_setup_slot(struct xhci_hcd *hcd, struct usbh_hubport *hport)
     if (hport->port < 1U || hport->port > hcd->num_ports) {
         return -USB_ERR_INVAL;
     }
+    /* 该端口如有残留 slot(断开与重连竞态: 清 C_CONNECTION 时新设备已把
+     * CCS 拉回 1, CLEAR 侧的检查看不到断开), 先释放再使能新 slot */
+    xhci_port_disconnect(hcd, hport->port);
     ret = xhci_cmd_enable_slot(hcd, &slot_id);
     if (ret != 0) {
         USB_LOG_ERR("Enable slot failed, ret=%d\r\n", ret);
@@ -753,6 +767,47 @@ static int xhci_setup_slot(struct xhci_hcd *hcd, struct usbh_hubport *hport)
 
     hcd->port_slot[hport->port] = slot_id;
     return 0;
+}
+
+/* 设备断开(hub 线程清 C_CONNECTION、端口已无设备时, 任务上下文): 释放该
+ * 端口的 slot 并归还其内存。没有这一步, port_slot 留着死 slot——同端口
+ * 重连设备的每笔控制传输都敲在旧传输环上, 门铃无人应答全部超时
+ * (2026-09-23: modeswitch dongle 在 xHCI 上重连必现, EHCI 线无此问题)。 */
+static void xhci_port_disconnect(struct xhci_hcd *hcd, uint8_t port)
+{
+    uint8_t slot_id = hcd->port_slot[port];
+    struct xhci_dev *dev;
+    uint32_t dci;
+
+    if (slot_id == 0U) {
+        return;
+    }
+    hcd->port_slot[port] = 0U;
+    dev = xhci_find_dev(hcd, slot_id);
+    if (dev == NULL) {
+        return;
+    }
+    if (xhci_cmd_disable_slot(hcd, slot_id) != 0) {
+        USB_LOG_ERR("xhci: disable slot %u failed\r\n", slot_id);
+        /* 命令失败也继续回收软件状态: 硬件侧 slot 或许已随断电消失 */
+    }
+    hcd->dcbaa[slot_id] = 0U;
+    xhci_dcache_clean(hcd->dcbaa, sizeof(uint64_t) * hcd->max_slots);
+    for (dci = 1U; dci < XHCI_MAX_DCI; dci++) {
+        if (dev->ep_rings[dci] != NULL) {
+            usb_sys_mem_free(dev->ep_rings[dci]->trbs);
+            usb_sys_mem_free(dev->ep_rings[dci]->tds);
+            usb_sys_mem_free(dev->ep_rings[dci]);
+            dev->ep_rings[dci] = NULL;
+        }
+    }
+    usb_sys_mem_free(dev->input_ctx);
+    dev->input_ctx = NULL;
+    usb_sys_mem_free(dev->dev_ctx);
+    dev->dev_ctx = NULL;
+    dev->in_use = 0U;
+    usbh_console_printf("xhci: slot %u disabled (port %u device gone)\r\n",
+                        slot_id, port);
 }
 
 /* ===================== 控制器初始化 ===================== */
@@ -1735,6 +1790,10 @@ int usbh_roothub_control(struct usbh_bus *bus, struct usb_setup_packet *setup,
             break;
         case HUB_PORT_FEATURE_C_CONNECTION:
             xhci_portsc_w(hcd, port, ps | XHCI_PS_CSC);
+            /* CSC 被清且端口已无设备 = 断开已确认: 释放该端口的 slot */
+            if ((xhci_portsc(hcd, port) & XHCI_PS_CCS) == 0U) {
+                xhci_port_disconnect(hcd, port);
+            }
             break;
         case HUB_PORT_FEATURE_C_ENABLE:
             xhci_portsc_w(hcd, port, ps | XHCI_PS_PEC);
@@ -1801,6 +1860,21 @@ uint32_t usbh_xhci_port_evt_seq(uint8_t busid)
 		return 0U;
 	}
 	return g_xhci[busid].port_evt_seq;
+}
+
+void usbh_xhci_port_release(uint8_t busid, uint8_t port)
+{
+	struct xhci_hcd *hcd;
+
+	if (busid >= CONFIG_USBHOST_MAX_BUS || port == 0U ||
+	    port > g_xhci[busid].num_ports) {
+		return;
+	}
+	hcd = &g_xhci[busid];
+	if (!hcd->running) {
+		return;
+	}
+	xhci_port_disconnect(hcd, port);
 }
 
 const struct usbh_hcd_ops usbh_xhci_ops = {
