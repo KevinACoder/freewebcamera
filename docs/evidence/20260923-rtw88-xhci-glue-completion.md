@@ -220,3 +220,20 @@ net_80211 `19ff73f`+`9257cc1`；fwc-rtw88 镜像 + worker fatal 定位记录
   整圈）。**效果待完整扫描窗口复验。**
 - 另：1024 环实验已回退（power-on 卡死回归）；`wlan dbg` argv 解析
   bug 待修（mask 落 0）。
+
+# 续轮 6（2026-09-24）：demux 可视化达成 + 异步 IN invalidate 缺失修复（效果未达）
+
+- `wlan dbg` mask 落 0 的绕过 = attach 硬编码 rtw_debug_mask=0x80004
+  （net_80211 901848a）。demux 丢弃打印首次可见。
+- **实锤新证据：`skipping short packet (0)` 风暴** —— demux 读到的 RX
+  描述符全为 0。即:USB 层有完成(actlen>0)、但 CPU 读到的缓冲内容是
+  分配期的零。
+- 修复尝试:complete_td 异步 IN giveback 前补
+  xhci_dcache_invalidate(buf, got)（此前仅同步路径有维护）。**仍
+  pkt_len=0** → 缓存失效之外还有环节,下一轮候选:
+  (a) shim 32K RX 缓冲的 VA/PA 一致性与 cacheable 映射核查
+      （DMA 地址 vs CPU 地址是否同一存储）;
+  (b) 从 worker dump 收到的首 64 字节原始内容（全零→DMA 没写这里;
+      乱码→校准/偏移问题）;
+  (c) actlen 的来源核对（residual 计算若错,walk 偏移全错）。
+- 聚合主线对齐（no-op）保留；`wlan dbg` argv bug 仍待修。
