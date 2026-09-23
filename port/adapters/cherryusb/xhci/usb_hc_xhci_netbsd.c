@@ -138,10 +138,10 @@ void usbh_xhci_irq(uint8_t busid);
 #define XHCI_EPSTATE_HALTED     2U
 #define XHCI_EPSTATE_STOPPED    3U
 
-/* 传输事件取证(2026-09-23 rtw88/xHCI 定界轮): 非 SUCCESS 事件全打点,
- * 定位首因后改 0 */
+/* 传输事件取证(2026-09-23 rtw88/xHCI 定界轮): 1=非 SUCCESS 事件打点,
+ * 2=ep0 全事件打点(定判"TD 是否真的被执行"), 定位后归 0 */
 #ifndef XHCI_EVENT_DEBUG
-#define XHCI_EVENT_DEBUG 1
+#define XHCI_EVENT_DEBUG 2
 #endif
 
 /* 本 DWC3 寄存器窗只支持 32 位访问: CAPLENGTH/HCIVERSION 这类子字寄存器
@@ -235,6 +235,7 @@ struct xhci_hcd {
      * 永不清零, 缓冲内容区分不了"已处理"与"新事件", 序号可以)。
      * per-instance: 双 xHCI 的 ISR 各自递增各自实例的序号。 */
     volatile uint32_t port_evt_seq;
+    uint32_t addr_prints;      /* BSR=0 分配地址打印限流计数 */
 };
 
 static struct xhci_hcd g_xhci[CONFIG_USBHOST_MAX_BUS];
@@ -367,7 +368,13 @@ static uint32_t xhci_ring_space(struct xhci_ring *ring)
  * 回 + TC 位)并翻转 cs; 批内第一个 TRB 先以翻转的 cycle 写入(硬件不可见),
  * 其余按各位置的 cycle 写入, 最后才把首 TRB 置回正确 cycle —— 控制器可能
  * 在门铃前预取, 不得看到半条链。td 记入批内每个槽(事件落在任何 TRB 都能
- * 找回)。返回首 TRB 索引。
+ * 找回)。返回首 TRB 索引;-2 = 批量会跨环尾(LINK 落进 TD 中间)。
+ *
+ * LINK 不许落进 TD 中间: NetBSD xhci.c 明言 "arbitrary aligned LINK trb
+ * definitely fail"(Ivy Bridge 实证; ASMedia 类控制器在 LINK 后接不上目标
+ * TRB 时直接锁死)。2026-09-23 板验: DWC3 上 control TD 恰跨 254/255/0 时
+ * 五秒无任何事件, Stop EP 停在 idx=0 - 同症。跨回卷的批量必须先复位环
+ * (见调用方)再从 0 重装。
  */
 static int xhci_ring_put(struct xhci_ring *ring, const struct xhci_trb *trbs,
                          uint32_t ntrbs, struct xhci_td *td)
@@ -378,6 +385,10 @@ static int xhci_ring_put(struct xhci_ring *ring, const struct xhci_trb *trbs,
     uint8_t first_cs = 0U;
     uint32_t i;
 
+    if (ring->ep < ring->num_trbs - 1U &&
+        ring->ep + ntrbs > ring->num_trbs - 1U) {
+        return -2; /* 跨回卷: LINK 会落进本 TD 中间 */
+    }
     if (xhci_ring_space(ring) < ntrbs + 1U) {
         return -1;
     }
@@ -830,6 +841,9 @@ static int xhci_arm_normal_locked(struct xhci_hcd *hcd, struct xhci_dev *dev,
         td.urb = urb;
         td.kind = 0U;
         first_idx = xhci_ring_put(ring, trbs, ntrbs, &td);
+        if (first_idx == -2) {
+            return -2; /* 跨回卷: 调用方复位环后重试(线程上下文) */
+        }
         if (first_idx < 0) {
             return -USB_ERR_NOMEM;
         }
@@ -864,7 +878,9 @@ static struct usbh_urb *xhci_gate_pop_arm_locked(struct xhci_hcd *hcd,
     u->hcpriv = NULL;
     idx = xhci_arm_normal_locked(hcd, dev, dci, u);
     if (idx < 0) {
-        *err = idx;
+        /* -2(跨回卷) 在事件上下文无法跑恢复命令, 按 NOMEM 归还;
+         * 驱动重提时走 submit 路径的复位重装 */
+        *err = (idx == -2) ? -USB_ERR_NOMEM : idx;
     }
     return u;
 }
@@ -969,8 +985,12 @@ static int xhci_cmd_address_device(struct xhci_hcd *hcd, struct xhci_dev *dev,
         dw3 = xhci_out_ctx(dev, 0)[3];
         st = (dw3 >> 27) & 0x1FU;
         hw_addr = dw3 & 0xFFU;
-        usbh_console_printf("xhci: assigned usb addr %u (state=%u)\r\n",
-                            hw_addr, st);
+        /* 枚举风暴时这里会成千上万次连发, 每控制器只打前 8 次 */
+        if (hcd->addr_prints < 8U) {
+            usbh_console_printf("xhci: bus%u assigned usb addr %u (state=%u)\r\n",
+                                hcd->bus->busid, hw_addr, st);
+            hcd->addr_prints++;
+        }
         if (st == SLOT_CTX_STATE_ADDRESSED && hw_addr != 0U) {
             ret = 0;
         } else if (ret == 0) {
@@ -1650,6 +1670,13 @@ static int xhci_queue_control(struct xhci_hcd *hcd, struct xhci_dev *dev,
     td.first_idx = 0U;
     td.last_idx = ntrbs - 1U;
     first_idx = xhci_ring_put(ring, trbs, ntrbs, &td);
+    if (first_idx == -2) {
+        /* LINK 会落进 TD 中间: 复位环回到 0 再重装一次(ep0 走线程上下文) */
+        xhci_ring_unlock(ring, save);
+        (void)xhci_pipe_recover(hcd, dev, 1U, ring, NULL, 0);
+        save = xhci_ring_lock(ring);
+        first_idx = xhci_ring_put(ring, trbs, ntrbs, &td);
+    }
     if (first_idx < 0) {
         xhci_ring_unlock(ring, save);
         return -USB_ERR_NOMEM;
@@ -1657,6 +1684,13 @@ static int xhci_queue_control(struct xhci_hcd *hcd, struct xhci_dev *dev,
     xhci_dcache_clean(ring->trbs, ring->num_trbs * TRB_SIZE);
     *(volatile uint32_t *)(hcd->db + (dev->slot_id << 2)) = 1U; /* target dci 1 */
     xhci_ring_unlock(ring, save);
+
+#if XHCI_EVENT_DEBUG >= 2
+    usbh_console_printf(
+        "xhci: bus%u ep0 arm idx=%u type=%02x req=%02x val=%04x len=%04x\r\n",
+        hcd->bus->busid, first_idx, setup->bmRequestType, setup->bRequest,
+        setup->wValue, setup->wLength);
+#endif
 
     /* 完成路径更新的是环数组里的 td 副本(ring->tds[每个 TRB 槽]), 等它,
      * 不是等栈上的 td */
@@ -1688,9 +1722,9 @@ static int xhci_queue_control(struct xhci_hcd *hcd, struct xhci_dev *dev,
     }
 #if XHCI_EVENT_DEBUG
     usbh_console_printf(
-        "xhci: ctrl timeout: type=%02x req=%02x val=%04x idx=%04x len=%04x\r\n",
-        setup->bmRequestType, setup->bRequest, setup->wValue, setup->wIndex,
-        setup->wLength);
+        "xhci: bus%u ctrl timeout: type=%02x req=%02x val=%04x idx=%04x len=%04x\r\n",
+        hcd->bus->busid, setup->bmRequestType, setup->bRequest, setup->wValue,
+        setup->wIndex, setup->wLength);
 #endif
     /* 超时: 死 TD 不留环 - 先标记取消(防迟到的完成事件回调), Stop EP +
      * Set TR Dequeue 清环后再返回。老实现把 TD 原地留在环里, 后续控制
@@ -1741,10 +1775,17 @@ int usbh_submit_urb(struct usbh_urb *urb)
         }
 
         /* SET_ADDRESS: xHCI 由 Address Device 命令完成, 不走 TRB。
+         * 判定必须带请求类型与 wLength: 标准 SET_ADDRESS =
+         * bmRequestType 0x00(host-to-device/standard/device) + wLength 0;
+         * RTL8821CU 的 vendor 寄存器访问 bRequest 恰好也是 5
+         * (RTW_USB_CMD_REQ, bmRequestType 0x40/0xC0) - 只看 bRequest 会把
+         * 驱动的每一笔寄存器读写都劫持成 Address Device, 写从未上线,
+         * 读恒为 0(2026-09-23 板验: "mac power on failed" 真因)。
          * 本机 DWC3 的 BSR=0 是"控制器自动分配地址"语义(见
          * xhci_cmd_address_device), 分配值与 CherryUSB 簿记的 dev_addr
          * 无关 - 栈侧照常记 2, 线上地址以控制器为准。 */
-        if (setup->bRequest == USB_REQUEST_SET_ADDRESS) {
+        if (setup->bRequest == USB_REQUEST_SET_ADDRESS &&
+            setup->bmRequestType == 0U && setup->wLength == 0U) {
             uint16_t want = hport->ep0.wMaxPacketSize;
 
             if (want != dev->ep0_mps_hw) {
@@ -1815,8 +1856,29 @@ int usbh_submit_urb(struct usbh_urb *urb)
             }
         }
 
-        save = xhci_ring_lock(ring);
-        if (ring->active != NULL || ring->recovering != 0U) {
+        for (;;) {
+            save = xhci_ring_lock(ring);
+            if (ring->active == NULL && ring->recovering == 0U) {
+                ret = xhci_arm_normal_locked(hcd, dev, dci, urb);
+                if (ret == -2) {
+                    /* LINK 会落进 TD 中间(NetBSD xhci.c: Ivy Bridge/
+                     * ASMedia 类控制器实证锁死, 本 DWC3 板验同症):
+                     * 复位环回到 0 再重装一次 */
+                    xhci_ring_unlock(ring, save);
+                    (void)xhci_pipe_recover(hcd, dev, dci, ring, NULL, 0);
+                    continue;
+                }
+                if (ret < 0) {
+                    xhci_ring_unlock(ring, save);
+                    return -USB_ERR_NOMEM;
+                }
+                xhci_ring_unlock(ring, save);
+                if (urb->timeout == 0U) {
+                    return 0; /* 异步: 完成由中断回调 */
+                }
+                return xhci_bulk_sync_wait(hcd, dev, dci, urb, ret);
+            }
+            /* 忙/恢复中: urb 挂 wait 链(hcpriv 串联), 完成路径武装 */
             if (urb->timeout != 0U) {
                 /* 同步 urb 遇忙/恢复中 EP: 本栈同步 bulk 只剩兜底路径, 正常
                  * 不触达; 返回忙优于静默排队让同步者饿死(避免 EHCI 侧
@@ -1834,15 +1896,6 @@ int usbh_submit_urb(struct usbh_urb *urb)
             xhci_ring_unlock(ring, save);
             return 0; /* 排队: 完成路径武装 */
         }
-        ret = xhci_arm_normal_locked(hcd, dev, dci, urb);
-        xhci_ring_unlock(ring, save);
-        if (ret < 0) {
-            return ret;
-        }
-        if (urb->timeout == 0U) {
-            return 0; /* 异步: 完成由中断回调 */
-        }
-        return xhci_bulk_sync_wait(hcd, dev, dci, urb, ret);
     }
 }
 
@@ -2066,9 +2119,16 @@ static void xhci_handle_transfer_event(struct xhci_hcd *hcd, struct xhci_trb *ev
 #if XHCI_EVENT_DEBUG
     if (code != TRB_CODE_SUCCESS && code != TRB_CODE_SHORT_PACKET) {
         usbh_console_printf(
-            "xhci: xfer evt slot=%u dci=%u idx=%u code=%u urb_state=%u\r\n",
-            slot_id, dci, idx, code, td->state);
+            "xhci: bus%u xfer evt slot=%u dci=%u idx=%u code=%u urb_state=%u\r\n",
+            hcd->bus->busid, slot_id, dci, idx, code, td->state);
     }
+#if XHCI_EVENT_DEBUG >= 2
+    if (dci == 1U) {
+        usbh_console_printf(
+            "xhci: bus%u ep0 evt idx=%u code=%u urb=%p state=%u\r\n",
+            hcd->bus->busid, idx, code, (void *)td->urb, td->state);
+    }
+#endif
 #endif
     xhci_complete_td(hcd, dev, dci, ring, td, idx, residual, code);
 }
