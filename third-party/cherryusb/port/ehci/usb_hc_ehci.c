@@ -55,6 +55,108 @@ USB_NOCACHE_RAM_SECTION struct ehci_qh_hw g_periodic_qh_head[CONFIG_USBHOST_MAX_
 /* The frame list */
 USB_NOCACHE_RAM_SECTION uint32_t g_framelist[CONFIG_USBHOST_MAX_BUS][USB_ALIGN_UP(CONFIG_USB_EHCI_FRAME_LIST_SIZE, 1024)] __attribute__((aligned(4096)));
 
+/* --- per-endpoint bulk FIFO ---------------------------------------------- *
+ *
+ * Bulk URBs on one endpoint must reach the device in submission order:
+ * NetBSD usbdi serves every pipe strictly FIFO, while this port builds a
+ * fresh QH per URB and inserts it at the async ring head, so with several
+ * URBs in flight the controller serves them newest-first - and the
+ * RTL8188E firmware emits frames in bulk-out arrival order, so a reordered
+ * ring shows up on the air as reordered frames.  Only one QH per endpoint
+ * therefore lives in the ring at a time; later URBs park here in
+ * submission order and are armed as each predecessor retires, with the
+ * data toggle carried over from the retiring URB (the QH-overlay
+ * semantics a persistent per-pipe QH gives NetBSD). */
+
+#define EHCI_BULK_FIFO_DEPTH 8
+#define EHCI_BULK_EP_SLOTS   12
+
+struct ehci_bulk_ep_fifo {
+    const struct usb_endpoint_descriptor *ep; /* park key: urb->ep */
+    struct usbh_urb *parked[EHCI_BULK_FIFO_DEPTH];
+    uint8_t head;
+    uint8_t count;
+    bool in_ring; /* an armed QH (or one being armed) holds the gate */
+};
+
+static struct ehci_bulk_ep_fifo ehci_bulk_fifos[EHCI_BULK_EP_SLOTS];
+
+/* gate result for the submit path */
+#define EHCI_BULK_GATE_ARM  0  /* arm this urb now */
+#define EHCI_BULK_GATE_PARK 1  /* parked behind the endpoint's active QH */
+#define EHCI_BULK_GATE_FULL (-1) /* park list exhausted: report NOMEM */
+
+/* caller holds a critical section */
+static struct ehci_bulk_ep_fifo *ehci_bulk_ep_find(const struct usb_endpoint_descriptor *ep)
+{
+    for (uint32_t i = 0; i < EHCI_BULK_EP_SLOTS; i++) {
+        if (ehci_bulk_fifos[i].ep == ep) {
+            return &ehci_bulk_fifos[i];
+        }
+    }
+    return NULL;
+}
+
+static int ehci_bulk_urb_gate(struct usbh_urb *urb)
+{
+    const struct usb_endpoint_descriptor *ep = urb->ep;
+    struct ehci_bulk_ep_fifo *f;
+    size_t flags;
+
+    flags = usb_osal_enter_critical_section();
+    f = ehci_bulk_ep_find(ep);
+    if (f == NULL || (!f->in_ring && f->count == 0U)) {
+        if (f == NULL) {
+            for (uint32_t i = 0; i < EHCI_BULK_EP_SLOTS; i++) {
+                if (ehci_bulk_fifos[i].ep == NULL) {
+                    f = &ehci_bulk_fifos[i];
+                    f->ep = ep;
+                    f->head = 0U;
+                    f->count = 0U;
+                    f->in_ring = false;
+                    break;
+                }
+            }
+        }
+        if (f != NULL) {
+            f->in_ring = true; /* the gate belongs to this urb until release */
+        }
+        usb_osal_leave_critical_section(flags);
+        /* no free slot: degrade to un-gated rather than fail the urb */
+        return EHCI_BULK_GATE_ARM;
+    }
+    if (f->count < EHCI_BULK_FIFO_DEPTH) {
+        f->parked[(f->head + f->count) % EHCI_BULK_FIFO_DEPTH] = urb;
+        f->count++;
+        usb_osal_leave_critical_section(flags);
+        return EHCI_BULK_GATE_PARK;
+    }
+    usb_osal_leave_critical_section(flags);
+    return EHCI_BULK_GATE_FULL;
+}
+
+/* remove a still-parked urb from the fifo; caller holds a critical section */
+static bool ehci_bulk_ep_unpark(struct usbh_urb *urb)
+{
+    struct ehci_bulk_ep_fifo *f = ehci_bulk_ep_find(urb->ep);
+
+    if (f == NULL) {
+        return false;
+    }
+    for (uint8_t i = 0; i < f->count; i++) {
+        if (f->parked[(f->head + i) % EHCI_BULK_FIFO_DEPTH] == urb) {
+            for (uint8_t j = i; j < (uint8_t)(f->count - 1U); j++) {
+                f->parked[(f->head + j) % EHCI_BULK_FIFO_DEPTH] =
+                    f->parked[(f->head + j + 1U) % EHCI_BULK_FIFO_DEPTH];
+            }
+            f->parked[(f->head + f->count - 1U) % EHCI_BULK_FIFO_DEPTH] = NULL;
+            f->count--;
+            return true;
+        }
+    }
+    return false;
+}
+
 static struct ehci_qtd_hw *ehci_qtd_alloc(struct usbh_bus *bus)
 {
     struct ehci_qtd_hw *qtd;
@@ -457,7 +559,7 @@ static struct ehci_qh_hw *ehci_control_urb_init(struct usbh_bus *bus, struct usb
     return qh;
 }
 
-static struct ehci_qh_hw *ehci_bulk_urb_init(struct usbh_bus *bus, struct usbh_urb *urb, uint8_t *buffer, uint32_t buflen)
+static struct ehci_qh_hw *ehci_bulk_urb_arm(struct usbh_bus *bus, struct usbh_urb *urb, uint8_t *buffer, uint32_t buflen)
 {
     struct ehci_qh_hw *qh = NULL;
     struct ehci_qtd_hw *qtd = NULL;
@@ -545,6 +647,32 @@ static struct ehci_qh_hw *ehci_bulk_urb_init(struct usbh_bus *bus, struct usbh_u
         }
     }
 
+    /* USBD_FORCE_SHORT_XFER semantics (USBH_URB_ZERO_PACKET): a bulk OUT
+     * whose length is an exact multiple of the max packet size ends with
+     * an explicit zero-length packet; the IOC moves onto it */
+    if (is_out && (urb->transfer_flags & USBH_URB_ZERO_PACKET) &&
+        urb->transfer_buffer_length > 0 &&
+        (urb->transfer_buffer_length % ep_mps) == 0) {
+        qtd = ehci_qtd_alloc(bus);
+        USB_ASSERT_MSG(qtd, "bulk zlp qtd alloc failed");
+
+        token = QTD_TOKEN_PID_OUT | QTD_TOKEN_STATUS_ACTIVE |
+                ((uint32_t)EHCI_TUNE_CERR << QTD_TOKEN_CERR_SHIFT) |
+                QTD_TOKEN_IOC;
+        if (toggle) {
+            token |= QTD_TOKEN_TOGGLE;
+        }
+
+        ehci_qtd_fill(qtd, (uintptr_t)buffer, 0, token);
+        qtd->urb = urb;
+        qtd->hw.next_qtd = QTD_LIST_END;
+
+        prev_qtd->hw.token &= ~QTD_TOKEN_IOC;
+        prev_qtd->hw.next_qtd = EHCI_PTR2ADDR(qtd);
+        prev_qtd = qtd;
+        toggle ^= 1U; /* one zero-length packet */
+    }
+
     /* update qh first qtd */
     qh->hw.curr_qtd = EHCI_PTR2ADDR(first_qtd);
     qh->hw.overlay.next_qtd = EHCI_PTR2ADDR(first_qtd);
@@ -576,6 +704,51 @@ static struct ehci_qh_hw *ehci_bulk_urb_init(struct usbh_bus *bus, struct usbh_u
 
     usb_osal_leave_critical_section(flags);
     return qh;
+}
+
+/* The endpoint's active bulk QH retired (completed, errored or killed):
+ * hand the gate to the next parked urb and arm it.  Runs before the
+ * completion callback so a driver re-submit from the callback parks
+ * behind the armed urb instead of racing it into the ring. */
+static void ehci_bulk_ep_release(struct usbh_bus *bus, struct usbh_urb *urb)
+{
+    struct ehci_bulk_ep_fifo *f;
+    struct usbh_urb *next = NULL;
+    size_t flags;
+
+    flags = usb_osal_enter_critical_section();
+    f = ehci_bulk_ep_find(urb->ep);
+    if (f != NULL) {
+        if (f->count > 0U) {
+            next = f->parked[f->head];
+            f->parked[f->head] = NULL;
+            f->head = (uint8_t)((f->head + 1U) % EHCI_BULK_FIFO_DEPTH);
+            f->count--;
+            f->in_ring = true; /* hold the gate across the re-arm */
+        } else {
+            f->in_ring = false;
+        }
+    }
+    usb_osal_leave_critical_section(flags);
+
+    if (next != NULL) {
+        /* toggle carry-over: for bulk OUT the retiring urb's data_toggle
+         * is its final toggle (pre-advanced at arm time), for bulk IN it
+         * was resynced from the retired qTD, and a halt forced it to 0 -
+         * exactly what the next transfer must start from */
+        next->data_toggle = urb->data_toggle;
+        if (ehci_bulk_urb_arm(bus, next, next->transfer_buffer,
+                              next->transfer_buffer_length) == NULL) {
+            /* pool exhausted: drop the gate; the parked urb's watchdog
+             * kill (hcpriv == NULL path) reaps it */
+            flags = usb_osal_enter_critical_section();
+            f = ehci_bulk_ep_find(urb->ep);
+            if (f != NULL) {
+                f->in_ring = false;
+            }
+            usb_osal_leave_critical_section(flags);
+        }
+    }
 }
 
 static struct ehci_qh_hw *ehci_intr_urb_init(struct usbh_bus *bus, struct usbh_urb *urb, uint8_t *buffer, uint32_t buflen)
@@ -711,6 +884,13 @@ static void ehci_urb_waitup(struct usbh_bus *bus, struct usbh_urb *urb)
         usb_osal_sem_give(qh->waitsem);
     } else {
         ehci_qh_free(bus, qh);
+    }
+
+    if (USB_GET_ENDPOINT_TYPE(urb->ep->bmAttributes) == USB_ENDPOINT_TYPE_BULK) {
+        /* the endpoint's bulk QH retired: arm the next parked urb
+         * before the completion callback runs, so a driver re-submit
+         * from the callback parks behind it instead of racing it */
+        ehci_bulk_ep_release(bus, urb);
     }
 
     if (urb->complete) {
@@ -1329,6 +1509,7 @@ int usbh_submit_urb(struct usbh_urb *urb)
     struct ehci_qh_hw *qh = NULL;
     size_t flags;
     int ret = 0;
+    int gate;
     struct usbh_hub *hub;
     struct usbh_hubport *hport;
     struct usbh_bus *bus;
@@ -1394,8 +1575,23 @@ int usbh_submit_urb(struct usbh_urb *urb)
             }
             break;
         case USB_ENDPOINT_TYPE_BULK:
-            qh = ehci_bulk_urb_init(bus, urb, urb->transfer_buffer, urb->transfer_buffer_length);
+            gate = ehci_bulk_urb_gate(urb);
+            if (gate == EHCI_BULK_GATE_PARK) {
+                break; /* parked; armed when the active QH retires */
+            }
+            if (gate == EHCI_BULK_GATE_FULL) {
+                return -USB_ERR_NOMEM;
+            }
+            qh = ehci_bulk_urb_arm(bus, urb, urb->transfer_buffer, urb->transfer_buffer_length);
             if (qh == NULL) {
+                /* give the gate back so later urbs are not stranded */
+                flags = usb_osal_enter_critical_section();
+                struct ehci_bulk_ep_fifo *uf = ehci_bulk_ep_find(urb->ep);
+
+                if (uf != NULL) {
+                    uf->in_ring = false;
+                }
+                usb_osal_leave_critical_section(flags);
                 return -USB_ERR_NOMEM;
             }
             break;
@@ -1439,7 +1635,29 @@ int usbh_kill_urb(struct usbh_urb *urb)
     size_t flags;
     bool remove_in_iaad = false;
 
-    if (!urb || !urb->hport || !urb->hcpriv || !urb->hport->bus) {
+    if (!urb || !urb->hport || !urb->hport->bus) {
+        return -USB_ERR_INVAL;
+    }
+
+    if (urb->hcpriv == NULL &&
+        USB_GET_ENDPOINT_TYPE(urb->ep->bmAttributes) == USB_ENDPOINT_TYPE_BULK) {
+        /* a parked urb owns no QH: take it off the endpoint fifo and
+         * complete it from here */
+        size_t pflags = usb_osal_enter_critical_section();
+        bool was_parked = ehci_bulk_ep_unpark(urb);
+
+        usb_osal_leave_critical_section(pflags);
+        if (was_parked) {
+            urb->errorcode = -USB_ERR_SHUTDOWN;
+            if (urb->complete) {
+                urb->complete(urb->arg, urb->errorcode);
+            }
+            return 0;
+        }
+        return -USB_ERR_INVAL;
+    }
+
+    if (!urb->hcpriv) {
         return -USB_ERR_INVAL;
     }
 
@@ -1513,6 +1731,9 @@ int usbh_kill_urb(struct usbh_urb *urb)
             usb_osal_sem_give(qh->waitsem);
         } else {
             ehci_qh_free(bus, qh);
+            if (USB_GET_ENDPOINT_TYPE(urb->ep->bmAttributes) == USB_ENDPOINT_TYPE_BULK) {
+                ehci_bulk_ep_release(bus, urb);
+            }
         }
 
         if (urb->complete) {
@@ -1534,6 +1755,9 @@ int usbh_kill_urb(struct usbh_urb *urb)
         qh->remove_in_iaad = 0;
         qh->killed = 0U;
         ehci_qh_free(bus, qh);
+        if (USB_GET_ENDPOINT_TYPE(urb->ep->bmAttributes) == USB_ENDPOINT_TYPE_BULK) {
+            ehci_bulk_ep_release(bus, urb);
+        }
     }
 
     if (urb->complete) {

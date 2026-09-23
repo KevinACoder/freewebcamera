@@ -58,6 +58,11 @@ struct usbh_urb {
 #endif
 };
 
+/* transfer_flags: bulk OUT ends with an explicit zero-length packet when
+ * the transfer length is an exact multiple of the endpoint max packet
+ * size (USBD_FORCE_SHORT_XFER / URB_ZERO_PACKET semantics) */
+#define USBH_URB_ZERO_PACKET (1u << 0)
+
 /**
  * @brief USB host controller operations.
  *
