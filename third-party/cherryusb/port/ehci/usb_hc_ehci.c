@@ -8,6 +8,24 @@
 #include "usb_hc_ohci.h"
 #endif
 
+#if defined(CONFIG_USBHOST_MULT_HC)
+#define usb_hc_init            usbh_ehci_hc_init
+#define usb_hc_deinit          usbh_ehci_hc_deinit
+#define usbh_get_frame_number  usbh_ehci_get_frame_number
+#define usbh_roothub_control   usbh_ehci_roothub_control
+#define usbh_submit_urb        usbh_ehci_submit_urb
+#define usbh_kill_urb          usbh_ehci_kill_urb
+#define USBH_IRQHandler        usbh_ehci_irq_handler
+
+int usbh_ehci_hc_init(struct usbh_bus *bus);
+int usbh_ehci_hc_deinit(struct usbh_bus *bus);
+uint16_t usbh_ehci_get_frame_number(struct usbh_bus *bus);
+int usbh_ehci_roothub_control(struct usbh_bus *bus, struct usb_setup_packet *setup, uint8_t *buf);
+int usbh_ehci_submit_urb(struct usbh_urb *urb);
+int usbh_ehci_kill_urb(struct usbh_urb *urb);
+void usbh_ehci_irq_handler(uint8_t busid);
+#endif
+
 #ifdef CONFIG_USBHOST_MULTI_HCD
 /* Multi-HCD build: rename this port's global entry points so other HCD
  * ports can link alongside it; usbh_core.c dispatches per bus through
@@ -706,15 +724,13 @@ static void ehci_urb_waitup(struct usbh_bus *bus, struct usbh_urb *urb)
 
     qh = (struct ehci_qh_hw *)urb->hcpriv;
 
-    /* A killed urb's unlink is acknowledged here, but its free and
-     * complete stay with usbh_kill_urb: the kill needs to deliver its
-     * own -USB_ERR_SHUTDOWN exactly once, from its caller's context. */
     if (qh->killed == 1U) {
         qh->killed = 2U;
         return;
     }
 
     qh->remove_in_iaad = 0;
+    qh->killed = 0;
 
 #ifdef CONFIG_USB_DCACHE_ENABLE
     if (urb->transfer_buffer && (urb->ep->bEndpointAddress & 0x80) && urb->errorcode == 0) {
@@ -746,47 +762,6 @@ static void ehci_urb_waitup(struct usbh_bus *bus, struct usbh_urb *urb)
             urb->complete(urb->arg, urb->actual_length);
         }
     }
-}
-
-/* Wait for the async advance of a killed QH to complete.  The IAA
- * interrupt belongs to the irq handler: usbh_kill_urb must never
- * write-clear USBSTS.IAA from thread context, because that can erase
- * a pending level (the spurious-irq signature) and make the handler's
- * qh pool scan skip this advance entirely, stranding every other QH
- * that already set remove_in_iaad.  Instead the handler acknowledges
- * the killed QH through the qh->killed handshake (see
- * ehci_urb_waitup); only when the interrupt never arrives does the
- * killer fall back to finishing the unlink itself.  Exactly one of
- * the two paths frees the qh and runs the callback. */
-static void usbh_kill_urb_wait_advance(struct usbh_bus *bus, struct usbh_urb *urb,
-                                       struct ehci_qh_hw *qh)
-{
-    volatile uint32_t timeout = 0;
-
-    EHCI_HCOR->usbcmd |= EHCI_USBCMD_IAAD;
-
-    while (qh->killed != 2U) {
-        timeout++;
-        if (timeout > 200000U) {
-            /* IAA lost (or the handler raced us): finish the unlink
-             * here so the urb still completes exactly once. */
-            size_t iflags = usb_osal_enter_critical_section();
-
-            if (qh->killed == 2U) {
-                usb_osal_leave_critical_section(iflags);
-                break;
-            }
-            qh->remove_in_iaad = 0;
-            qh->killed = 0;
-            usb_osal_leave_critical_section(iflags);
-
-            USB_LOG_ERR("iaad lost, finishing killed urb inline\r\n");
-            return;
-        }
-    }
-
-    qh->remove_in_iaad = 0;
-    qh->killed = 0;
 }
 
 static void ehci_qh_scan_qtds(struct usbh_bus *bus, struct ehci_qh_hw *qhead, struct ehci_qh_hw *qh)
@@ -1478,6 +1453,10 @@ int usbh_kill_urb(struct usbh_urb *urb)
 #endif
 
     flags = usb_osal_enter_critical_section();
+    if (!urb->hcpriv) {
+        usb_osal_leave_critical_section(flags);
+        return -USB_ERR_INVAL;
+    }
 
     EHCI_HCOR->usbcmd &= ~(EHCI_USBCMD_PSEN | EHCI_USBCMD_ASEN);
 
@@ -1516,57 +1495,36 @@ int usbh_kill_urb(struct usbh_urb *urb)
     EHCI_HCOR->usbcmd |= (EHCI_USBCMD_PSEN | EHCI_USBCMD_ASEN);
 
     qh = (struct ehci_qh_hw *)urb->hcpriv;
-    /* keep remove_in_iaad set when the unlink needs the async advance:
-     * the IAA pool scan must see it for the killed handshake to
-     * complete; the wait clears it afterwards */
     qh->killed = 1U;
     urb->errorcode = -USB_ERR_SHUTDOWN;
 
     if (remove_in_iaad) {
-        /* release the critical section before waiting: the
-         * acknowledgement comes from the irq handler, whose own
-         * completion paths need this section, so holding it here
-         * would deadlock the very interrupt we wait for */
+        qh->remove_in_iaad = 1;
+        EHCI_HCOR->usbcmd |= EHCI_USBCMD_IAAD;
         usb_osal_leave_critical_section(flags);
-        /* ring the doorbell and wait for the handler to acknowledge;
-         * never touch USBSTS.IAA here (see
-         * usbh_kill_urb_wait_advance) */
-        usbh_kill_urb_wait_advance(bus, urb, qh);
 
-        if (urb->timeout) {
-            /* the blocked submitter wakes, reads errorcode and frees
-             * the qh itself (usbh_submit_urb timeout path) */
-            usb_osal_sem_give(qh->waitsem);
-        } else {
-            ehci_qh_free(bus, qh);
+        volatile uint32_t timeout = 0;
+        while (qh->killed != 2) {
+            timeout++;
+            if (timeout > 200000U) {
+                qh->remove_in_iaad = 0;
+                qh->killed = 0;
+                return -USB_ERR_TIMEOUT;
+            }
         }
-
-        if (urb->complete) {
-            urb->complete(urb->arg, urb->errorcode);
-        }
-        return 0;
+    } else {
+        usb_osal_leave_critical_section(flags);
     }
 
     if (urb->timeout) {
-        /* the blocked submitter wakes, reads errorcode and frees the
-         * qh itself (usbh_submit_urb timeout path) */
         usb_osal_sem_give(qh->waitsem);
     } else {
-        /* the urb was already unlink'd by the completion scan and its
-         * advance doorbell may still be in flight: neutralize the
-         * pool scan for this qh before releasing it, or the in-flight
-         * IAA would run waitup a second time (double free, double
-         * complete) */
-        qh->remove_in_iaad = 0;
-        qh->killed = 0U;
         ehci_qh_free(bus, qh);
     }
 
     if (urb->complete) {
         urb->complete(urb->arg, urb->errorcode);
     }
-
-    usb_osal_leave_critical_section(flags);
 
     return 0;
 }
@@ -1660,6 +1618,20 @@ void USBH_IRQHandler(uint8_t busid)
     if (usbsts & EHCI_USBSTS_FATAL) {
     }
 }
+
+#if defined(CONFIG_USBHOST_MULT_HC)
+struct usbh_hc_driver ehci_hc_driver = {
+    .driver_name = "ehci_hcd",
+    .driver_desc = "EHCI Host Controller",
+    .init = usbh_ehci_hc_init,
+    .deinit = usbh_ehci_hc_deinit,
+    .get_frame_number = usbh_ehci_get_frame_number,
+    .roothub_control = usbh_ehci_roothub_control,
+    .submit_urb = usbh_ehci_submit_urb,
+    .kill_urb = usbh_ehci_kill_urb,
+    .irq_handler = usbh_ehci_irq_handler
+};
+#endif
 
 #ifdef CONFIG_USBHOST_MULTI_HCD
 const struct usbh_hcd_ops usbh_ehci_ops = {
