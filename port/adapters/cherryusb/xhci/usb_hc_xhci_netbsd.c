@@ -141,7 +141,7 @@ void usbh_xhci_irq(uint8_t busid);
 /* 传输事件取证(2026-09-23 rtw88/xHCI 定界轮): 1=非 SUCCESS 事件打点,
  * 2=ep0 全事件打点(定判"TD 是否真的被执行"), 定位后归 0 */
 #ifndef XHCI_EVENT_DEBUG
-#define XHCI_EVENT_DEBUG 2
+#define XHCI_EVENT_DEBUG 1
 #endif
 
 /* 本 DWC3 寄存器窗只支持 32 位访问: CAPLENGTH/HCIVERSION 这类子字寄存器
@@ -184,6 +184,11 @@ struct xhci_ring {
     volatile uint8_t gate_lock;
     volatile uint8_t halted;   /* STALL/BABBLE/超时后需 Reset/Stop EP + Set TR Deq */
     volatile uint8_t recovering; /* Stop/Reset EP + Set TR Deq 恢复窗口: 提交只排队不入环 */
+    uint8_t avoid_wrap;        /* 1=数据环: 触及 LINK 槽返回 -2 走环复位;
+                                * 0=命令环: 自然回卷(单 TRB 命令, LINK 恒落
+                                * 在命令边界, 走 LINK 是标准形态; 2026-09-23
+                                * 板验: 命令环误用 -2 策略会把回卷当 NOMEM,
+                                * 恢复命令永久失败) */
 };
 
 /* 上下文寻址: CSZ(HCCPARAMS1 bit2)决定每上下文 64/32 字节(NetBSD sc_ctxsz)。
@@ -367,6 +372,7 @@ static int xhci_ring_init(struct xhci_ring *ring, uint32_t num_trbs)
     ring->gate_lock = 0U;
     ring->halted = 0U;
     ring->recovering = 0U;
+    ring->avoid_wrap = 1U; /* 数据环默认; 命令环初始化后显式清 0 */
     /* 不预写 LINK TRB: 到达环尾时随批次写入(NetBSD xhci_ring_put)。 */
     return 0;
 }
@@ -390,6 +396,12 @@ static uint32_t xhci_ring_space(struct xhci_ring *ring)
  * TRB 时直接锁死)。2026-09-23 板验: DWC3 上 control TD 恰跨 254/255/0 时
  * 五秒无任何事件, Stop EP 停在 idx=0 - 同症。跨回卷的批量必须先复位环
  * (见调用方)再从 0 重装。
+ *
+ * 策略(2026-09-23 第二次板验定案): 本驱动不让硬件自然回卷 —— 凡批量
+ * 会触及 LINK 槽(跨 LINK 或恰从 LINK 起批)一律 -2 走环复位 + SET_TR_DEQ
+ * 重挂(板验机制)。从 LINK 槽起批时旧循环让 LINK 写吃掉一个载荷迭代,
+ * STATUS TRB 没上环: 设备收到 SETUP+DATA 后等 STATUS 永久挂起(8821CU
+ * 固件下载 DA 写"设备失聪"真因)。循环仍保留正确的 LINK 写作为安全网。
  */
 static int xhci_ring_put(struct xhci_ring *ring, const struct xhci_trb *trbs,
                          uint32_t ntrbs, struct xhci_td *td)
@@ -400,20 +412,31 @@ static int xhci_ring_put(struct xhci_ring *ring, const struct xhci_trb *trbs,
     uint8_t first_cs = 0U;
     uint32_t i;
 
-    if (ring->ep < ring->num_trbs - 1U &&
-        ring->ep + ntrbs > ring->num_trbs - 1U) {
-        return -2; /* 跨回卷: LINK 会落进本 TD 中间 */
+    /* 数据环: 批量会跨过 LINK 槽、或恰从 LINK 槽起批 → -2, 走环复位
+     * 路径(板验过的机制), 硬件只按 SET_TR_DEQ 重挂的环跑, 不做自然回卷。
+     * 2026-09-23 板验: SA 写 TD 恰在 252..254 收尾(ep=255), 下一批从
+     * LINK 槽起批 —— 旧代码 LINK 写吃掉一个载荷迭代, STATUS TRB 没上环:
+     * 设备收到 SETUP+DATA 后等 STATUS 永久挂起, 主机侧 5s 超时, Stop EP
+     * 等 TD 退役跟着挂死, CA 退役不了, 命令单元整体死亡(固件下载 DA 写
+     * "设备失聪"全部现象)。恰收尾在 254 的批不触发(LINK 不被动到)。
+     * 命令环(avoid_wrap=0)不回避: 单 TRB 命令的 LINK 恒在命令边界。 */
+    if (ring->avoid_wrap != 0U &&
+        ((ring->ep < ring->num_trbs - 1U &&
+          ring->ep + ntrbs > ring->num_trbs - 1U) ||
+         ring->ep == ring->num_trbs - 1U)) {
+        return -2;
     }
     if (xhci_ring_space(ring) < ntrbs + 1U) {
         return -1;
     }
 
-    for (i = 0U; i < ntrbs; i++) {
+    for (i = 0U; i < ntrbs;) {
         struct xhci_trb t = trbs[i];
         struct xhci_td td_store = *td;
 
         if (ri == ring->num_trbs - 1U) {
-            /* LINK TRB: 环回环基址, TC 位翻转消费者 cycle */
+            /* LINK TRB: 环回环基址, TC 位翻转消费者 cycle。
+             * 只让位不占批: LINK 写不入载荷迭代(否则丢最后一个 TRB) */
             ring->trbs[ri].dw0 = (uint32_t)(uintptr_t)ring->trbs;
             ring->trbs[ri].dw1 = 0;
             ring->trbs[ri].dw2 = 0;
@@ -439,6 +462,7 @@ static int xhci_ring_put(struct xhci_ring *ring, const struct xhci_trb *trbs,
         td_store.last_idx = ri;
         ring->tds[ri] = td_store;
         ri++;
+        i++;
     }
 
     if (first_slot != 0xFFFFFFFFU) {
@@ -549,6 +573,7 @@ static int xhci_do_command(struct xhci_hcd *hcd, const struct xhci_trb *trb,
         }
         hcd->cmd_ring.ep = 0;
         hcd->cmd_ring.cs = 1;
+        hcd->cmd_ring.dequeue = 0; /* 环整体重挂: 软件双指针一并对齐 */
         xhci_w32(hcd, XHCI_CRCR_LO,
                  (uint32_t)(uintptr_t)hcd->cmd_ring.trbs | XHCI_CRCR_LO_RCS);
         USB_LOG_ERR("command timeout (type=%u)\r\n", TRB3_TYPE_GET(cmd.dw3));
@@ -704,6 +729,14 @@ static int xhci_pipe_recover(struct xhci_hcd *hcd, struct xhci_dev *dev,
     if (ret != 0) {
         USB_LOG_ERR("xhci: recover dci=%u set tr dequeue failed ret=%d\r\n",
                     dci, ret);
+        /* SET_TR_DEQ 失败 = 硬件 dequeue 没有重指: 此刻重装 TD 必然
+         * 永不被取(2026-09-23 板验: 失败后照旧武装 → 5s 超时风暴)。
+         * 把失败上抛, 调用方决定回错而不是重装。victim 仍要归还(kill
+         * 路径的恰一次语义), 但不 kick 武装队头。 */
+        if (victim != NULL) {
+            xhci_giveback(victim, victim_error, 0);
+        }
+        return ret;
     }
 
     if (victim != NULL) {
@@ -1454,6 +1487,9 @@ static int xhci_controller_init(struct xhci_hcd *hcd)
     if (ret != 0) {
         return ret;
     }
+    /* 命令环自然回卷: 单 TRB 命令的 LINK 恒落命令边界, 不回避
+     * (NetBSD sc_cmd_ring 同款; -2 策略仅用于数据环) */
+    hcd->cmd_ring.avoid_wrap = 0U;
 
     /* DCBAA((1+maxslots)*8B) + scratchpad(DCBAA[0]=数组指针, 数组与缓冲页
      * 对齐; scratchpad 有效是 Address Device 的硬前提, 缺它报 Parameter
@@ -1656,6 +1692,7 @@ static int xhci_queue_control(struct xhci_hcd *hcd, struct xhci_dev *dev,
     uint32_t tmo;
     uint32_t save;
     int err;
+    int ret;
 
     if (urb->setup == NULL) {
         return -USB_ERR_INVAL;
@@ -1732,9 +1769,14 @@ static int xhci_queue_control(struct xhci_hcd *hcd, struct xhci_dev *dev,
     td.last_idx = ntrbs - 1U;
     first_idx = xhci_ring_put(ring, trbs, ntrbs, &td);
     if (first_idx == -2) {
-        /* LINK 会落进 TD 中间: 复位环回到 0 再重装一次(ep0 走线程上下文) */
+        /* 触及 LINK 槽: 复位环回到 0 再重装一次(ep0 走线程上下文)。
+         * 恢复失败(SET_TR_DEQ 没成)绝不能重装 —— 硬件 dequeue 没重指,
+         * 装上的 TD 永不被取, 就是 5s 超时风暴的形状 */
         xhci_ring_unlock(ring, save);
-        (void)xhci_pipe_recover(hcd, dev, 1U, ring, NULL, 0);
+        ret = xhci_pipe_recover(hcd, dev, 1U, ring, NULL, 0);
+        if (ret != 0) {
+            return ret;
+        }
         save = xhci_ring_lock(ring);
         first_idx = xhci_ring_put(ring, trbs, ntrbs, &td);
     }
@@ -1922,11 +1964,15 @@ int usbh_submit_urb(struct usbh_urb *urb)
             if (ring->active == NULL && ring->recovering == 0U) {
                 ret = xhci_arm_normal_locked(hcd, dev, dci, urb);
                 if (ret == -2) {
-                    /* LINK 会落进 TD 中间(NetBSD xhci.c: Ivy Bridge/
-                     * ASMedia 类控制器实证锁死, 本 DWC3 板验同症):
-                     * 复位环回到 0 再重装一次 */
+                    /* 触及 LINK 槽(NetBSD xhci.c: 跨 LINK TD 在 Ivy
+                     * Bridge/ASMedia 类控制器实证锁死, 本 DWC3 板验同症):
+                     * 复位环回到 0 再重装一次。恢复失败(SET_TR_DEQ 没
+                     * 成)不许重装 —— 硬件 dequeue 没重指, TD 永不被取 */
                     xhci_ring_unlock(ring, save);
-                    (void)xhci_pipe_recover(hcd, dev, dci, ring, NULL, 0);
+                    ret = xhci_pipe_recover(hcd, dev, dci, ring, NULL, 0);
+                    if (ret != 0) {
+                        return ret;
+                    }
                     continue;
                 }
                 if (ret < 0) {
@@ -2228,6 +2274,12 @@ static void xhci_event_process(struct xhci_hcd *hcd)
                  * (CA 中止/超时后)在此安全丢弃 */
                 struct xhci_cmd_ctx *cw = hcd->cmd_waiter;
 
+                /* 命令环软件 dequeue 推进: 一次只发一条命令, 每个完成
+                 * 事件必退役恰好一槽。不推进则 space 核算把环当满,
+                 * ~253 条命令后所有命令永远 -NOMEM(2026-09-23 板验:
+                 * 扫描期 -2 恢复每信道烧一条命令, 645s 撞墙) */
+                hcd->cmd_ring.dequeue =
+                    (hcd->cmd_ring.dequeue + 1U) % hcd->cmd_ring.num_trbs;
                 if (cw != NULL &&
                     (uint32_t)(uintptr_t)ev->dw0 == cw->trb_addr) {
                     cw->code = TRB2_CODE_GET(ev->dw2);
