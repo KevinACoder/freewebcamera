@@ -80,11 +80,24 @@ void wlan_osal_free(void *p) {
  * threads died jumping to NULL right at the osThreadNew pair). Same
  * world, proven primitives.
  *
- * Priority 5: BELOW the TCP/IP thread (4). The worker drains the driver
- * callbacks - ieee80211_input and the net80211 state machine run here -
- * and at the hub thread's priority 0 it would preempt tcpip through any
- * RX burst, starving DHCP/ICMP exactly when the link comes up. */
+ * Worker urgency must land the workers BELOW the TCP/IP thread, or a
+ * driver work segment (rx_drain through ieee80211_input and the
+ * net80211 state machine) preempts tcpip mid-burst and the mailbox
+ * fills (M11 r4: at ThreadX 5 vs tcpip 15 one 600 s downlink racked
+ * up 1799 TCPIP_MSG_INPKT drops). The two osal backends consume the
+ * number differently, so resolve it per kernel here:
+ *   - ThreadX passes it raw to tx_thread_create (0 = most urgent):
+ *     tcpip ends at 15 and the shell at 19, so 16 parks the workers
+ *     between them. The old fixed 5 sat TEN levels above tcpip - the
+ *     "below tcpip" comment it carried described only the FreeRTOS
+ *     mapping and was backwards on this line.
+ *   - FreeRTOS inverts it (configMAX_PRIORITIES - 1 - prio, 8 levels
+ *     in the product image): 5 lands at 2, below tcpip's 4. Kept. */
+#ifdef THREADX_BUILD
+#define WLAN_WORK_PRIORITY	16
+#else
 #define WLAN_WORK_PRIORITY	5
+#endif
 
 void *wlan_port_thread_create(void *(*run)(void *), void *arg) {
 	return usb_osal_thread_create("wlan-work",
