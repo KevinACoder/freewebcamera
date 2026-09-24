@@ -99,3 +99,51 @@ reaper 的 mq → 单核上 reaper 首个 `mq_recv(NULL)` 返 `TX_PTR_ERROR` →
    UP 载体特有时序因素）。
 3. aa88f12 同步到 wip/rtw8189f-sdio（及后续合入各 ThreadX lane）。
 4. memory 已更新：单步可用定案、VOQ 基线修正、reaper 死锁。
+
+---
+
+# 续段：长跑复现 wedge + 首次抓到设备侧签名（同日晚）
+
+按用户指示对 SMP 现役构建（ea270c5 / sha 7e92c88e）做长跑：1×600s TCP 上行
+（下行 `-R` 在本线有已知 lwIP TCP 独立缺陷，不混入）。**wedge 复现**：
+窗口进行到 ~中段（板内时间 390s 前后，storm 已在刷屏），`urtwn1: transmit
+failed, io timeout` 风暴出现且**不自愈**（取证期间仍在间歇刷）。
+
+## 宿主侧证据链（wedge 态，shell 取证）
+
+- S0→S1：`tx_submit=19793`（冻结）、`tx_complete=19867`（冻结，>submit=回收件）、
+  **`q_timeout=63→76` 持续增长**——shim sweep 按 5s 节奏回收停泊 xfer 并以
+  USBD_TIMEOUT 归还 → `urtwn_txeof` 打印 "transmit failed, io timeout"
+  （if_urtwn.c:2676，status==USBD_TIMEOUT 路径）。机制链闭合：
+  **一笔 armed bulk OUT 永不完成 → 单笔在途管线卡死 → 后续 TX 全部停泊 →
+  逐 5s 超时回收产生风暴；armed 永不杀（a22f439）**。
+- kill=0、wd_timeouts=0、submit_fail/guard_drop/post_drop 全零——宿主侧干净，
+  a22f439 的停杀纪律保持。
+- **RX 对照（12s 双读）**：rx_complete 40462→42033（+1571，~130/s 信标+数据全活）。
+- **ep0 对照**：所有 reg read/txq 命令秒回（每条 dump = ~19 笔成功 ep0）。
+- lwIP 链路态仍 link=up（net80211 未察觉 TX 死亡，信标仍在收）。
+
+## 设备侧证据（双读稳定差分，两次读相隔 ~2-3s，风暴持续中）
+
+| 寄存器 | wedge 态（双读一致） | 健康稳态（同日实测） |
+|---|---|---|
+| **TXDMA_STATUS [0x210]** | **0x00002421** | 0x00000401 |
+| **TDECTRL [0x208]** | **0x2700aa10** | 0x2800aa10 |
+| VOQ_INFO [0x400] | 0x02ff00ff | 0x02ff00ff（同值，非签名） |
+| TXPAUSE [0x522] | 0x00 | 0x00 |
+| FIFOPAGE/RQPN/RQPN_NPQ 等 | 与健康一致 | — |
+
+**TXDMA_STATUS=0x2421 与 TDECTRL 高字节 0x27（健康 0x28）是迄今第一次抓到的
+wedge 态设备侧签名**。注意矛盾点：上一轮 wedge 态转储 TXDMA_STATUS 读到 0x401
+（同健康）——两轮差异待下轮在新鲜 wedge 上复核（可能 0x210 是 W1C 型寄存器、
+读时机/读次数影响，也可能是不同 wedge 相位）。VOQ_INFO 再次确认非签名。
+
+## 下轮解题入口
+
+1. 设备侧优先：TXDMA_STATUS 0x2421 的位义对照 TRM（0x2000/0x20 两个新增位）；
+   TDECTRL 高字节回读是否卡住描述符 free-head。
+2. UP 载体（插 8188EUS）自动 park 冻结取证：宿主 EHCI 侧确认"armed qTD 永不
+   完成"的精确形态（qTD 状态/设备 NAK vs 无响应）；顺带 ep0 频率精测。
+3. 修复候选（按证据落地后排序）：设备侧恢复路径（如固件重置 VOQ/重排 FIFO 页）、
+   宿主侧 armed-stall 检测+管道恢复（clear-halt / 端点重臂）、或触达 88E 固件
+   行为差异的根因（对照 NetBSD 长跑）。
