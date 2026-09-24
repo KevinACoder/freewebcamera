@@ -41,6 +41,7 @@
  */
 
 #include <stdint.h>
+#include <stdio.h>
 
 #include "tx_api.h"
 #include "tx_thread.h"
@@ -135,10 +136,20 @@ void tx_irq_handler(void)
 		 * - goes through the board's handler table. */
 		board_gicv3_dispatch(id);
 	} else {
-		/* Spurious (IAR=1023): same stamped raw marker as the
-		 * FreeRTOS glue, so both kernels produce comparable logs. No
-		 * EOI for a spurious ack. */
-		board_early_print_raw("irq: spurious\n");
+		/* Spurious (IAR=1023): no EOI for a spurious ack. A
+		 * level-signalled source self-masking inside its own ISR
+		 * produces one of these per real interrupt - the line-drop
+		 * propagation outlives the EOI, the re-pend evaporates and
+		 * the next IAR comes back empty (M11 r4 SDIO DAT1: tens per
+		 * second, harmless, so the print is throttled to a running
+		 * count instead of flooding the console). */
+		static uint32_t spurious_count;
+		static uint32_t spurious_last;
+		spurious_count++;
+		if (spurious_count - spurious_last >= 100U) {
+			board_early_print_raw("irq: spurious x100\n");
+			spurious_last = spurious_count;
+		}
 	}
 
 	if (id != 1023U) {
@@ -252,25 +263,121 @@ void tx_secondary_main(void)
 /* --- fault parking (reached from tx_vectors.S) ------------------------------ */
 
 /* kind: 1 = current EL with SP0, 2 = any other entry. There is no recovery
- * path - report and park. */
+ * path - report and park.
+ *
+ * M7 lesson: the FIRST fault's evidence used to be lost - the vector does
+ * B (not BL) into here, concurrent console sinks shredded the dump, and a
+ * second core's dump was all we ever read cleanly. So: record the raw
+ * fault frame into a lockless table BEFORE anything prints, then emit the
+ * whole log (this fault + any earlier ones) as ONE atomic string under the
+ * print lock. */
+typedef struct fault_rec {
+	unsigned int seq;
+	unsigned int kind;
+	unsigned int core;
+	unsigned long esr;
+	unsigned long far;
+	unsigned long elr;
+	unsigned long lr;
+	unsigned long sp;
+	unsigned long cur_thread;
+} fault_rec_t;
+
+static fault_rec_t fault_log[4];
+static volatile unsigned int fault_log_n;
+static volatile unsigned int fault_seq;
+
 void tx_fault_park(uint32_t kind)
 {
-	unsigned long esr = 0UL, far = 0UL;
+	fault_rec_t *rec;
+	size_t o;
+	unsigned int i, n;
+	extern unsigned int cmsis_slot_diag(const void *tcb, char *out,
+					    unsigned int outsz);
+	static char dump[1600];
 
-	board_early_print("fatal: synchronous exception\n");
-	__asm__ __volatile__("mrs %0, esr_el1" : "=r"(esr));
-	__asm__ __volatile__("mrs %0, far_el1" : "=r"(far));
-	{
-		/* vsnprintf pulls in half of minilibc; the raw hex dump via
-		 * polled puts keeps this path dependency-free, like the
-		 * FreeRTOS glue's fault dumps but smaller. */
-		char buf[64];
-
-		(void)snprintf(buf, sizeof(buf),
-			       "fatal: kind=%u ESR_EL1=%08lx FAR_EL1=%08lx\n",
-			       (unsigned)kind, esr, far & 0xffffffffUL);
-		board_early_print(buf);
+	/* record first, print later */
+	i = fault_log_n;
+	if (i < 4U) {
+		rec = &fault_log[i];
+		rec->seq = fault_seq;
+		rec->kind = kind;
+		rec->core = board_smp_core_id();
+		__asm__ __volatile__("mov %0, sp" : "=r"(rec->sp));
+		__asm__ __volatile__("mrs %0, esr_el1" : "=r"(rec->esr));
+		__asm__ __volatile__("mrs %0, far_el1" : "=r"(rec->far));
+		__asm__ __volatile__("mrs %0, elr_el1" : "=r"(rec->elr));
+		__asm__ __volatile__("mov %0, x30" : "=r"(rec->lr));
+		rec->cur_thread =
+		    (unsigned long) _tx_thread_smp_current_thread_get();
+		fault_log_n = i + 1U;
 	}
+	fault_seq++;
+
+	/* compose everything, print once */
+	o = 0U;
+	n = fault_log_n;
+	for (i = 0U; i < n; i++) {
+		const fault_rec_t *r = &fault_log[i];
+		const volatile TX_THREAD *t =
+		    (const volatile TX_THREAD *) r->cur_thread;
+
+		o += (size_t) snprintf(dump + o, sizeof(dump) - o,
+				       "fatal[%u] core%u kind%u ESR=%08lx FAR=%08lx ELR=%08lx LR=%08lx sp=%08lx\n",
+				       r->seq, r->core, r->kind,
+				       r->esr & 0xffffffffUL,
+				       r->far & 0xffffffffUL,
+				       r->elr & 0xffffffffUL,
+				       r->lr & 0xffffffffUL,
+				       r->sp & 0xffffffffUL);
+		if (t != (const volatile TX_THREAD *) 0UL) {
+			const unsigned char *nm =
+			    (const unsigned char *) t->tx_thread_name;
+			unsigned long entry =
+			    (unsigned long) t->tx_thread_entry;
+			unsigned long ss =
+			    (unsigned long) t->tx_thread_stack_start;
+			unsigned long se =
+			    (unsigned long) t->tx_thread_stack_end;
+			unsigned int st = t->tx_thread_state;
+			char sd[64];
+			unsigned int sl;
+
+			sl = (unsigned int) cmsis_slot_diag(t, sd, sizeof(sd));
+			sd[sl] = '\0';
+			o += (size_t) snprintf(dump + o, sizeof(dump) - o,
+			    "  thr name=%02x%02x%02x%02x%02x%02x%02x%02x entry=%08lx stk=%08lx..%08lx state=%u %s\n",
+			    nm[0], nm[1], nm[2], nm[3], nm[4], nm[5], nm[6],
+			    nm[7], entry, ss, se, st, sd);
+			/* the context ThreadX saved for this thread lives at
+			 * the top of its own stack: 12 words below the top
+			 * show pc/lr/sp of where it was switched out - the
+			 * real "where was it" when the faulting context is
+			 * the scheduler/IRQ path, not the thread */
+			{
+				const volatile unsigned long *ctx =
+				    (const volatile unsigned long *)
+				    (se - 11UL * 8UL);
+				unsigned int k;
+
+				o += (size_t) snprintf(dump + o,
+				    sizeof(dump) - o, "  tctx:");
+				for (k = 0U; k < 12U; k++) {
+					o += (size_t) snprintf(dump + o,
+					    sizeof(dump) - o, " %08lx",
+					    ctx[k] & 0xffffffffUL);
+				}
+				o += (size_t) snprintf(dump + o,
+				    sizeof(dump) - o, "\n");
+			}
+		}
+	}
+	if (i >= 4U) {
+		o += (size_t) snprintf(dump + o, sizeof(dump) - o,
+				       "fatal: log full, this frame dropped\n");
+	}
+	dump[o] = '\0';
+	board_early_print(dump);
 
 	for (;;) {
 		__asm__ __volatile__("wfe");

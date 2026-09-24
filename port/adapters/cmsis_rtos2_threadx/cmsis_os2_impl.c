@@ -35,9 +35,13 @@
  *   - message queues copy in ULONG words: msg_size is rounded up and
  *     callers' buffers must tolerate up to 3 bytes of padding, which every
  *     in-tree caller does;
- *   - osKernelLock/Unlock/RestoreLock are absent: nothing in this image
- *     calls them, and ThreadX has no scheduler-suspend primitive to map
- *     them onto honestly (TX_DISABLE is a spinlock, a different contract).
+ *   - osKernelLock/Unlock/RestoreLock map onto the port's global protection
+ *     (_tx_thread_smp_protect, the TX_DISABLE primitive): cross-core mutual
+ *     exclusion with local IRQs held off. That is STRONGER than the
+ *     FreeRTOS twin's vTaskSuspendAll, which stops only local scheduling
+ *     and keeps IRQs on - on four cores a local-only lock protects nothing,
+ *     so the global primitive is the honest analog. The nesting-count
+ *     contract (return depth / restore to depth) matches the twin exactly.
  *
  * Static allocation: ThreadX wants caller-provided control blocks and
  * stacks for everything, so every object type has a static slot pool and a
@@ -47,6 +51,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "tx_api.h"
@@ -63,16 +68,22 @@
 /* asm hand-off stubs (port/adapters/threadx/tx_vectors.S) */
 extern void tx_kernel_enter_spsel0(void);
 
-/* board SMP release (port/board/common/smp.c, kernel-agnostic) */
+/* board SMP release (port/aarch64/smp.c, kernel-agnostic) */
 extern void board_smp_start_secondaries(void);
+
+/* The port assembly's global protection (tx_thread_smp_protect.S): what
+ * TX_DISABLE expands to on this port. See the kernel-lock section. The
+ * prototypes come from tx_api.h. */
 
 /* --- priority and timeout translation ------------------------------------ */
 
 /* CMSIS: 1..56, higher = more urgent. ThreadX: 0..TX_MAX_PRIORITIES-1,
  * LOWER = more urgent. CMSIS named bands are 8 apart; each band maps to a
  * run of 4 ThreadX levels, highest band first. osPriorityNormal (24, band
- * 3) lands on level 16 - the middle of the range, same shape as the
- * FreeRTOS twin's default. */
+ * 3) lands on level 19 and osPriorityAboveNormal (32, band 4) on 15 - the
+ * latter is the tcpip thread's level (TCPIP_THREAD_PRIO=4 through this
+ * map), with the wlan workers parked just below it (wlan_adapter.c
+ * WLAN_WORK_PRIORITY, raw 16 on this kernel). */
 static UINT to_tx_priority(osPriority_t priority)
 {
 	uint32_t band;
@@ -165,11 +176,14 @@ static int defer(def_kind_t kind, void *slot,
 
 /* --- threads --------------------------------------------------------------- */
 
-#define MAX_THREADS		16
-#define THREAD_STACK_WORDS	2048u		/* 8 KiB */
+#define MAX_THREADS		32
+#define THREAD_STACK_DEFAULT	2048u		/* 8 KiB, the long-standing default */
+#define THREAD_STACK_MIN	256u		/* 1 KiB floor */
+#define THREAD_STACK_MAX_BYTES	(128u * 1024u)
 
 typedef enum {
 	SLOT_FREE = 0,
+	SLOT_RESERVED,		/* claimed, creation in progress */
 	SLOT_PENDING,		/* allocated, created at replay time */
 	SLOT_LIVE,
 	SLOT_ZOMBIE,		/* self-terminated/finished; reap on next New */
@@ -178,7 +192,12 @@ typedef enum {
 typedef struct {
 	TX_THREAD             thread;
 	TX_EVENT_FLAGS_GROUP  tflags;	/* this thread's CMSIS thread flags */
-	ULONG                 stack[THREAD_STACK_WORDS];
+	ULONG                *stack;	/* heap (port/adapters/threadx/heap.c);
+					 * sized per attr->stack_size, freed on
+					 * reap/delete - a fixed 8 KiB per slot
+					 * x 32 slots would burn 256 KiB of
+					 * .bss on threads that ask for less */
+	uint32_t              stack_words;
 	osThreadFunc_t        func;
 	void                 *arg;
 	slot_state_t          state;
@@ -186,15 +205,55 @@ typedef struct {
 
 static thread_slot_t thread_slots[MAX_THREADS];
 
+/* Allocation surface shared with the middleware adapters (sdmmc OSA,
+ * CherryUSB osal). Prototypes here rather than a header: the only two
+ * consumers in this file are the stack allocator and the reaper. */
+extern void *pvPortMalloc(size_t length);
+extern void vPortFree(void *ptr);
+
+/* The port assembly's protection primitives (same pair heap.c uses);
+ * spelled out to keep the include surface kernel-call-only. */
+extern unsigned int _tx_thread_smp_protect(void);
+extern void _tx_thread_smp_unprotect(unsigned int save);
+
+static ULONG *thread_stack_alloc(uint32_t stack_size, uint32_t *words_out)
+{
+	uint32_t bytes;
+	ULONG *stack;
+
+	bytes = (stack_size != 0U) ? stack_size
+				   : THREAD_STACK_DEFAULT * sizeof(ULONG);
+	if (bytes > THREAD_STACK_MAX_BYTES) {
+		return NULL;
+	}
+	bytes = (bytes + 15U) & ~15U;	/* AArch64 stack alignment */
+	stack = (ULONG *)pvPortMalloc(bytes);
+	if (stack != NULL) {
+		*words_out = bytes / (uint32_t)sizeof(ULONG);
+	}
+	return stack;
+}
+
 static thread_slot_t *thread_slot_alloc(void)
 {
 	uint32_t i;
+	unsigned int save;
 
+	/* The scan-and-claim must be atomic across cores: two concurrent
+	 * osThreadNew calls (the netstart chain vs the shell's, in this
+	 * image) used to be able to pick the same FREE slot and double-create
+	 * a TCB on it - corrupted ready list, one stack leaked, and saved
+	 * contexts trashed. The reservation closes the window; every failure
+	 * path after this point hands the slot back as SLOT_FREE. */
+	save = _tx_thread_smp_protect();
 	for (i = 0U; i < MAX_THREADS; i++) {
 		if (thread_slots[i].state == SLOT_FREE) {
+			thread_slots[i].state = SLOT_RESERVED;
+			_tx_thread_smp_unprotect(save);
 			return &thread_slots[i];
 		}
 	}
+	_tx_thread_smp_unprotect(save);
 	return NULL;
 }
 
@@ -221,6 +280,9 @@ static void thread_zombies_reap(void)
 			continue;
 		}
 		if (tx_thread_delete(&slot->thread) == TX_SUCCESS) {
+			(void)tx_event_flags_delete(&slot->tflags);
+			vPortFree(slot->stack);
+			slot->stack = NULL;
 			slot->state = SLOT_FREE;
 		}
 	}
@@ -253,23 +315,31 @@ static void thread_create_into_slot(thread_slot_t *slot, osThreadFunc_t func,
 	slot->func = func;
 	slot->arg = argument;
 
+	/* Created suspended: the tflags group and the TCB backlink must
+	 * exist before the trampoline's first instruction can run. On SMP
+	 * another core picks the thread up the moment it is ready, and a
+	 * TX_AUTO_START here raced that window - flags-set to a NULL
+	 * cmsis_slot, or a zombie parked by a flash-length thread being
+	 * overwritten back to LIVE (leak, never reaped). */
 	if (tx_thread_create(&slot->thread, (CHAR *)"cmsis-thr",
 			     thread_trampoline, (ULONG)(uintptr_t)slot,
 			     (VOID *)slot->stack,
-			     (ULONG)THREAD_STACK_WORDS * sizeof(ULONG),
+			     (ULONG)slot->stack_words * sizeof(ULONG),
 			     priority, priority,
-			     TX_NO_TIME_SLICE, TX_AUTO_START) != TX_SUCCESS) {
+			     TX_NO_TIME_SLICE, TX_DONT_START) != TX_SUCCESS) {
+		vPortFree(slot->stack);
+		slot->stack = NULL;
 		slot->state = SLOT_FREE;
 		return;
 	}
-	slot->state = SLOT_LIVE;
 	thread_slot_init_flags(slot);
 
 	/* CMSIS affinity_mask (bit i = core i allowed) maps onto ThreadX's
 	 * EXCLUSION bitmap (bit i = core i forbidden) - the complement. A
 	 * zero or full mask means "no constraint". smp_test's per-core
 	 * pinning rides on this; dropping it silently would break the
-	 * comparison workload's core-binding contract. */
+	 * comparison workload's core-binding contract. Applied before the
+	 * resume so the thread never runs on a forbidden core. */
 	if (affinity_mask != 0U &&
 	    (affinity_mask & (uint32_t)TX_THREAD_SMP_CORE_MASK) !=
 		    (uint32_t)TX_THREAD_SMP_CORE_MASK) {
@@ -277,6 +347,9 @@ static void thread_create_into_slot(thread_slot_t *slot, osThreadFunc_t func,
 						 (ULONG)~affinity_mask &
 						 (ULONG)TX_THREAD_SMP_CORE_MASK);
 	}
+
+	slot->state = SLOT_LIVE;
+	(void)tx_thread_resume(&slot->thread);
 }
 
 osThreadId_t osThreadNew(osThreadFunc_t func, void *argument,
@@ -285,6 +358,7 @@ osThreadId_t osThreadNew(osThreadFunc_t func, void *argument,
 	thread_slot_t *slot;
 	UINT priority = to_tx_priority(osPriorityNormal);
 	uint32_t affinity_mask = 0U;
+	uint32_t stack_size = 0U;
 
 	if (func == NULL) {
 		return NULL;
@@ -306,9 +380,12 @@ osThreadId_t osThreadNew(osThreadFunc_t func, void *argument,
 			priority = to_tx_priority(attr->priority);
 		}
 		affinity_mask = attr->affinity_mask;
-		/* attr->stack_size is noted but the slot's stack is fixed at
-		 * THREAD_STACK_WORDS; smaller requests are served from the
-		 * same pool. Every in-tree thread fits. */
+		stack_size = attr->stack_size;
+	}
+	slot->stack = thread_stack_alloc(stack_size, &slot->stack_words);
+	if (slot->stack == NULL) {
+		slot->state = SLOT_FREE;
+		return NULL;
 	}
 
 	if (kernel_objects_live) {
@@ -323,11 +400,15 @@ osThreadId_t osThreadNew(osThreadFunc_t func, void *argument,
 
 	/* Pre-kernel: the slot is allocated now (the handle - the TCB
 	 * address - is stable from this moment), the constructor replays in
-	 * tx_cmsis_application_define, the only sanctioned creation window. */
+	 * tx_cmsis_application_define, the only sanctioned creation window.
+	 * The stack is also allocated here - the heap works before the
+	 * kernel starts - so the replay never allocates. */
 	slot->state = SLOT_PENDING;
 	if (!defer(DEF_THREAD, slot,
 		   (uintptr_t)func, (uintptr_t)argument,
 		   (uintptr_t)priority, (uintptr_t)affinity_mask)) {
+		vPortFree(slot->stack);
+		slot->stack = NULL;
 		slot->state = SLOT_FREE;
 		return NULL;
 	}
@@ -337,6 +418,22 @@ osThreadId_t osThreadNew(osThreadFunc_t func, void *argument,
 osThreadId_t osThreadGetId(void)
 {
 	return (osThreadId_t)tx_thread_identify();
+}
+
+/* Fault-dump helper (tx_glue.c): identify the slot behind a TCB without
+ * leaking the slot-table types into the glue. */
+unsigned int cmsis_slot_diag(const void *tcb, char *out, unsigned int outsz)
+{
+	uintptr_t base = (uintptr_t)thread_slots;
+	uintptr_t off = (uintptr_t)tcb - base;
+	uint32_t i = (uint32_t)(off / sizeof(thread_slot_t));
+
+	if (off % sizeof(thread_slot_t) != 0U || i >= MAX_THREADS) {
+		return (unsigned int)snprintf(out, outsz, "slot=?");
+	}
+	return (unsigned int)snprintf(out, outsz, "slot=%u state=%d func=%p",
+				      (unsigned)i, (int)thread_slots[i].state,
+				      thread_slots[i].func);
 }
 
 osStatus_t osThreadYield(void)
@@ -373,6 +470,9 @@ osStatus_t osThreadTerminate(osThreadId_t thread_id)
 	if (tx_thread_delete(thread) != TX_SUCCESS) {
 		return osErrorParameter;
 	}
+	(void)tx_event_flags_delete(&slot->tflags);
+	vPortFree(slot->stack);
+	slot->stack = NULL;
 	slot->state = SLOT_FREE;
 	return osOK;
 }
@@ -569,9 +669,106 @@ uint32_t osKernelGetSysTimerFreq(void)
 	return osKernelGetTickFreq();
 }
 
+/* --- kernel lock ------------------------------------------------------------ */
+/* The OSA-style critical sections (the sdmmc shadow's OSA_ENTER_CRITICAL,
+ * port/adapters/sdmmc/shadow/fsl_os_abstraction.h) ride on these. ThreadX
+ * has no scheduler-suspend primitive; the port's global protection is the
+ * honest SMP analog (see the file-header note). protect() returns the
+ * caller's DAIF, which must come back in reverse order - so the save
+ * values live on a per-depth stack. Depth 8 is generous: these sections
+ * guard a word of state and never span a blocking call, but running out is
+ * reported rather than silently corrupting the save stack. */
+#define MAX_KERNEL_LOCK_DEPTH	8
+/* Per-core bookkeeping: the DAIF save value belongs to THIS core's CPSR
+ * and the nesting depth is this core's state. A shared count let core A
+ * unprotect() release the global lock while core B still held it, and a
+ * third core then walked into a "protected" lwIP memory section (M11 r4
+ * B1: memp free-list updated by two cores at once, one block handed out
+ * twice, list head overwritten with payload bytes - fatal, both tcpip
+ * and wlan-work dying in do_memp_malloc_pool). */
+#define KERNEL_LOCK_CORES	4
+
+static uint32_t kernel_lock_count[KERNEL_LOCK_CORES];
+static UINT kernel_lock_daif[KERNEL_LOCK_CORES][MAX_KERNEL_LOCK_DEPTH];
+
+static UINT kernel_lock_core_id(void)
+{
+	uint64_t mpidr;
+
+	__asm__ volatile ("mrs %0, mpidr_el1" : "=r"(mpidr));
+	/* this SoC numbers its cores in Aff1 (see gicv3.c) */
+	return (UINT)((mpidr >> 8) & 0xFu);
+}
+
+int32_t osKernelLock(void)
+{
+	UINT core = kernel_lock_core_id();
+	uint32_t previous;
+
+	if (kernel_state != osKernelRunning) {
+		return (int32_t)osError;
+	}
+	if (core >= KERNEL_LOCK_CORES ||
+	    kernel_lock_count[core] >= MAX_KERNEL_LOCK_DEPTH) {
+		return (int32_t)osError;
+	}
+	previous = kernel_lock_count[core];
+	kernel_lock_daif[core][kernel_lock_count[core]] =
+		_tx_thread_smp_protect();
+	kernel_lock_count[core]++;
+	return (int32_t)previous;
+}
+
+int32_t osKernelUnlock(void)
+{
+	UINT core = kernel_lock_core_id();
+	uint32_t previous;
+
+	if (kernel_state != osKernelRunning) {
+		return (int32_t)osError;
+	}
+	if (core >= KERNEL_LOCK_CORES) {
+		return (int32_t)osError;
+	}
+	previous = kernel_lock_count[core];
+	if (previous > 0U) {
+		kernel_lock_count[core]--;
+		_tx_thread_smp_unprotect(
+			kernel_lock_daif[core][kernel_lock_count[core]]);
+	}
+	return (int32_t)previous;
+}
+
+int32_t osKernelRestoreLock(int32_t lock)
+{
+	UINT core = kernel_lock_core_id();
+
+	if (kernel_state != osKernelRunning) {
+		return (int32_t)osError;
+	}
+	if (lock < 0) {
+		return (int32_t)osErrorParameter;
+	}
+	if (core >= KERNEL_LOCK_CORES) {
+		return (int32_t)osError;
+	}
+	while (kernel_lock_count[core] > (uint32_t)lock) {
+		(void)osKernelUnlock();
+	}
+	while (kernel_lock_count[core] < (uint32_t)lock) {
+		if (kernel_lock_count[core] >= MAX_KERNEL_LOCK_DEPTH) {
+			return (int32_t)osError;
+		}
+		kernel_lock_daif[core][kernel_lock_count[core]] =
+			_tx_thread_smp_protect();
+		kernel_lock_count[core]++;
+	}
+	return (int32_t)kernel_lock_count[core];
+}
+
 /* --- event flags ----------------------------------------------------------- */
 
-#define MAX_EFLAGS	8
+#define MAX_EFLAGS	16
 
 typedef struct {
 	TX_EVENT_FLAGS_GROUP group;
@@ -694,7 +891,7 @@ osStatus_t osEventFlagsDelete(osEventFlagsId_t ef_id)
 
 /* --- mutexes --------------------------------------------------------------- */
 
-#define MAX_MUTEXES	8
+#define MAX_MUTEXES	16
 
 typedef struct {
 	TX_MUTEX     mutex;
@@ -803,7 +1000,7 @@ osStatus_t osMutexDelete(osMutexId_t mutex_id)
 
 /* --- semaphores ------------------------------------------------------------ */
 
-#define MAX_SEMAPHORES	8
+#define MAX_SEMAPHORES	32
 
 typedef struct {
 	TX_SEMAPHORE sem;
@@ -904,7 +1101,7 @@ osStatus_t osSemaphoreDelete(osSemaphoreId_t semaphore_id)
 
 /* --- message queues -------------------------------------------------------- */
 
-#define MAX_QUEUES	8
+#define MAX_QUEUES	16
 
 typedef struct {
 	TX_QUEUE     queue;
@@ -1044,7 +1241,7 @@ osStatus_t osMessageQueueDelete(osMessageQueueId_t mq_id)
 
 /* --- timers ---------------------------------------------------------------- */
 
-#define MAX_TIMERS	8
+#define MAX_TIMERS	16
 
 typedef struct {
 	TX_TIMER     timer;
@@ -1181,7 +1378,7 @@ typedef struct {
 	uint8_t       storage_is_ours;
 } mem_pool_t;
 
-#define MAX_POOLS	4
+#define MAX_POOLS	8
 #define POOL_STORAGE_BYTES	512u
 
 static mem_pool_t pools[MAX_POOLS];

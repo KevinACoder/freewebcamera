@@ -64,6 +64,10 @@ struct ehci_qh_hw {
     struct usbh_urb *urb;
     usb_osal_sem_t waitsem;
     uint8_t remove_in_iaad;
+    /* usbh_kill_urb handshake with the IAA pool scan: 1 = killed and
+     * waiting for the scan to acknowledge the unlink, 2 = acknowledged
+     * (the scan then leaves free + complete to the killer) */
+    volatile uint8_t killed;
 } __attribute__((aligned(CONFIG_USB_EHCI_ALIGN_SIZE)));
 
 struct ehci_itd_hw {
@@ -94,6 +98,11 @@ struct ehci_hcd {
 extern struct ehci_hcd g_ehci_hcd[CONFIG_USBHOST_MAX_BUS];
 extern uint32_t g_framelist[CONFIG_USBHOST_MAX_BUS][USB_ALIGN_UP(CONFIG_USB_EHCI_FRAME_LIST_SIZE, 1024)];
 extern uint8_t usbh_get_port_speed(struct usbh_bus *bus, const uint8_t port);
+
+#ifdef CONFIG_USBHOST_MULTI_HCD
+/* This port's routing table for usbh_hcd_register() (multi-HCD builds). */
+extern const struct usbh_hcd_ops usbh_ehci_ops;
+#endif
 
 int ehci_iso_urb_init(struct usbh_bus *bus, struct usbh_urb *urb);
 void ehci_kill_iso_urb(struct usbh_bus *bus, struct usbh_urb *urb);

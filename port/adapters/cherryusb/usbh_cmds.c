@@ -77,8 +77,7 @@ static void usbh_list_print(chry_shell_t *csh, bool tree)
 {
 	uint8_t busid;
 
-#ifdef USBH_HCD_XHCI
-	for (busid = 0; busid < USBH_XHCI_NUM; busid++) {
+	for (busid = 0; busid < (USBH_EHCI_NUM + USBH_XHCI_NUM); busid++) {
 		struct usbh_bus *bus = &g_usbhost_bus[busid];
 		struct usbh_hub *roothub = &bus->hcd.roothub;
 
@@ -87,33 +86,22 @@ static void usbh_list_print(chry_shell_t *csh, bool tree)
 			continue;
 		}
 
-		csh_printf(csh, "bus%u: xhci @%08x\r\n", busid,
-			   (uint32_t)USBH_XHCI0_BASE);
-		if (tree) {
-			usbh_tree_print(csh, roothub, 1U);
-		} else {
-			usbh_tree_print(csh, roothub, 0U);
-		}
-	}
+		/* The controller type comes off the bus's registered ops table
+		 * (multi-HCD) or the build shape (EHCI-only), the base address
+		 * off the bus itself. */
+		csh_printf(csh, "bus%u: %s @%08x\r\n", busid,
+#ifdef CONFIG_USBHOST_MULTI_HCD
+			   (bus->hcd_ops != NULL) ? bus->hcd_ops->driver_name : "?",
 #else
-	for (busid = 0; busid < USBH_EHCI_NUM; busid++) {
-		struct usbh_bus *bus = &g_usbhost_bus[busid];
-		struct usbh_hub *roothub = &bus->hcd.roothub;
-
-		if (roothub->int_buffer == NULL && roothub->nports == 0U) {
-			csh_printf(csh, "bus%u: not started\r\n", busid);
-			continue;
-		}
-
-		csh_printf(csh, "bus%u: ehci @%08x\r\n", busid,
-			   (uint32_t)USBH_EHCI_BASE(busid));
+			   "ehci",
+#endif
+			   (uint32_t)bus->hcd.reg_base);
 		if (tree) {
 			usbh_tree_print(csh, roothub, 1U);
 		} else {
 			usbh_tree_print(csh, roothub, 0U);
 		}
 	}
-#endif
 }
 
 static int cmd_usbh(int argc, char **argv)

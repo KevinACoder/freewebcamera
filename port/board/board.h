@@ -59,7 +59,7 @@ void board_mmu_enable_secondary(void);
 
 /* Drop the loader's leftover dirty cache lines over our own image, then
  * invalidate the instruction cache. Called by board_mmu_enable() while caches
- * are still off; see port/board/common/cache.c for why skipping it produces
+ * are still off; see port/aarch64/cache.c for why skipping it produces
  * intermittent corruption rather than a clean failure. */
 void board_cache_init(void);
 
@@ -93,6 +93,12 @@ void board_main(void);
  * (startup.S's uart_early_puts) under a per-line spinlock. They never block
  * and are safe from any task context, on any core. */
 void board_early_print(const char *message);
+
+/* Unstamped but LOCKED write on the same polled UART: the sink for console
+ * frontends that must not garble against board_early_print (the net80211
+ * world's printf used to drive the CMSIS USART driver on a different lock
+ * domain, and attach-time prints shredded fault dumps mid-line). */
+void board_console_write(const char *message);
 
 /* Same sink, formatted. Drivers that report what they found (register
  * versions, PHY ids, negotiated link speed) use this instead of each carrying

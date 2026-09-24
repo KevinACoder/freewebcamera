@@ -19,15 +19,19 @@
 
 #include <stdarg.h>
 #include <stdint.h>
+#include <stdio.h>
 
-#include "Driver_USART.h"
-
-extern ARM_DRIVER_USART Driver_USART_Console;
+#include "board.h"
 
 /* Set once the console has been initialized. Before that the driver would
  * write into an unprogrammed UART, which looks like a working console that
  * prints nothing. */
 static int diag_console_ready;
+
+/* lwIP's errno variable (LWIP_PROVIDE_ERRNO): sockets.c and the iperf3
+ * client assign it, lwip/errno.h only declares it. One shared global on
+ * purpose - this image has no newlib reent behind <errno.h>. */
+int errno;
 
 /* One printf-style buffer, reused: these calls are rare and never reentered
  * from an interrupt at the same time as a thread on this single-core target. */
@@ -35,15 +39,12 @@ static char diag_line[192];
 
 static void diag_emit(const char *s)
 {
-	uint32_t n = 0;
-
 	if (!diag_console_ready) {
 		return;
 	}
-	while (s[n] != '\0') {
-		n++;
-	}
-	(void)Driver_USART_Console.Send(s, n);
+	/* The print-locked console sink: with SMP up, diag lines race the
+	 * shell and fault dumps on the same UART like any other thread. */
+	board_console_write(s);
 }
 
 /* Called by the adapter once the console is initialized and printing is

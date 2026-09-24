@@ -19,9 +19,11 @@
 void usbh_rk3568_usb2phy1_domain_init(void);
 
 /* Full USB3OTG domain for the DWC3/xHCI USB3 socket group: bus domain,
- * USB3OTG clock gates, SRST_USB3OTG0/1 + USB2HOST pulse, usb2phy0 port GRF
- * and the dwc3 core reconfig (soft reset, PHY quirks, PRTCAP=host) - the
- * board-proven NetBSD rk_usb2phy.c + dwc3_fdt.c sequence (D38). */
-void usbh_rk3568_usb3otg_domain_init(void);
+ * USB3OTG clock gates, SRST_USB3OTG0/1 + USB2HOST pulse and the usb2phy0
+ * port GRF run once; the dwc3 core reconfig (soft reset, PHY quirks,
+ * PRTCAP=host) runs once per instance - the board-proven NetBSD
+ * rk_usb2phy.c + dwc3_fdt.c sequence (D38). instance 0 = 0xFD000000,
+ * instance 1 = 0xFCC00000 (otg-as-host). */
+void usbh_rk3568_usb3otg_domain_init(uint8_t instance);
 
 #endif /* USBH_PLATFORM_H */

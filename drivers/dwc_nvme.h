@@ -38,11 +38,6 @@ void dwc_nvme_init(void);
 /* Controllers that came up. */
 uint32_t dwc_nvme_ctrl_count(void);
 
-/* Shell diagnostics (nvme_diag.c): bring up + report every controller;
- * "read N" does a read-only 8-block read at LBA N. The message-interrupt
- * delivery evidence print comes from the driver itself, on the first
- * completed command. */
-int nvme_diag_cmd(int argc, char **argv);
 
 #ifdef __cplusplus
 }

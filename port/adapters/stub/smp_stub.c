@@ -2,7 +2,7 @@
  * @file   smp_stub.c
  * @brief  Kernel-replacement stub for the SMP secondary entry point.
  *
- * app/main.c calls board_smp_start_secondaries() (port/board/common/smp.c,
+ * app/main.c calls board_smp_start_secondaries() (port/aarch64/smp.c,
  * real board code with no kernel dependency - it links into the k4 stub
  * build directly). But that code addresses kernel_secondary_entry, which
  * lives in smp_secondary.S - assembly the k4 build deliberately excludes

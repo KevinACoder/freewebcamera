@@ -102,6 +102,8 @@ extern unsigned int uart_console_irq_id(void);
 extern int uart_console_rx_down(void);
 extern int uart_console_rx_kick(void);
 extern int nvme_diag_cmd(int argc, char **argv);
+/* D41 window probe: GIC/console state at a named point of this bring-up. */
+extern void uart_console_window_probe(const char *tag);
 
 /* Freestanding: minilibc.c provides the definition. */
 extern int atoi(const char *s);
@@ -420,10 +422,12 @@ static int cmd_itsdump(int argc, char **argv)
 	return 0;
 }
 
-/* NVMe bring-up / read diagnostics. The logic lives in the driver tree
- * (nvme_diag.c, same split as its/itsdump); the delivery evidence - the
+#ifndef KTEST_BUILD
+/* NVMe bring-up / read diagnostics. The logic lives in app/nvme_diag.c
+ * (D48: diagnostics are application code); the delivery evidence - the
  * line the whole point hangs on - is printed by dwc_nvme itself on the
- * first completed command. */
+ * first completed command. Not in the ktest image: the kernel-test
+ * image links no app/ sources. */
 static int cmd_nvme(int argc, char **argv)
 {
 	chry_shell_t *csh = CSH_FROM_ARGV(argc, argv);
@@ -432,6 +436,7 @@ static int cmd_nvme(int argc, char **argv)
 	(void)nvme_diag_cmd(argc, argv);
 	return 0;
 }
+#endif
 
 /* Move the console RX interrupt to another INTID without a rebuild: the
  * one board fact this driver cannot establish by itself. */
@@ -521,8 +526,10 @@ CSH_CMD_EXPORT_ALIAS_FULL(cmd_its, its, "its",
 			  "run the ITS/LPI self-test ladder");
 CSH_CMD_EXPORT_ALIAS_FULL(cmd_itsdump, itsdump, "itsdump",
 			  "dump ITS/LPI delivery state");
+#ifndef KTEST_BUILD
 CSH_CMD_EXPORT_ALIAS_FULL(cmd_nvme, nvme, "nvme",
 			  "bring up NVMe; `nvme read <lba>` reads 8 blocks");
+#endif
 CSH_CMD_EXPORT_ALIAS_FULL(cmd_uartint, uartint, "uartint",
 			  "show/move console RX INTID");
 	CSH_CMD_EXPORT_ALIAS_FULL(cmd_gicdiag, gicdiag, "gicdiag",
@@ -593,10 +600,12 @@ int cherrysh_init(void)
 	 *
 	 * PowerControl(FULL) after Initialize() restores the state and is what
 	 * installs the console interrupt. */
+	uart_console_window_probe("w0-pre-init");
 	(void)Driver_USART_Console.Initialize(shell_usart_event);
 	if (Driver_USART_Console.PowerControl(ARM_POWER_FULL) != ARM_DRIVER_OK) {
 		return -1;
 	}
+	uart_console_window_probe("w1-post-pwr");
 
 	/* Install the console callbacks and the command tables. */
 	init.sput = shell_sput;
@@ -630,6 +639,7 @@ int cherrysh_init(void)
 	}
 	shell_task_id = id;
 	shell_running = 1;
+	uart_console_window_probe("w2-post-csh");
 
 	/* Start receiving LAST, and only now.
 	 *
@@ -638,13 +648,21 @@ int cherrysh_init(void)
 	 * task. Enabling the interrupt before the task exists would have that
 	 * callback run with nothing to wake.
 	 *
-	 * Note this goes through the standard CMSIS control code rather than a
-	 * driver-specific call: the adapter keeps working with any ARM_DRIVER_USART
-	 * that implements ARM_USART_CONTROL_RX, and never needs the driver's
-	 * header.
+	 * Receive() goes BEFORE the RX control code, on purpose: a CMSIS
+	 * reception fills the buffer Receive() was given, and the completion
+	 * callback reads that same buffer (rx_chunk). With the order reversed,
+	 * the boot arm filled the driver's internal scratch instead - the count
+	 * said 5, the bytes were somewhere else, and the first line a person
+	 * typed after every boot silently vanished (board-proven 2026-09-21 on
+	 * both kernels; the D42 session only looked interactive because its
+	 * first command was sacrificed the same way). Arming the client buffer
+	 * first is what makes the Control(RX,1) arm below resume it, so the
+	 * very first keystroke already lands where the callback reads.
 	 *
-	 * The chain is: IRQ -> driver drains FIFO -> shell_usart_event() (us)
-	 * -> ring + wake the shell task. */
+	 * The chain is: IRQ -> driver drains FIFO into rx_chunk ->
+	 * shell_usart_event() (us) -> ring + wake the shell task. */
+	shell_rearm_rx();
+	uart_console_window_probe("w3-post-recv");
 	if (Driver_USART_Console.Control(ARM_USART_CONTROL_RX, 1U) != ARM_DRIVER_OK) {
 		return -1;
 	}

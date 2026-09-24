@@ -29,11 +29,11 @@
 #include "usb.h"
 #include "usbh_core.h"
 #include "usbh_hub.h"
-#ifdef USBH_HCD_XHCI
-#include "usbh_xhci_glue.h"
-#include "usb_hc_xhci.h"
-#else
 #include "usb_hc_ehci.h"
+#include "usbh_platform.h"
+#ifdef CONFIG_USBHOST_MULTI_HCD
+#include "xhci/usbh_xhci_glue.h"
+#include "xhci/usb_hc_xhci.h"
 #endif
 #include "usb_board.h"
 
@@ -161,7 +161,6 @@ static void usbh_bus_event(uint8_t busid, uint8_t hub_index, uint8_t hub_port,
 
 /* --- start path ------------------------------------------------------------ */
 
-#ifndef USBH_HCD_XHCI
 /* KI-006: manufacture the connect-change edge for pre-plugged root ports,
  * seed the roothub change bits, and wake the hub thread (which is blocked
  * on its queue with nothing pending right after usb_hc_init). */
@@ -200,9 +199,8 @@ static void usbh_ehci_post_init(struct usbh_bus *bus)
 			    bus->hcd.roothub.int_buffer[0]);
 	usbh_hub_thread_wakeup(&bus->hcd.roothub);
 }
-#endif /* !USBH_HCD_XHCI */
 
-#ifdef USBH_HCD_XHCI
+#ifdef CONFIG_USBHOST_MULTI_HCD
 /* xHCI flavour: no KI-006 power-cycle kick (the driver's own init already
  * powers the ports with the read-back retry), just seed the roothub change
  * bits for ports that already carry a device and wake the hub thread. The
@@ -233,47 +231,88 @@ static void usbh_xhci_post_init(struct usbh_bus *bus)
 }
 
 /* Hot-plug watchdog (task side, per the D36 division: the ISR only records
- * events, waking stays a task-context operation). Polls the driver's port
- * event sequence - NOT the roothub_intbuf, which the stack never clears and
- * whose leftovers would re-trigger enumeration forever - and wakes the hub
- * thread whenever a new Port Status Change event has arrived since the last
- * poll. Runs at BelowNormal so it never competes with real work. */
+ * events, waking stays a task-context operation). Polls each xHCI instance's
+ * port event sequence - NOT the roothub_intbuf, which the stack never clears
+ * and whose leftovers would re-trigger enumeration forever - and wakes the
+ * hub thread whenever a new Port Status Change event has arrived since the
+ * last poll. Runs at BelowNormal so it never competes with real work. */
 static void usbh_xhci_hotplug_watchdog(void)
 {
 	static uint32_t last_seq[USBH_XHCI_NUM];
 	static bool seeded;
-	uint8_t busid;
+	uint8_t i;
 
-	for (busid = 0U; busid < USBH_XHCI_NUM; busid++) {
+	for (i = 0U; i < USBH_XHCI_NUM; i++) {
+		uint8_t busid = (uint8_t)(USBH_XHCI0_BUSID + i);
 		uint32_t seq = usbh_xhci_port_evt_seq(busid);
 
 		if (!seeded) {
 			/* First pass: events up to here were already handed to
 			 * the hub thread by usbh_xhci_post_init. */
-			last_seq[busid] = seq;
-		} else if (seq != last_seq[busid]) {
-			last_seq[busid] = seq;
+			last_seq[i] = seq;
+		} else if (seq != last_seq[i]) {
+			last_seq[i] = seq;
 			usbh_hub_thread_wakeup(&g_usbhost_bus[busid].hcd.roothub);
 		}
 	}
 	seeded = true;
 }
-#endif
+#endif /* CONFIG_USBHOST_MULTI_HCD */
 
-/* One bus: initialize the stack, wait for the hub thread's usb_hc_init() to
- * reach the end, then run the pre-plugged-device seed. Returns 0 when the
- * controller is live. */
-#ifdef USBH_HCD_XHCI
+/* One bus: initialize the stack (and register the bus's HCD ops before the
+ * hub thread can run usb_hc_init), wait for that init to reach the end, then
+ * run the pre-plugged-device seed. Returns 0 when the controller is live. */
+#ifdef CONFIG_USBHOST_MULTI_HCD
 static int usbh_bus_start(uint8_t busid)
 {
 	struct usbh_bus *bus = &g_usbhost_bus[busid];
 	uint32_t i;
 
-	if ((int)busid >= (int)USBH_XHCI_NUM) {
-		return -1;
+	if (USBH_BUS_IS_EHCI(busid)) {
+		struct ehci_hcd *hcd = &g_ehci_hcd[busid];
+
+		/* Register BEFORE usbh_initialize: on SMP the hub thread can
+		 * start running (its entry calls usb_hc_init through the
+		 * dispatcher) the moment the thread exists. usbh_hcd_register
+		 * only writes the static bus slot, it needs nothing from
+		 * usbh_initialize. */
+		usbh_hcd_register(busid, &usbh_ehci_ops);
+		if (usbh_initialize(busid, USBH_EHCI_BASE(busid),
+				    usbh_bus_event) != 0) {
+			return -1;
+		}
+
+		/* hcor_offset is read from the capability block mid-init; only
+		 * then does an HCOR access (usbintr below) hit the operational
+		 * frame. */
+		for (i = 0U; i < 300U; i++) {
+			if (hcd->hcor_offset != 0U) {
+				break;
+			}
+			usb_osal_msleep(10);
+		}
+		for (i = 0U; i < 300U; i++) {
+			if (EHCI_HCOR->usbintr != 0U) {
+				break;
+			}
+			usb_osal_msleep(10);
+		}
+		if (EHCI_HCOR->usbintr == 0U) {
+			usbh_console_printf("usbh: bus%u hc init timeout\r\n",
+					    busid);
+			return -1;
+		}
+
+		usbh_ehci_post_init(bus);
+		return 0;
 	}
 
-	if (usbh_initialize(busid, USBH_XHCI0_BASE, usbh_bus_event) != 0) {
+	if (USBH_XHCI_INST(busid) >= USBH_XHCI_NUM) {
+		return -1;
+	}
+	/* Register before initialize - same SMP ordering as the EHCI branch. */
+	usbh_hcd_register(busid, &usbh_xhci_ops);
+	if (usbh_initialize(busid, USBH_XHCI_BASE(busid), usbh_bus_event) != 0) {
 		return -1;
 	}
 
@@ -345,8 +384,35 @@ int usb_start(void)
 	}
 	started = true;
 
-#ifdef USBH_HCD_XHCI
-	for (busid = 0U; busid < USBH_XHCI_NUM; busid++) {
+#ifdef THREADX_BUILD
+	/* The ThreadX osal carries its own byte pool and self-delete reaper;
+	 * they must exist before the first usb_osal_* allocation below. The
+	 * FreeRTOS osal has no init step. Same kernel-boundary ifdef as the
+	 * banner in main.c. Upstream declares no prototype for this - it is
+	 * the integrator's side of the osal. */
+	extern void usb_osal_init(uint8_t *mem, uint32_t mem_size);
+
+	usb_osal_init(NULL, 0U);
+#endif
+
+	/* Bring the whole USB domain up HERE, in task context, before any hub
+	 * thread exists: both domain sequences carry SRST pulses (con14 resets
+	 * BOTH EHCI roots, con9 the DWC3 cores), and on SMP the four hub
+	 * threads race these once-guards on different cores. Measured
+	 * 20260922-R1: the xHCI domain's con14 pulse landed after both EHCI
+	 * roots had already inited and been kicked - the panel hubs went
+	 * permanently silent (no IRQ, no enumeration, and no error anywhere:
+	 * the roothub just reads back reset values). Running every domain to
+	 * completion first puts all pulses ahead of all controller inits, and
+	 * turns the low_level_init domain calls in the hub threads into
+	 * no-ops. Order inside this block is the NetBSD one (usb2phy1's
+	 * release-only writes never assert anything the xHCI side owns). */
+	usbh_rk3568_usb2phy1_domain_init();
+	usbh_rk3568_usb3otg_domain_init(0U);
+	usbh_rk3568_usb3otg_domain_init(1U);
+
+#ifdef CONFIG_USBHOST_MULTI_HCD
+	for (busid = 0U; busid < (USBH_EHCI_NUM + USBH_XHCI_NUM); busid++) {
 #else
 	for (busid = 0U; busid < USBH_EHCI_NUM; busid++) {
 #endif
@@ -357,13 +423,12 @@ int usb_start(void)
 		}
 	}
 
-#ifdef USBH_HCD_XHCI
+#ifdef CONFIG_USBHOST_MULTI_HCD
 	if (fails == 0) {
 		/* Stay resident as the hot-plug watchdog: the xHCI ISR only
 		 * records port events, so without this loop a device plugged
 		 * in after boot would never reach the hub thread. The EHCI
-		 * flavour returns instead - its ISR wakes the hub thread
-		 * directly. */
+		 * ISRs wake the hub thread directly. */
 		for (;;) {
 			usbh_xhci_hotplug_watchdog();
 			usb_osal_msleep(100U);

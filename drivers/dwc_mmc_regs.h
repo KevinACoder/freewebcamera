@@ -73,6 +73,18 @@
 #define DWMMC_MINTSTS_OFFSET		0x040U
 #define DWMMC_RINTSTS_OFFSET		0x044U
 #define DWMMC_STATUS_OFFSET		0x048U
+
+/* Rockchip extensions (dw_mmc-rockchip SDMMC_TIMING_CON0/1): the card
+ * clock drive/sample phases, HIWORD-encoded like the CRU (value bits
+ * [10:1], write-enable bits [26:17]). Ground truth = the vendor kernel's
+ * dw_mmc-rockchip.c set_ios: drive 90 degrees, sample 0 degrees
+ * (rk356x.dtsi carries no default-sample-phase). */
+#define DWMMC_TIMING_CON0_OFFSET	0x130U
+#define DWMMC_TIMING_CON1_OFFSET	0x134U
+#define DWMMC_TIMING_HIWORD(raw)					\
+	((((uint32_t) (raw) & 0x7ffu) << 1) | (0x7ffu << 17))
+#define DWMMC_TIMING_CON_DRIVE_90	DWMMC_TIMING_HIWORD(1u)
+#define DWMMC_TIMING_CON_SAMPLE_0	DWMMC_TIMING_HIWORD(0u)
 #define DWMMC_FIFOTH_OFFSET		0x04CU
 #define DWMMC_CDETECT_OFFSET		0x050U
 #define DWMMC_WRTPRT_OFFSET		0x054U
@@ -187,6 +199,11 @@
 #define DWMMC_IDMAC_INT_CES		(1u << 5)
 #define DWMMC_IDMAC_INT_NI		(1u << 8)
 #define DWMMC_IDMAC_INT_AI		(1u << 9)
+/* fatal IDMAC status: fatal bus error, descriptor unavailable, card
+ * error summary, abnormal interrupt */
+#define DWMMC_IDMAC_ERR_FLAGS \
+	(DWMMC_IDMAC_INT_FBE | DWMMC_IDMAC_INT_DU | \
+	 DWMMC_IDMAC_INT_CES | DWMMC_IDMAC_INT_AI)
 
 /* 4 KiB per descriptor, burst up to 0x1fff. */
 #define DWMMC_DMA_DESC_MAX_DATA_LEN	0x1000U
@@ -225,10 +242,16 @@ static inline bool dwc_mmc_card_exists(uintptr_t base_addr)
 	return (0U == (DWMMC_READ_REG(base_addr, DWMMC_CDETECT_OFFSET) & 0x1U));
 }
 
-/* Clear all raw interrupt state (write-one-clear). */
+/* Clear all raw interrupt state (write-one-clear) EXCEPT the SDIO card
+ * interrupt (bit 16): a pending card interrupt must survive pre-transfer
+ * clears, or the DAT1 level would be silently swallowed between frames
+ * (M11 r4 interrupt mode). */
+#define DWMMC_RINTSTS_CLEAR_ALL	\
+	(DWMMC_INTMSK_ALL & ~(uint32_t)DWMMC_INTMSK_SDIO_INT)
+
 static inline void dwc_mmc_clear_interrupt_status(uintptr_t base_addr)
 {
-	DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET, DWMMC_INTMSK_ALL);
+	DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET, DWMMC_RINTSTS_CLEAR_ALL);
 	DWMMC_WRITE_REG(base_addr, DWMMC_IDSTS_OFFSET, 0xFFFFFFFFU);
 }
 

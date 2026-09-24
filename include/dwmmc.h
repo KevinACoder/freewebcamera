@@ -50,6 +50,12 @@ enum {
 	DWMMC_EVT_DATA_ERROR,
 	DWMMC_EVT_DATA_READ_DONE,
 	DWMMC_EVT_DATA_WRITE_DONE,
+	/* SDIO card interrupt (RINTSTS bit 16, the DAT1 line). The handler
+	 * runs in ISR context: wake a worker and nothing more - the bus is
+	 * not touchable here. The ISR self-masks the bit; the consumer
+	 * re-arms it through dwc_mmc_set_interrupt_mask once the chip-side
+	 * source has been consumed. */
+	DWMMC_EVT_SDIO_INT,
 
 	DWMMC_EVT_NUM
 };

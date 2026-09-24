@@ -30,22 +30,34 @@
 #include "usb_hc_ehci.h"
 #include "usbh_platform.h"
 #include "usb_board.h"
+#ifdef CONFIG_USBHOST_MULTI_HCD
+#include "xhci/usbh_xhci_glue.h"
+#endif
 
 static const uint32_t s_ehci_irq[USBH_EHCI_NUM] = {
 	USBH_EHCI0_IRQ,
 	USBH_EHCI1_IRQ,
 };
 
+/* In the multi-HCD build the drivers' USBH_IRQHandler symbols are renamed
+ * (usbh_ehci_irq/usbh_xhci_irq) and the ops tables carry the irq pointers;
+ * route through the table so this file never needs the renamed names. */
+#ifdef CONFIG_USBHOST_MULTI_HCD
+#define EHCI_IRQ_DISPATCH(busid)	usbh_ehci_ops.irq(busid)
+#else
+#define EHCI_IRQ_DISPATCH(busid)	USBH_IRQHandler(busid)
+#endif
+
 /* The CMSIS irq_ctrl handler carries no argument, so each bus gets its own
  * trampoline closing over the busid. */
 static void usbh_ehci0_isr(void)
 {
-	USBH_IRQHandler(0U);
+	EHCI_IRQ_DISPATCH(0U);
 }
 
 static void usbh_ehci1_isr(void)
 {
-	USBH_IRQHandler(1U);
+	EHCI_IRQ_DISPATCH(1U);
 }
 
 static void (*const s_ehci_isr[USBH_EHCI_NUM])(void) = {
@@ -55,10 +67,19 @@ static void (*const s_ehci_isr[USBH_EHCI_NUM])(void) = {
 
 /* Called from the vendored usb_hc_init() with the registers still reset:
  * bring up the shared PHY domain and arm the interrupt line. The register
- * base itself was set by usbh_initialize() before this runs. */
+ * base itself was set by usbh_initialize() before this runs. Both driver
+ * ports call this one symbol, so in the multi-HCD build it dispatches by
+ * busid - the EHCI branch below, or the xHCI glue's hooks. */
 void usb_hc_low_level_init(struct usbh_bus *bus)
 {
 	uint32_t irq_num;
+
+#ifdef CONFIG_USBHOST_MULTI_HCD
+	if (USBH_BUS_IS_XHCI(bus->busid)) {
+		usbh_xhci_low_level_init(bus);
+		return;
+	}
+#endif
 
 	if ((uint32_t)bus->busid >= USBH_EHCI_NUM) {
 		return;
@@ -74,6 +95,17 @@ void usb_hc_low_level_init(struct usbh_bus *bus)
 			      BOARD_IRQ_PRIORITY_API_CALL_RAW);
 	(void)IRQ_Enable((IRQn_ID_t)irq_num);
 }
+
+#ifdef CONFIG_USBHOST_MULTI_HCD
+/* Multi-HCD dispatch twin: the xHCI glue needs a deinit of its own (IRQ
+ * down, alive-flag off), the EHCI side stays the vendored weak no-op. */
+void usb_hc_low_level_deinit(struct usbh_bus *bus)
+{
+	if (USBH_BUS_IS_XHCI(bus->busid)) {
+		usbh_xhci_low_level_deinit(bus);
+	}
+}
+#endif
 
 /* Called after HCRESET, before the schedules start: publish the real root
  * port count (from HCSPARAMS) into the roothub, which usbh_hub_initialize

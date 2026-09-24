@@ -155,12 +155,13 @@ static void eqos_dev_name(const struct dwc_eqos_dev *dev, char *out, unsigned in
 	(void)snprintf(out, size, "gmac%u", dev->plat->index);
 }
 
-/* Serialize against the other contexts that touch the rings: the completion
- * sweeps run in the interrupt and in the watchdog timer (a thread), while
- * SendFrame/ReadFrame run in the caller's thread. Masking the port's own
- * interrupt covers interrupt-vs-thread; the mutex covers thread-vs-thread.
- * Masking only this port's line is enough because nothing else in the system
- * touches these rings. */
+/* Serialize every context that touches the rings - which, since the SMP
+ * bring-up, means EVERY thread path and NOTHING else: the interrupt handler
+ * only reads latched status and raises events, so the mutex is the whole
+ * arbitration story and holds on four cores as it did on one. Masking the
+ * port's own line across the critical window is no longer load-bearing for
+ * correctness; it just keeps our own interrupt from firing mid-sweep and
+ * costing an extra trip through the handler. */
 static void eqos_lock(struct dwc_eqos_dev *dev)
 {
 	(void)osMutexAcquire(dev->lock, osWaitForever);
@@ -558,7 +559,8 @@ static int eqos_stage_put(struct dwc_eqos_dev *dev, const uint8_t *buf, unsigned
  * The sweep walks the whole ring: once the DMA's fetch pointer reaches END it
  * wraps to the ring base, so writebacks land wherever the next frame went, not
  * at a moving head. Nowhere in here is a slot left un-owned (see the file
- * header). Callable from the interrupt and from the watchdog. */
+ * header). Callable only from locked thread context: the receive thread's
+ * GetRxFrameSize sweep and the watchdog timer. */
 static int eqos_rx_complete(struct dwc_eqos_dev *dev)
 {
 	int delivered = 0;
@@ -602,8 +604,8 @@ static int eqos_rx_complete(struct dwc_eqos_dev *dev)
 	return delivered;
 }
 
-/* Release descriptors the DMA has finished with. Callable from the interrupt
- * and from the watchdog. */
+/* Release descriptors the DMA has finished with. Callable only from locked
+ * thread context: SendFrame's window and the watchdog timer. */
 static int eqos_tx_complete(struct dwc_eqos_dev *dev)
 {
 	int freed = 0;
@@ -634,12 +636,11 @@ static int eqos_tx_complete(struct dwc_eqos_dev *dev)
 	return freed;
 }
 
-/* Belt and braces. Receiving is interrupt-driven and the sweep heals itself on
- * the next interrupt, but a lost interrupt with no further traffic would leave
- * frames staged-but-unannounced, and a transmit ring waiting on a completion
- * that never came would stay full. Runs in the timer task, i.e. a thread, so it
- * takes the same lock the API calls do and raises no event (events come from
- * the interrupt, where the adapter expects an ISR-safe wakeup). */
+/* Belt and braces. The sweeps run in thread context now (see
+ * dwc_eqos_irq); this 100 ms timer re-runs them for the two cases events
+ * cannot cover: a lost interrupt with no further traffic, and a DMA left
+ * waiting on a slot. Runs in the timer task, i.e. a thread, so it takes
+ * the same lock the API calls do and raises no event. */
 static void eqos_watchdog(void *argument)
 {
 	struct dwc_eqos_dev *dev = argument;
@@ -687,8 +688,16 @@ void dwc_eqos_irq(unsigned int index)
 			return;
 		}
 
-		delivered = (status & DWC_EQOS_CH0_STATUS_RI) ? eqos_rx_complete(dev) : 0;
-		freed = (status & DWC_EQOS_CH0_STATUS_TI) ? eqos_tx_complete(dev) : 0;
+		/* Single-core days this handler swept the rings itself; on
+		 * SMP the sweep would run on a foreign core against a thread
+		 * holding the mutex - a race the mask in eqos_lock cannot
+		 * cover. The handler now only reports the latched bits; the
+		 * sweeps run where the mutex lives (GetRxFrameSize for RX,
+		 * SendFrame and the watchdog for TX). The event still fires
+		 * on the same interrupt, so delivery latency is unchanged;
+		 * the frame just reaches the staging ring one hop later. */
+		delivered = (status & DWC_EQOS_CH0_STATUS_RI) ? 1 : 0;
+		freed = (status & DWC_EQOS_CH0_STATUS_TI) ? 1 : 0;
 
 		/* The CMSIS contract allows events from interrupt context, and
 		 * the adapter's handler is ISR-safe by construction (thread
@@ -909,6 +918,10 @@ int32_t dwc_eqos_send_frame(unsigned int index, const uint8_t *frame, uint32_t l
 		int next;
 
 		eqos_lock(dev);
+		/* Reap completions in-window (see dwc_eqos_irq): the ring
+		 * cannot drain from the interrupt anymore, and waiting for
+		 * the 100 ms watchdog would throttle throughput. */
+		(void)eqos_tx_complete(dev);
 		cur = dev->tx_head;
 		next = (cur + 1) % DWC_EQOS_TX_DESC_COUNT;
 		if (next != dev->tx_tail) {
@@ -974,6 +987,11 @@ uint32_t dwc_eqos_get_rx_frame_size(unsigned int index)
 	dev = &devs[index];
 
 	eqos_lock(dev);
+	/* The sweep lives here rather than in the interrupt (see dwc_eqos_irq):
+	 * every size query first claims writebacks, so the receive thread's
+	 * event-driven polls and its 20 ms fallback drive the ring with the
+	 * mutex held. */
+	(void)eqos_rx_complete(dev);
 	if (dev->rx_stage_head == dev->rx_stage_tail) {
 		len = 0;
 	} else {

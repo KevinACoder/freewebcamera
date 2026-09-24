@@ -42,7 +42,11 @@ void usb_osal_thread_schedule_other(void)
 
 usb_osal_sem_t usb_osal_sem_create(uint32_t initial_count)
 {
-    return (usb_osal_sem_t)xSemaphoreCreateCounting(1, initial_count);
+    /* max 1 would drop every give past the first: callers such as the
+     * usbdi completion ring give once per completed transfer, and a
+     * batch of completions must each wake the worker.  Match the
+     * unbounded counting semantics of the other OS ports. */
+    return (usb_osal_sem_t)xSemaphoreCreateCounting(0xFFFFU, initial_count);
 }
 
 usb_osal_sem_t usb_osal_sem_create_counting(uint32_t max_count)

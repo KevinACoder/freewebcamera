@@ -208,6 +208,16 @@ static int dwc_mmc_clock_update(struct dwc_mmc *inst, uint32_t clk_div)
 		cmd_bits |= DWMMC_CMD_VOLT_SWITCH;
 	}
 
+	/* Rockchip drive/sample phases, the vendor-kernel set_ios values
+	 * (drive 90deg for hold time, sample 0deg - rk356x.dtsi sets no
+	 * default-sample-phase). M11 board round 2: CMD53 data ran DCRC
+	 * storms at HS50 until these were programmed - the sdmmc0 data
+	 * phase had never been driven before. */
+	DWMMC_WRITE_REG(base_addr, DWMMC_TIMING_CON0_OFFSET,
+			DWMMC_TIMING_CON_DRIVE_90);
+	DWMMC_WRITE_REG(base_addr, DWMMC_TIMING_CON1_OFFSET,
+			DWMMC_TIMING_CON_SAMPLE_0);
+
 	/* 1) stop all clocks */
 	DWMMC_WRITE_REG(base_addr, DWMMC_CLKENA_OFFSET, 0);
 	DWMMC_WRITE_REG(base_addr, DWMMC_CMD_OFFSET, cmd_bits | DWMMC_CMD_START);
@@ -685,19 +695,24 @@ static int dwc_mmc_send_command(uintptr_t base_addr, struct dwc_mmc_cmd *cmd_p)
 			    mask,
 			    DWMMC_READ_REG(base_addr, DWMMC_MINTSTS_OFFSET),
 			    DWMMC_READ_REG(base_addr, DWMMC_INTMASK_OFFSET));
-		DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET, mask);
+		/* never W1C the SDIO card-interrupt bit from thread context:
+		 * the DAT1 level belongs to the ISR/consumer pair */
+		DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET,
+				mask & ~DWMMC_INTMSK_SDIO_INT);
 		return DWMMC_ERR_TIMEOUT;
 	}
 
 	if (mask & DWMMC_INTMSK_RTO) {
 		DWMMC_INFO("CMD %u response timeout (expected for CMD55)", cmd_p->cmdidx);
-		DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET, mask);
+		DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET,
+				mask & ~DWMMC_INTMSK_SDIO_INT);
 		return DWMMC_ERR_TIMEOUT;
 	}
 
 	if (mask & DWMMC_INTMSK_RE) {
 		DWMMC_ERROR("CMD %u response error", cmd_p->cmdidx);
-		DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET, mask);
+		DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET,
+				mask & ~DWMMC_INTMSK_SDIO_INT);
 		return DWMMC_ERR_CMD_FAILED;
 	}
 
@@ -788,6 +803,13 @@ static int dwc_mmc_prepare_dma(struct dwc_mmc *inst, struct dwc_mmc_cmd *cmd_p)
 	if (0U != (cmd_p->flag & DWMMC_CMD_FLAG_WRITE_DATA)) {
 		board_dcache_flush(buf_bus, dat_p->datalen);
 	}
+	/* a read transfer hands the buffer to the device the other way:
+	 * drop the CPU's lines covering it before the doorbell so no
+	 * dirty line evicted during the DMA window can write back over
+	 * the incoming data (M11 r3: block-mode CMD53 corruption) */
+	if (0U != (cmd_p->flag & DWMMC_CMD_FLAG_READ_DATA)) {
+		board_dcache_invalidate(buf_bus, dat_p->datalen);
+	}
 
 	/* FIFO reset and wait for self-clear */
 	DWMMC_WRITE_REG(base_addr, DWMMC_CTRL_OFFSET, DWMMC_CTRL_FIFO_RESET);
@@ -799,6 +821,17 @@ static int dwc_mmc_prepare_dma(struct dwc_mmc *inst, struct dwc_mmc_cmd *cmd_p)
 
 	/* descriptor list base address */
 	DWMMC_WRITE_REG(base_addr, DWMMC_DBADDR_OFFSET, (uint32_t)desc_bus);
+
+	/* clear stale IDMAC status, then arm the IDMAC status enables: on
+	 * this IP the IDSTS completion/error bits do not post unless the
+	 * matching IDINTEN bits are set (NetBSD writes IDIE before its
+	 * wait, Linux dw_mci_idmac_init likewise - poll mode read RI
+	 * without ever arming it and saw nothing but zeroes) */
+	DWMMC_WRITE_REG(base_addr, DWMMC_IDSTS_OFFSET, DWMMC_INTMSK_ALL);
+	DWMMC_WRITE_REG(base_addr, DWMMC_IDINTEN_OFFSET,
+			DWMMC_IDMAC_INT_RI | DWMMC_IDMAC_INT_TI |
+			DWMMC_IDMAC_INT_NI | DWMMC_IDMAC_INT_AI |
+			DWMMC_IDMAC_ERR_FLAGS);
 
 	/* CTRL: enable IDMAC + DMA (INT_ENABLE must ride along - the FIFO
 	 * reset clears it) */
@@ -818,26 +851,64 @@ static int dwc_mmc_prepare_dma(struct dwc_mmc *inst, struct dwc_mmc_cmd *cmd_p)
 	return DWMMC_SUCCESS;
 }
 
+/* Wait for the IDMAC to close the last descriptor of a read transfer:
+ * DTO only means the controller consumed the wire data - the FIFO-to-RAM
+ * drain trails it. RI is the bit NetBSD's dwc_mmc ISR waits on. */
+static int dwc_mmc_wait_idmac_rx(uintptr_t base_addr)
+{
+	uint32_t idsts = 0U;
+	uint32_t loop = DWMMC_DATA_TIMEOUT_MS;
+
+	do {
+		idsts = DWMMC_READ_REG(base_addr, DWMMC_IDSTS_OFFSET);
+
+		if (0U != (idsts & DWMMC_IDMAC_ERR_FLAGS)) {
+			DWMMC_ERROR("IDMAC error: 0x%x", idsts);
+			break;
+		}
+		if (0U != (idsts & DWMMC_IDMAC_INT_RI)) {
+			DWMMC_WRITE_REG(base_addr, DWMMC_IDSTS_OFFSET,
+					DWMMC_INTMSK_ALL);
+			return DWMMC_SUCCESS;
+		}
+
+		dwc_udelay(100);
+	} while (--loop);
+
+	DWMMC_ERROR("IDMAC receive not complete (idsts=0x%x)", idsts);
+	DWMMC_WRITE_REG(base_addr, DWMMC_IDSTS_OFFSET, DWMMC_INTMSK_ALL);
+	return DWMMC_ERR_TIMEOUT;
+}
+
 static int dwc_mmc_wait_data_over(uintptr_t base_addr, struct dwc_mmc_cmd *cmd_p)
 {
 	uint32_t mask;
 	uint32_t loop = DWMMC_DATA_TIMEOUT_MS;
+	int ret;
 
 	do {
 		mask = DWMMC_READ_REG(base_addr, DWMMC_RINTSTS_OFFSET);
 
 		if (mask & (DWMMC_DATA_ERR_FLAGS | DWMMC_DATA_TOUT_FLAGS)) {
 			DWMMC_ERROR("CMD %u data error: 0x%x", cmd_p->cmdidx, mask);
-			DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET, mask);
+			DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET,
+					mask & ~DWMMC_INTMSK_SDIO_INT);
 			DWMMC_WRITE_REG(base_addr, DWMMC_IDSTS_OFFSET, 0xFFFFFFFFU);
 			return DWMMC_ERR_DATA_FAILED;
 		}
 
 		if (mask & DWMMC_INTMSK_DTO) {
-			DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET, mask);
-			/* a read transfer just wrote through RAM: drop the
-			 * stale lines before the consumer looks at the data */
+			DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET,
+					mask & ~DWMMC_INTMSK_SDIO_INT);
 			if (0U != (cmd_p->flag & DWMMC_CMD_FLAG_READ_DATA)) {
+				ret = dwc_mmc_wait_idmac_rx(base_addr);
+				if (DWMMC_SUCCESS != ret) {
+					return ret;
+				}
+				/* drop this core's stale copies before the
+				 * consumer reads: pre-DMA invalidation ran on
+				 * whatever core armed the transfer, the
+				 * consumer may resume on another one */
 				board_dcache_invalidate(
 					(uintptr_t)cmd_p->data_p->buf,
 					cmd_p->data_p->datalen);
@@ -849,7 +920,8 @@ static int dwc_mmc_wait_data_over(uintptr_t base_addr, struct dwc_mmc_cmd *cmd_p
 	} while (--loop);
 
 	DWMMC_ERROR("CMD %u data timeout", cmd_p->cmdidx);
-	DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET, mask);
+	DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET,
+			mask & ~DWMMC_INTMSK_SDIO_INT);
 	return DWMMC_ERR_TIMEOUT;
 }
 
@@ -1029,6 +1101,30 @@ void dwc_mmc_interrupt_handler(void *param)
 	dwc_mmc_event_handler_t handler;
 
 	status = DWMMC_READ_REG(base_addr, DWMMC_RINTSTS_OFFSET);
+
+	/* poll-transfer + SDIO-interrupt shape (M11 r4): the data path is
+	 * polled by its owning thread, which also clears RINTSTS/IDSTS as
+	 * it goes. The only event that may legally fire here is the SDIO
+	 * card interrupt - touching anything else (a mid-flight CMD53's
+	 * IDMAC RI, a CDONE/DTO the poll loop is about to consume) stops
+	 * live DMA or steals its completion bits and hangs every transfer.
+	 * The board showed exactly that: arm SDIO_INT and every CMD53
+	 * times out. */
+	if (DWMMC_READ_REG(base_addr, DWMMC_INTMASK_OFFSET) ==
+	    DWMMC_INTMSK_SDIO_INT) {
+		if (status & DWMMC_INTMSK_SDIO_INT) {
+			dwc_mmc_set_interrupt_mask(inst, DWMMC_INTMSK_SDIO_INT,
+						   false);
+			handler = inst->evt_handler[DWMMC_EVT_SDIO_INT];
+			if (handler != NULL) {
+				handler(inst->evt_args[DWMMC_EVT_SDIO_INT]);
+			}
+			DWMMC_WRITE_REG(base_addr, DWMMC_RINTSTS_OFFSET,
+					DWMMC_INTMSK_SDIO_INT);
+		}
+		return;
+	}
+
 	dma_status = DWMMC_READ_REG(base_addr, DWMMC_IDSTS_OFFSET);
 
 	if (status & DWMMC_INTMSK_CDONE) {
@@ -1103,6 +1199,19 @@ void dwc_mmc_interrupt_handler(void *param)
 			if (handler != NULL) {
 				handler(inst->evt_args[DWMMC_EVT_DATA_ERROR]);
 			}
+		}
+	}
+
+	if (status & DWMMC_INTMSK_SDIO_INT) {
+		/* SDIO card interrupt (DAT1): self-mask first so a level-held
+		 * DAT1 cannot storm the GIC while the consumer works; the
+		 * consumer re-arms via dwc_mmc_set_interrupt_mask once it
+		 * has consumed the chip-side source. The upcall must only
+		 * wake a worker - ISR context, the bus is untouchable. */
+		dwc_mmc_set_interrupt_mask(inst, DWMMC_INTMSK_SDIO_INT, false);
+		handler = inst->evt_handler[DWMMC_EVT_SDIO_INT];
+		if (handler != NULL) {
+			handler(inst->evt_args[DWMMC_EVT_SDIO_INT]);
 		}
 	}
 

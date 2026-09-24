@@ -83,6 +83,33 @@ extern unsigned long usb_hc_get_register_base(uint32_t id);
 extern void usb_hc_enable_interrupt(uint32_t id);
 extern void usb_hc_disable_interrupt(uint32_t id);
 
+#ifdef CONFIG_USBHOST_MULTI_HCD
+/* Multi-HCD build: rename this port's global entry points so it can link
+ * alongside the EHCI port in one image; usbh_core.c dispatches per bus
+ * through usbh_xhci_ops. The renames sit after the includes on purpose -
+ * the declarations above then double as prototypes for the new names, and
+ * usbh_core.h's "#ifdef USBH_IRQHandler #error" guard has already been
+ * evaluated. Function bodies below are untouched. */
+#define usb_hc_init            usbh_xhci_hc_init
+#define usb_hc_deinit          usbh_xhci_hc_deinit
+#define usbh_get_frame_number  usbh_xhci_get_frame_number
+#define usbh_roothub_control   usbh_xhci_roothub_control
+#define usbh_submit_urb        usbh_xhci_submit_urb
+#define usbh_kill_urb          usbh_xhci_kill_urb
+#define USBH_IRQHandler        usbh_xhci_irq
+
+/* Prototypes for the renamed names: the declarations in usb_hc.h were
+ * parsed under the old names before these macros existed, and the ops
+ * table below needs the real types in scope. */
+int usbh_xhci_hc_init(struct usbh_bus *bus);
+int usbh_xhci_hc_deinit(struct usbh_bus *bus);
+uint16_t usbh_xhci_get_frame_number(struct usbh_bus *bus);
+int usbh_xhci_roothub_control(struct usbh_bus *bus, struct usb_setup_packet *setup, uint8_t *buf);
+int usbh_xhci_submit_urb(struct usbh_urb *urb);
+int usbh_xhci_kill_urb(struct usbh_urb *urb);
+void usbh_xhci_irq(uint8_t busid);
+#endif
+
 /* ===================== 常量 ===================== */
 /* NetBSD: XHCI_MAX_DCI 31, 命令/事件环 256 TRB(TRB 数经 usb_config.h 可调),
  * 传输环 256 TRB。DCI 编码即 xHCI spec §4.5.2: ep0=1, OUT n=2n, IN n=2n+1。 */
@@ -175,14 +202,14 @@ struct xhci_hcd {
     uint64_t *dcbaa;
     struct xhci_dev devs[XHCI_MAX_SLOTS];
     uint8_t port_slot[8];
+    /* 端口事件序号: ISR 每吞掉一个 Port Status Change 事件加一。适配层的
+     * 热插拔看门狗轮询它决定是否唤醒 hub 线程(vendored 的 roothub_intbuf
+     * 永不清零, 缓冲内容区分不了"已处理"与"新事件", 序号可以)。
+     * per-instance: 双 xHCI 的 ISR 各自递增各自实例的序号。 */
+    volatile uint32_t port_evt_seq;
 };
 
 static struct xhci_hcd g_xhci[CONFIG_USBHOST_MAX_BUS];
-
-/* 端口事件序号: ISR 每吞掉一个 Port Status Change 事件加一。适配层的
- * 热插拔看门狗轮询它决定是否唤醒 hub 线程(vendored 的 roothub_intbuf
- * 永不清零, 缓冲内容区分不了"已处理"与"新事件", 序号可以)。 */
-volatile uint32_t g_xhci_port_evt_seq;
 
 /* ===================== 寄存器访问 ===================== */
 
@@ -1539,7 +1566,7 @@ static void xhci_event_process(struct xhci_hcd *hcd)
             case TRB_TYPE_PORT_STATUS: {
                 uint8_t port = (uint8_t)((ev->dw0 >> 24) & 0xFFU);
 
-                g_xhci_port_evt_seq++;
+                hcd->port_evt_seq++;
                 if (port >= 1U && port <= hcd->num_ports && hcd->bus != NULL) {
                     hcd->bus->hcd.roothub_intbuf[0] |= (uint8_t)(1U << port);
                     /* ISR 内不做 mq 唤醒(SMP 端口 FromISR 路径未验证): 只置
@@ -1766,3 +1793,24 @@ void USBH_IRQHandler(uint8_t busid)
 
     xhci_event_process(hcd);
 }
+
+#ifdef CONFIG_USBHOST_MULTI_HCD
+uint32_t usbh_xhci_port_evt_seq(uint8_t busid)
+{
+	if (busid >= CONFIG_USBHOST_MAX_BUS) {
+		return 0U;
+	}
+	return g_xhci[busid].port_evt_seq;
+}
+
+const struct usbh_hcd_ops usbh_xhci_ops = {
+    .driver_name = "xhci",
+    .hc_init = usbh_xhci_hc_init,
+    .hc_deinit = usbh_xhci_hc_deinit,
+    .get_frame_number = usbh_xhci_get_frame_number,
+    .roothub_control = usbh_xhci_roothub_control,
+    .submit_urb = usbh_xhci_submit_urb,
+    .kill_urb = usbh_xhci_kill_urb,
+    .irq = usbh_xhci_irq,
+};
+#endif

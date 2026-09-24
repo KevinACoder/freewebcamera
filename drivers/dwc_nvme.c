@@ -33,7 +33,7 @@
  *   - PCI access goes through drivers/dwc_pcie.h (config access plus a flat
  *     device list) instead of embox's PCI framework;
  *   - MSI-X is programmed by drivers/dwc_msix.c and the ITS mapping comes from
- *     the board's MSI domain (port/board/common/gicv3_msi.c) through include/msi.h;
+ *     the board's MSI domain (port/aarch64/gicv3_msi.c) through include/msi.h;
  *   - the completion wait is "poll the CQE phase, sleeping one tick between
  *     rounds" with the handler only bumping a counter, instead of embox's
  *     wait queue: this project's ISR-safe wake-up (osThreadFlagsSetFromISR) is
@@ -439,7 +439,10 @@ static int32_t nvme_identify(struct nvme_ctrl *c, uint32_t cns)
 	struct nvme_command cmd = {0};
 
 	cmd.opcode = NVME_OPC_IDENTIFY;
-	cmd.nsid = c->nsid;
+	/* NSID belongs to the namespace identify only: the controller-level
+	 * identify (CNS=1) requires NSID=0, and this SSD's firmware rejects
+	 * NSID=1 there (board-proven 2026-09-21, status 5). */
+	cmd.nsid = (cns == NVME_CNS_NAMESPACE) ? c->nsid : 0U;
 	cmd.prp1 = nvme_va2pa(q->ident);
 	cmd.cdw10 = cns;
 

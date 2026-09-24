@@ -25,12 +25,15 @@
 #define USBH_EHCI1_BASE			0xFD880000UL
 #define USBH_EHCI1_IRQ			165U
 
-/* --- host controllers (xHCI, DWC3 usbhost_dwc3 @ 0xFD000000: the USB3-A
- * socket group, direct root port - no onboard hub; dts GIC_SPI 170 ->
- * INTID +32). xHCI regs sit at +0, DWC3 core globals at +0xC100. The other
- * DWC3 (0xFCC00000, the OTG instance) stays out of scope for now. HS only:
- * the SS lane's combphy serves SATA. Compiled in by `make XHCI=1` (the
- * vendor stack is one-HCD-per-image).
+/* --- host controllers (xHCI, the USB3-A socket group: DWC3 usbhost_dwc3
+ * @ 0xFD000000 (lower socket, "usbhost") and DWC3 otg0 @ 0xFCC00000 (upper
+ * socket, OTG instance forced to host), direct root ports - no onboard hub;
+ * dts GIC_SPI 170/169 -> INTID +32). xHCI regs sit at +0, DWC3 core globals
+ * at +0xC100. HS only: the SS lanes' combphys serve SATA.
+ *
+ * Multi-HCD build (CONFIG_USBHOST_MULTI_HCD): both xHCI instances plus the
+ * two EHCI roots link into one image; busid 0/1 are the EHCI roots, busid
+ * 2/3 the xHCI instances.
  *
  * Firmware/OS division (D38, revising D36): the OS owns the whole USB
  * domain bring-up - the NetBSD rk_usb2phy + dwc3_fdt sequence that is
@@ -38,9 +41,27 @@
  * a cold USB domain). U-Boot's preboot `usb start` state is wiped by the
  * CRU SRST pulse at the head of that sequence, so the image boots into a
  * known controller state regardless of what U-Boot left behind. */
-#define USBH_XHCI_NUM			1U
+#define USBH_XHCI_NUM			2U
 #define USBH_XHCI0_BASE			0xFD000000UL
 #define USBH_XHCI0_IRQ			202U
+#define USBH_XHCI1_BASE			0xFCC00000UL
+#define USBH_XHCI1_IRQ			201U
+
+/* busid layout shared by the adapter, the glues and the platform code. */
+#define USBH_XHCI0_BUSID		(USBH_EHCI_NUM + 0U)
+#define USBH_XHCI1_BUSID		(USBH_EHCI_NUM + 1U)
+#define USBH_BUS_IS_EHCI(id)		((uint32_t)(id) < USBH_EHCI_NUM)
+#define USBH_BUS_IS_XHCI(id)		((uint32_t)(id) >= USBH_EHCI_NUM)
+#define USBH_XHCI_INST(id)		((uint32_t)(id) - USBH_EHCI_NUM)
+
+/* Controller base by busid (bus N == EHCI N; no xHCI in this image). */
+#define USBH_EHCI_BASE(id)		((uintptr_t)((id) == 0U ? \
+					USBH_EHCI0_BASE : USBH_EHCI1_BASE))
+/* Controller base by xHCI busid (2 -> 0xFD000000, 3 -> 0xFCC00000). */
+#define USBH_XHCI_BASE(id)		((uintptr_t)(USBH_XHCI_INST(id) == 0U ? \
+					USBH_XHCI0_BASE : USBH_XHCI1_BASE))
+#define USBH_XHCI_IRQ(id)		((uint32_t)(USBH_XHCI_INST(id) == 0U ? \
+					USBH_XHCI0_IRQ : USBH_XHCI1_IRQ))
 
 /* --- bus/power/clock blocks --- */
 #define USBH_CRU_BASE			0xFDD20000UL
@@ -118,9 +139,5 @@
 /* Helper: a GRF-style write-enable word (field value in low half, the same
  * field bits in the high half acting as the write strobe). */
 #define GRF_WR(bits, val)		(((bits) << 16) | (val))
-
-/* Controller base by busid (bus N == EHCI N; no xHCI in this image). */
-#define USBH_EHCI_BASE(id)		((uintptr_t)((id) == 0U ? \
-					USBH_EHCI0_BASE : USBH_EHCI1_BASE))
 
 #endif /* USB_BOARD_H */

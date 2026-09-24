@@ -31,6 +31,7 @@
 #include "sdio.h"
 #include "shell.h"
 #include "usb.h"
+#include "wlan.h"
 
 /* Image identity: same app builds against either kernel (D39 comparison
  * line). The banner is how the two images are told apart on the console and
@@ -441,6 +442,12 @@ static void task_sdio_start(void *argument)
 	}
 	board_log("sdio: READY\n");
 
+	/* claim the RTL8189FTV for the wlan lane now that the card is up
+	 * (no-op unless wlan_start() already ran; that side probes too) */
+	if (wlan_sdio_probe() != 0) {
+		board_log("wlan: no sdio adapter claimed\n");
+	}
+
 	osThreadTerminate(osThreadGetId());
 }
 
@@ -454,6 +461,21 @@ static void task_sdio_start(void *argument)
 static void task_usb_start(void *argument)
 {
 	(void)argument;
+
+	/* The wlan services (locks, sleeps, firmware registry) must exist
+	 * before enumeration: the CherryUSB class hook attaches a matched
+	 * adapter on the hub thread, inside usb_start(). The radio itself
+	 * stays down until the shell (`wlan scan`) or the supplicant
+	 * (`wpa start`) drives it. */
+	if (wlan_start() != 0) {
+		board_log("wlan: FAIL\n");
+	}
+	/* the SDIO slot may have enumerated before the wlan services came
+	 * up; the probe no-ops until both sides exist (the sdio task also
+	 * probes after sdio_start()) */
+	if (wlan_sdio_probe() != 0) {
+		board_log("wlan: no sdio adapter yet\n");
+	}
 
 	if (usb_start() != 0) {
 		board_log("usb: FAIL\n");
