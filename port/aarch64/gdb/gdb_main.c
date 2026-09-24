@@ -283,13 +283,13 @@ void gdb_trap_loop(struct gdb_trapframe *tf, int signal, const char *reason)
 
 		case 'P': {
 			char *q;
-			char *q0;
-			long regnum = (long)gdb_hex_ul(&buf[1], &q0);
-			unsigned char raw[8];
+			long regnum = (long)gdb_hex_ul(&buf[1], &q);
+			unsigned char raw[8] = { 0 };
+			unsigned int width = regnum == GDB_REG_CPSR ? 4U : 8U;
 			unsigned long v;
 
 			if (regnum < 0 || regnum >= GDB_NREGS || *q != '=' ||
-			    hex2mem(q + 1, raw, 8U) != 8U) {
+			    hex2mem(q + 1, raw, width) != width) {
 				gdb_reply_err(1);
 				break;
 			}
@@ -370,7 +370,7 @@ void gdb_trap_loop(struct gdb_trapframe *tf, int signal, const char *reason)
 		}
 
 		case 'c':
-			gdb_cpu_singlestep_clear();
+			gdb_cpu_singlestep_clear(tf);
 			awaiting_stop = 1;
 			return;
 
@@ -386,7 +386,7 @@ void gdb_trap_loop(struct gdb_trapframe *tf, int signal, const char *reason)
 			 * target resumes clean even if the host never comes
 			 * back. */
 			gdb_cpu_breakpoints_disarm();
-			gdb_cpu_singlestep_clear();
+			gdb_cpu_singlestep_clear(tf);
 			awaiting_stop = 0;
 			gdb_reply_ok();
 			return;

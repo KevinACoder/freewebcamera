@@ -40,6 +40,18 @@
 #include "wlan.h"
 
 volatile int dbg_scenario;
+volatile unsigned long dbg_probe_word;
+
+__attribute__((noinline)) void dbg_probe_breakpoint(void)
+{
+	__asm__ __volatile__("nop" ::: "memory");
+	dbg_probe_word = 0x3568UL;
+}
+
+__attribute__((noinline)) void dbg_probe_step(void)
+{
+	__asm__ __volatile__("nop\n\tnop\n\tnop" ::: "memory");
+}
 
 /* --- scenarios: mirrors of main.c's task bodies --------------------------- */
 
@@ -130,6 +142,12 @@ static void scenario_all(void)
 	board_log("usb: READY\n");
 }
 
+static void scenario_debug_probe(void)
+{
+	dbg_probe_breakpoint();
+	dbg_probe_step();
+}
+
 typedef void (*scenario_fn)(void);
 
 static const scenario_fn scenarios[] = {
@@ -139,6 +157,7 @@ static const scenario_fn scenarios[] = {
 	scenario_usb,	/* 3 */
 	scenario_fs,	/* 4 */
 	scenario_all,	/* 5 */
+	scenario_debug_probe,	/* 6 */
 };
 
 #define SCENARIO_COUNT	((int)(sizeof(scenarios) / sizeof(scenarios[0])))

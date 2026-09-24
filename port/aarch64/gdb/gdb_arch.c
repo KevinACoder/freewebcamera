@@ -5,11 +5,8 @@
  * Register-file layout and the debug-register sequences follow FreeBSD
  * sys/arm64/arm64/gdb_machdep.c and debug_monitor.c (BSD-2, FreeBSD
  * Foundation / Semihalf); the ESR decode and trapframe contract follow the
- * lab's fgdb port (fgdb_arch.c, fgdb_exception.S). All debug resources are
- * the hardware kind: Z0 patches the reserved BRK #GDB_BRK_IMM into RAM
- * text (the only breakpoint class this board's boot chain delivers),
- * Z1 arms DBGBCR/BVR slots and Z2-4 arm DBGWVR/WCR slots (FreeBSD-exact
- * sequences, live where the boot chain delivers debug events).
+ * lab's standalone GDB port. Z0 patches the reserved BRK #GDB_BRK_IMM into
+ * RAM text; Z1 arms DBGBCR/BVR slots and Z2-4 arm DBGWVR/WCR slots.
  *
  * FP/SIMD context does not exist in this image (-mgeneral-regs-only): the
  * target description served to the host (gdb_main.c's target_xml) declares
@@ -46,6 +43,7 @@
 #define MDSCR_MDE	(1UL << 15)
 
 static unsigned long bp_addr[MAX_BP];
+static unsigned int bp_kind[MAX_BP];	/* 0 = BRK patch, 1 = DBGBCR slot */
 static unsigned int bp_enabled;
 static unsigned int bp_count = MAX_BP;
 static unsigned long wp_addr[MAX_WP];
@@ -53,6 +51,11 @@ static unsigned long wp_ctrl[MAX_WP];	/* LSC differs per watchpoint */
 static unsigned int wp_enabled;
 static unsigned int wp_count = MAX_WP;
 static int arch_ready;
+static int step_armed;
+static unsigned long step_saved_daif;
+
+extern unsigned long gdb_boot_entry_el;
+extern unsigned long gdb_boot_mdcr_el2;
 
 /* The trapframe being debugged; gdb_trap_loop's register commands read and
  * write through it. Owned by gdb_debug_interrupt below. */
@@ -185,7 +188,7 @@ static void dbg_sync(void)
 	unsigned int i;
 
 	for (i = 0U; i < bp_count; i++) {
-		if (i < bp_enabled) {
+		if (i < bp_enabled && bp_kind[i] == 1U) {
 			dbgbcr_write(i, DBG_BCR_ENABLE_WORD);
 		} else {
 			dbgbcr_write(i, 0UL);
@@ -216,12 +219,25 @@ static void dbg_sync(void)
 void gdb_arch_setup(void)
 {
 	unsigned long dfr;
+	unsigned long daif;
+	unsigned long auth;
+	unsigned long oslock;
 	unsigned long probe = 0xdeadbeefUL;
 	unsigned int i;
+
+	__asm__ __volatile__("mrs %0, daif" : "=r"(daif));
+	__asm__ __volatile__("mrs %0, dbgauthstatus_el1" : "=r"(auth));
+	__asm__ __volatile__("mrs %0, oslsr_el1" : "=r"(oslock));
+	board_log("gdb: boot EL=%lx MDCR_EL2=%lx DAIF=%lx MDSCR=%lx",
+		  gdb_boot_entry_el, gdb_boot_mdcr_el2, daif, mdscr_read());
+	board_log("gdb: DBGAUTHSTATUS=%lx OSLSR=%lx", auth, oslock);
 
 	/* Clear the OS lock (a bootloader/EL3 may leave it set; a set lock
 	 * makes every debug register access trap). */
 	__asm__ __volatile__("msr oslar_el1, %0" :: "r"(0UL));
+	__asm__ __volatile__("isb" ::: "memory");
+	__asm__ __volatile__("mrs %0, oslsr_el1" : "=r"(oslock));
+	board_log("gdb: OSLSR after unlock=%lx", oslock);
 
 	/* Boot evidence that EL1 HOLDS debug-register state: DBGBCR/BVR
 	 * bits[1:0] are RAZ, so 0xdeadbeef reads back as deadbeec when the
@@ -347,15 +363,28 @@ void gdb_debug_interrupt(struct gdb_trapframe *tf)
 		char line[80];
 
 		snprintf(line, sizeof(line),
-			 "gdb: trap EC=%02lx ELR=%lx\n", ec, tf->elr);
+			 "gdb: trap EC=%02lx ELR=%lx SPSR=%lx\n",
+			 ec, tf->elr, tf->spsr);
 		board_early_print_raw(line);
 	}
+	if (step_armed) {
+		gdb_cpu_singlestep_clear(tf);
+	}
 
-	/* Our own BRK #GDB_BRK_IMM: the exception is taken at the BRK's own
-	 * address - resume past it, like the host expects of a software
-	 * breakpoint. */
+	/* The compiled-in gate BRK has no original instruction to execute.
+	 * A Z0 patch does: leave its PC at the patched address so GDB can
+	 * remove the patch, step the original instruction, then reinsert it. */
 	if (ec == 0x3cUL && iss == (unsigned long)GDB_BRK_IMM) {
-		tf->elr += 4UL;
+		unsigned int i;
+
+		for (i = 0U; i < bp_enabled; i++) {
+			if (bp_kind[i] == 0U && bp_addr[i] == tf->elr) {
+				break;
+			}
+		}
+		if (i == bp_enabled) {
+			tf->elr += 4UL;
+		}
 	}
 
 	signal = gdb_cpu_signal(tf);
@@ -530,7 +559,6 @@ unsigned int gdb_cpu_setregs(const char *hex)
 #define BRK_INSN(imm16)	(0xD4200000UL | ((unsigned long)(imm16) << 5))
 
 static unsigned int bp_orig[MAX_BP];	/* patched-away words */
-static unsigned int bp_kind[MAX_BP];	/* 0 = BRK patch, 1 = DBGBCR slot */
 
 int gdb_cpu_set_hwbp_kind(unsigned long addr, unsigned int kind)
 {
@@ -655,6 +683,17 @@ int gdb_cpu_set_watchpoint(unsigned long addr, unsigned long len, int lsc)
 	wp_ctrl[wp_enabled] = ctrl;
 	wp_enabled++;
 	dbg_sync();
+	if (wp_enabled == 1U) {
+		unsigned long wcr, wvr;
+		char line[96];
+
+		__asm__ __volatile__("mrs %0, dbgwcr0_el1" : "=r"(wcr));
+		__asm__ __volatile__("mrs %0, dbgwvr0_el1" : "=r"(wvr));
+		snprintf(line, sizeof(line),
+			 "gdb: wp0 @%lx wcr=%lx wvr=%lx mdscr=%lx\n",
+			 addr, wcr, wvr, mdscr_read());
+		board_early_print_raw(line);
+	}
 	return 0;
 }
 
@@ -715,17 +754,26 @@ void gdb_cpu_singlestep_set(struct gdb_trapframe *tf)
 	 * MDE goes OFF for the stepped instruction (FreeBSD
 	 * kdb_cpu_set_singlestep) so a watchpoint or breakpoint on it
 	 * cannot pin the target in place. */
+	step_saved_daif = tf->spsr & 0x3c0UL;
+	step_armed = 1;
 	tf->spsr |= (1UL << 21);
-	tf->spsr |= 0x3c0UL;		/* mask A|I|F for the stepped instr */
+	tf->spsr &= ~(1UL << 9);	/* D must stay clear for the step trap */
+	tf->spsr |= 0x1c0UL;		/* mask A|I|F for the stepped instr */
 	mdscr |= MDSCR_SS | MDSCR_KDE;
 	mdscr &= ~MDSCR_MDE;
 	mdscr_write(mdscr);
 	__asm__ __volatile__("isb" ::: "memory");
 }
 
-void gdb_cpu_singlestep_clear(void)
+void gdb_cpu_singlestep_clear(struct gdb_trapframe *tf)
 {
 	unsigned long mdscr = mdscr_read();
+
+	if (step_armed) {
+		tf->spsr = (tf->spsr & ~0x3c0UL) | step_saved_daif;
+		tf->spsr &= ~(1UL << 21);
+		step_armed = 0;
+	}
 
 	mdscr &= ~(MDSCR_SS | MDSCR_KDE);
 	if (bp_enabled != 0U || wp_enabled != 0U) {

@@ -25,7 +25,7 @@ unsigned int gdb_cpu_getregs(char *buf, unsigned int bufsz);
 unsigned int gdb_cpu_setregs(const char *hex);
 int gdb_cpu_signal(const struct gdb_trapframe *tf);
 void gdb_cpu_singlestep_set(struct gdb_trapframe *tf);
-void gdb_cpu_singlestep_clear(void);
+void gdb_cpu_singlestep_clear(struct gdb_trapframe *tf);
 int gdb_cpu_set_hwbp(unsigned long addr);	/* Z0: BRK patch (works here) */
 int gdb_cpu_clr_hwbp(unsigned long addr);
 int gdb_cpu_set_breakpoint_hw(unsigned long addr); /* Z1: DBGBCR slot */
