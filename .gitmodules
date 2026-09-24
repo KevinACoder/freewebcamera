@@ -7,6 +7,3 @@
 [submodule "third-party/cherryrb"]
 	path = third-party/cherryrb
 	url = https://github.com/cherry-embedded/CherryRB.git
-[submodule "third-party/tlsf"]
-	path = third-party/tlsf
-	url = https://github.com/mattconte/tlsf.git
