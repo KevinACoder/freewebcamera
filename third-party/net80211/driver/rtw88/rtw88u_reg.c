@@ -193,6 +193,7 @@ wlan_rtw88_scan_start(void *arg)
 	sc->sc_cmd_state = IEEE80211_S_SCAN;
 	sc->sc_cmd_arg = -1;
 	rtw88_newstate_cb(sc);
+	wlan_kfree((void *) req, M_DEVBUF);
 }
 
 static int
@@ -212,10 +213,7 @@ wlan_rtw88_scan(const uint8_t *ssid, size_t len)
 		memcpy(req->ssid, ssid, len);
 	req->len = (uint8_t) len;
 
-	/*
-	 * The worker owns the request from here; the wrapper frees it so
-	 * the allocation cannot leak when the queue is already gone.
-	 */
+	/* The worker owns the request until wlan_rtw88_scan_start completes. */
 	if (rtw88_call_async(wlan_rtw88_scan_start, req) != 0) {
 		wlan_kfree(req, M_DEVBUF);
 		return -1;

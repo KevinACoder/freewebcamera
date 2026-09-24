@@ -131,6 +131,7 @@ struct rtw88_usb {
 	unsigned int		rx_status_drops; /* rxeof: non-normal status */
 	unsigned int		rx_len_drops;	/* rxeof: len gate */
 	unsigned int		rx_full_buffers; /* rxeof: whole 32K buffers */
+	unsigned int		rx_empty_buffers; /* rxeof: empty aggregate fast path */
 };
 
 struct rtw88_chip {

@@ -644,6 +644,20 @@ rtw88_usb_rx_capture(struct rtw88_rx_xfer *rx, u_int32_t len)
 	memcpy(cap->mid, rx->buf + RTW88_RAWCAP_MID_OFF, sizeof(cap->mid));
 }
 
+static bool
+rtw88_usb_rx_empty_aggregate(const uint8_t *buf, u_int32_t len)
+{
+	u_int32_t i;
+
+	if (len < RTW88_RX_BUFSZ)
+		return false;
+	for (i = 0; i < 24; i++) {
+		if (buf[i] != 0)
+			return false;
+	}
+	return true;
+}
+
 /* shell-side dump (`wlan rawdump`); prints oldest to newest */
 void
 rtw88_usb_rawdump(void)
@@ -739,6 +753,16 @@ rtw88_usb_rxeof(struct usbd_xfer *xfer, void *priv, usbd_status status)
 	 */
 	usbd_rx_buffer_invalidate(rx->buf, len);
 	rtw88_usb_rx_capture(rx, len);
+	/* The RTL8821CU firmware periodically flushes an entirely empty
+	 * aggregate. Its first RX descriptor is all zero, so queueing the
+	 * 32K buffer only makes the demux walk ~1365 fake descriptors and
+	 * allocate/free noise until the heap is damaged. Real frames arrive
+	 * in short transfers and are unaffected by this gate. */
+	if (rtw88_usb_rx_empty_aggregate(rx->buf, len)) {
+		rx->usb->rx_empty_buffers++;
+		rtw88_usb_rx_submit(rx);
+		return;
+	}
 
 	/*
 	 * Bring-up forensics (2026-09-24): with the RX aggregate timeout
