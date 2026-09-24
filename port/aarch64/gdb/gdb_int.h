@@ -26,8 +26,13 @@ unsigned int gdb_cpu_setregs(const char *hex);
 int gdb_cpu_signal(const struct gdb_trapframe *tf);
 void gdb_cpu_singlestep_set(struct gdb_trapframe *tf);
 void gdb_cpu_singlestep_clear(void);
-int gdb_cpu_set_hwbp(unsigned long addr);
+int gdb_cpu_set_hwbp(unsigned long addr);	/* Z0: BRK patch (works here) */
 int gdb_cpu_clr_hwbp(unsigned long addr);
+int gdb_cpu_set_breakpoint_hw(unsigned long addr); /* Z1: DBGBCR slot */
+int gdb_cpu_clr_breakpoint_hw(unsigned long addr);
+/* lsc: 1=load (Z3), 2=store (Z2), 3=both (Z4) - DBGWCR LSC encoding. */
+int gdb_cpu_set_watchpoint(unsigned long addr, unsigned long len, int lsc);
+int gdb_cpu_clr_watchpoint(unsigned long addr, unsigned long len, int lsc);
 void gdb_cpu_breakpoints_disarm(void);
 unsigned long gdb_cpu_regval(int regnum);
 int gdb_cpu_setregval(int regnum, unsigned long val);

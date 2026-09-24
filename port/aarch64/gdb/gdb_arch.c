@@ -6,8 +6,10 @@
  * sys/arm64/arm64/gdb_machdep.c and debug_monitor.c (BSD-2, FreeBSD
  * Foundation / Semihalf); the ESR decode and trapframe contract follow the
  * lab's fgdb port (fgdb_arch.c, fgdb_exception.S). All debug resources are
- * the hardware kind: Z0 breakpoints arm DBGBCR/BVR slots, software
- * patching is never used.
+ * the hardware kind: Z0 patches the reserved BRK #GDB_BRK_IMM into RAM
+ * text (the only breakpoint class this board's boot chain delivers),
+ * Z1 arms DBGBCR/BVR slots and Z2-4 arm DBGWVR/WCR slots (FreeBSD-exact
+ * sequences, live where the boot chain delivers debug events).
  *
  * FP/SIMD context does not exist in this image (-mgeneral-regs-only): the
  * target description served to the host (gdb_main.c's target_xml) declares
@@ -28,10 +30,28 @@
  *     debug-register addressing, so the slot number is a switch case) --- */
 
 #define MAX_BP		8U
+#define MAX_WP		8U
+
+/* FreeBSD debug_monitor.c's breakpoint control word (non-VHE): BAS=0b1111
+ * (four bytes), PMC=0b01 (EL1 and above), E=1; HMC/SSC/LBN/BT all zero -
+ * plain unlinked address match. */
+#define DBG_BCR_ENABLE_WORD	(((unsigned long)0xf << 5) | \
+				 ((unsigned long)0x1 << 1) | 0x1UL)
+
+/* MDSCR_EL1 bits (FreeBSD armreg.h): software step, kernel debug enable,
+ * monitor debug enable. Breakpoint/watchpoint events are gated by MDE,
+ * software step additionally needs KDE - both originals set them together. */
+#define MDSCR_SS	(1UL << 0)
+#define MDSCR_KDE	(1UL << 13)
+#define MDSCR_MDE	(1UL << 15)
 
 static unsigned long bp_addr[MAX_BP];
 static unsigned int bp_enabled;
 static unsigned int bp_count = MAX_BP;
+static unsigned long wp_addr[MAX_WP];
+static unsigned long wp_ctrl[MAX_WP];	/* LSC differs per watchpoint */
+static unsigned int wp_enabled;
+static unsigned int wp_count = MAX_WP;
 static int arch_ready;
 
 /* The trapframe being debugged; gdb_trap_loop's register commands read and
@@ -89,27 +109,105 @@ static void dbgbcr_write(unsigned int n, unsigned long v)
 	}
 }
 
-/* Push the shadow slots into the hardware and manage MDSCR.MDE. */
+static unsigned long dbgbvr_read(unsigned int n)
+{
+	unsigned long v = 0UL;
+
+	switch (n) {
+	case 0: __asm__ __volatile__("mrs %0, dbgbvr0_el1" : "=r"(v)); break;
+	case 1: __asm__ __volatile__("mrs %0, dbgbvr1_el1" : "=r"(v)); break;
+	case 2: __asm__ __volatile__("mrs %0, dbgbvr2_el1" : "=r"(v)); break;
+	case 3: __asm__ __volatile__("mrs %0, dbgbvr3_el1" : "=r"(v)); break;
+	case 4: __asm__ __volatile__("mrs %0, dbgbvr4_el1" : "=r"(v)); break;
+	case 5: __asm__ __volatile__("mrs %0, dbgbvr5_el1" : "=r"(v)); break;
+	case 6: __asm__ __volatile__("mrs %0, dbgbvr6_el1" : "=r"(v)); break;
+	case 7: __asm__ __volatile__("mrs %0, dbgbvr7_el1" : "=r"(v)); break;
+	default: break;
+	}
+	return v;
+}
+
+static unsigned long dbgbcr_read(unsigned int n)
+{
+	unsigned long v = 0UL;
+
+	switch (n) {
+	case 0: __asm__ __volatile__("mrs %0, dbgbcr0_el1" : "=r"(v)); break;
+	case 1: __asm__ __volatile__("mrs %0, dbgbcr1_el1" : "=r"(v)); break;
+	case 2: __asm__ __volatile__("mrs %0, dbgbcr2_el1" : "=r"(v)); break;
+	case 3: __asm__ __volatile__("mrs %0, dbgbcr3_el1" : "=r"(v)); break;
+	case 4: __asm__ __volatile__("mrs %0, dbgbcr4_el1" : "=r"(v)); break;
+	case 5: __asm__ __volatile__("mrs %0, dbgbcr5_el1" : "=r"(v)); break;
+	case 6: __asm__ __volatile__("mrs %0, dbgbcr6_el1" : "=r"(v)); break;
+	case 7: __asm__ __volatile__("mrs %0, dbgbcr7_el1" : "=r"(v)); break;
+	default: break;
+	}
+	return v;
+}
+
+static void dbgwvr_write(unsigned int n, unsigned long v)
+{
+	switch (n) {
+	case 0: __asm__ __volatile__("msr dbgwvr0_el1, %0" :: "r"(v)); break;
+	case 1: __asm__ __volatile__("msr dbgwvr1_el1, %0" :: "r"(v)); break;
+	case 2: __asm__ __volatile__("msr dbgwvr2_el1, %0" :: "r"(v)); break;
+	case 3: __asm__ __volatile__("msr dbgwvr3_el1, %0" :: "r"(v)); break;
+	case 4: __asm__ __volatile__("msr dbgwvr4_el1, %0" :: "r"(v)); break;
+	case 5: __asm__ __volatile__("msr dbgwvr5_el1, %0" :: "r"(v)); break;
+	case 6: __asm__ __volatile__("msr dbgwvr6_el1, %0" :: "r"(v)); break;
+	case 7: __asm__ __volatile__("msr dbgwvr7_el1, %0" :: "r"(v)); break;
+	default: break;
+	}
+}
+
+static void dbgwcr_write(unsigned int n, unsigned long v)
+{
+	switch (n) {
+	case 0: __asm__ __volatile__("msr dbgwcr0_el1, %0" :: "r"(v)); break;
+	case 1: __asm__ __volatile__("msr dbgwcr1_el1, %0" :: "r"(v)); break;
+	case 2: __asm__ __volatile__("msr dbgwcr2_el1, %0" :: "r"(v)); break;
+	case 3: __asm__ __volatile__("msr dbgwcr3_el1, %0" :: "r"(v)); break;
+	case 4: __asm__ __volatile__("msr dbgwcr4_el1, %0" :: "r"(v)); break;
+	case 5: __asm__ __volatile__("msr dbgwcr5_el1, %0" :: "r"(v)); break;
+	case 6: __asm__ __volatile__("msr dbgwcr6_el1, %0" :: "r"(v)); break;
+	case 7: __asm__ __volatile__("msr dbgwcr7_el1, %0" :: "r"(v)); break;
+	default: break;
+	}
+}
+
+/* Push the shadow slots into the hardware, FreeBSD dbg_register_sync
+ * order: per slot BCR then BVR (watchpoints: WCR then WVR), every write
+ * followed by isb; MDSCR last, then one more isb. MDE gates breakpoint and
+ * watchpoint events; KDE rides along as both originals set the pair. */
 static void dbg_sync(void)
 {
 	unsigned long mdscr = mdscr_read();
 	unsigned int i;
 
 	for (i = 0U; i < bp_count; i++) {
-		dbgbvr_write(i, bp_addr[i]);
 		if (i < bp_enabled) {
-			/* E=1, PMC=any(0b11), BAS=full word (0b1111),
-			 * unlinked address match. 4-byte breakpoints. */
-			dbgbcr_write(i, 0x1UL | (0x3UL << 1) |
-					     (0xfUL << 5));
+			dbgbcr_write(i, DBG_BCR_ENABLE_WORD);
 		} else {
 			dbgbcr_write(i, 0UL);
 		}
+		__asm__ __volatile__("isb" ::: "memory");
+		dbgbvr_write(i, bp_addr[i]);
+		__asm__ __volatile__("isb" ::: "memory");
 	}
-	if (bp_enabled != 0U) {
-		mdscr |= (1UL << 15);	/* MDE: enable hw bp/watch */
+	for (i = 0U; i < wp_count; i++) {
+		if (i < wp_enabled) {
+			dbgwcr_write(i, wp_ctrl[i]);
+		} else {
+			dbgwcr_write(i, 0UL);
+		}
+		__asm__ __volatile__("isb" ::: "memory");
+		dbgwvr_write(i, wp_addr[i]);
+		__asm__ __volatile__("isb" ::: "memory");
+	}
+	if (bp_enabled != 0U || wp_enabled != 0U) {
+		mdscr |= MDSCR_MDE | MDSCR_KDE;
 	} else {
-		mdscr &= ~(1UL << 15);
+		mdscr &= ~(MDSCR_MDE | MDSCR_KDE);
 	}
 	mdscr_write(mdscr);
 	__asm__ __volatile__("isb" ::: "memory");
@@ -119,27 +217,54 @@ void gdb_arch_setup(void)
 {
 	unsigned long dfr;
 	unsigned long probe = 0xdeadbeefUL;
+	unsigned int i;
 
 	/* Clear the OS lock (a bootloader/EL3 may leave it set; a set lock
 	 * makes every debug register access trap). */
 	__asm__ __volatile__("msr oslar_el1, %0" :: "r"(0UL));
 
-	/* One line of boot evidence: can EL1 HOLD debug-register state on
-	 * this platform? On RK3568 with the stock BL31 the DBGBCR/BVR/MDSCR
-	 * writes silently do nothing - which is exactly why breakpoints are
-	 * software-patched BRKs here and not DBGBCR slots (see
-	 * gdb_cpu_set_hwbp). */
+	/* Boot evidence that EL1 HOLDS debug-register state: DBGBCR/BVR
+	 * bits[1:0] are RAZ, so 0xdeadbeef reads back as deadbeec when the
+	 * slot retains the write. (The earlier "EL3 swallows debug-register
+	 * writes" conclusion was wrong - the readback always held.) */
 	__asm__ __volatile__("msr dbgbvr0_el1, %0" :: "r"(probe));
 	__asm__ __volatile__("mrs %0, dbgbvr0_el1" : "=r"(probe));
-	board_log("gdb: dbgbvr0 readback=%lx (expect deadbeef)", probe);
+	board_log("gdb: dbgbvr0 readback=%lx (expect deadbeec)", probe);
 
-	/* Breakpoint count: BRPs field is bits [15:12], +1, clamped. */
+	/* Resource counts: BRPs field is bits [15:12], WRPs bits [19:16],
+	 * both +1 (FreeBSD dbg_monitor_init), clamped to the stub's tables. */
 	dfr = dfr_read();
 	bp_count = (unsigned int)((dfr >> 12) & 0xfUL) + 1U;
 	if (bp_count > MAX_BP) {
 		bp_count = MAX_BP;
 	}
+	wp_count = (unsigned int)((dfr >> 16) & 0xfUL) + 1U;
+	if (wp_count > MAX_WP) {
+		wp_count = MAX_WP;
+	}
 	bp_enabled = 0U;
+	wp_enabled = 0U;
+	board_log("gdb: hw breakpoints=%u watchpoints=%u", bp_count,
+		  wp_count);
+
+	/* Reset every slot to disabled and MDSCR debug bits off, so boot
+	 * state cannot leak a live resource into the first session. */
+	for (i = 0U; i < bp_count; i++) {
+		dbgbcr_write(i, 0UL);
+		dbgbvr_write(i, 0UL);
+	}
+	for (i = 0U; i < wp_count; i++) {
+		dbgwcr_write(i, 0UL);
+		dbgwvr_write(i, 0UL);
+	}
+	mdscr_write(mdscr_read() & ~(MDSCR_SS | MDSCR_KDE | MDSCR_MDE));
+	__asm__ __volatile__("isb" ::: "memory");
+
+	/* Unmask debug exceptions (FreeBSD dbg_enable: msr daifclr, #DAIF_D).
+	 * Exception entry sets PSTATE.D itself, so handlers stay quiet while
+	 * normal execution keeps breakpoints live. */
+	__asm__ __volatile__("msr daifclr, #8" ::: "memory");
+
 	arch_ready = 1;
 }
 
@@ -170,8 +295,18 @@ static const char *stop_reason(const struct gdb_trapframe *tf)
 {
 	unsigned long ec = (tf->esr >> 26) & 0x3fUL;
 
-	/* Breakpoints are the patched-BRK kind here (see the breakpoint
-	 * section), so a hit arrives as EC=0x3c with the stub's immediate. */
+	/* Same shapes as FreeBSD gdb_cpu_stop_reason: DBGBCR address match
+	 * reports "hwbreak", a watchpoint hit reports the faulting data
+	 * address, and our own compiled-in BRK reports "swbreak". */
+	if (ec == 0x30UL || ec == 0x31UL) {
+		return "hwbreak;";
+	}
+	if (ec == 0x35UL) {
+		static char wbuf[40];
+
+		snprintf(wbuf, sizeof(wbuf), "watch:%lx;", tf->far);
+		return wbuf;
+	}
 	if (ec == 0x3cUL) {
 		return "swbreak;";
 	}
@@ -238,8 +373,11 @@ void gdb_debug_interrupt(struct gdb_trapframe *tf)
 
 	gdb_trap_loop(tf, signal, stop_reason(tf));
 
-	gdb_cpu_singlestep_clear();
-	dbg_sync();
+	/* Command handlers own the debug state on exit: 'c'/'D'/'k' clear a
+	 * pending step there, and the Z handlers sync the slots when they
+	 * change it. There is deliberately NO blanket cleanup here - a step
+	 * armed by the host's 's' must survive this ERET (that was the bug
+	 * that made stepping dead). */
 	gdb_dbgport_intr_ctrl(0);
 	gdb_session_active = 0;
 
@@ -367,88 +505,203 @@ unsigned int gdb_cpu_setregs(const char *hex)
 	return 0U;
 }
 
-/* --- breakpoints and single step ------------------------------------------- *
+/* --- breakpoints, watchpoints and single step ------------------------------ *
  *
- * Z0/Z1 are SOFTWARE breakpoints here: the classic DBGBCR/BVR slot path
- * exists (dbg_sync) but this platform does not HOLD debug-register state
- * written from EL1 - the dbgbvr0 readback at setup proves it every boot -
- * so hardware breakpoints never fire and software step is dead with them.
- * Patching the reserved BRK #GDB_BRK_IMM into RAM text works everywhere,
- * needs only the cache maintenance the memory-write path already performs
- * (board_sync_written), and reports as "swbreak", which the host opted
- * into via qSupported. The image is fully RAM-resident, so there is no
- * read-only-text corner. */
+ * Z0 arms a SOFTWARE breakpoint - the reserved BRK #GDB_BRK_IMM patched
+ * into RAM text with the FreeBSD DDB cache recipe - and Z1 arms a DBGBCR/
+ * BVR slot; Z2-4 arm DBGWVR/WCR slots. Why both kinds: board-proven
+ * triage on the RK3568 stock boot chain (BL31 + OP-TEE + U-Boot) shows
+ * the debug registers HOLD every value this stub writes (bcr=1e3,
+ * bvr=<addr>, mdscr=a000 read back exactly), but self-hosted debug EVENTS
+ * other than BRK never deliver - breakpoint (EC 0x31), software step
+ * (EC 0x32) and watchpoint (EC 0x35) are all silently not taken, while
+ * the BRK instruction (EC 0x3c, not a routed debug event) always traps.
+ * The suppression sits above EL1 (MDCR_EL2/SDCR_EL3 territory - this
+ * image asserts CurrentEL==EL1 at startup) and cannot be inspected from
+ * here, so Z0 takes the BRK road that demonstrably works, Z1/Z2-4 keep
+ * the FreeBSD-exact hardware path for chains where the events arrive.
+ *
+ * Historical note: the earlier rounds blamed the i-cache and then EL3
+ * register filtering for hw breakpoints not firing. Both were wrong; the
+ * real bug all along was this stub's own Z-packet parser using the
+ * freestanding libc's strtol/strtoul, which return 0 for bare hex - every
+ * breakpoint was armed on (or patched at) address 0. */
 
 #define BRK_INSN(imm16)	(0xD4200000UL | ((unsigned long)(imm16) << 5))
 
-/* The ARM ARM's self-modifying-code recipe, exactly: DC CVAU, DSB, IC
- * IVAU, DSB, ISB. The earlier attempt delegated to the generic
- * flush-invalidate + "ic iallu" pair and the fetch kept serving the old
- * word - the patch landed in memory (readback proved it) but never on the
- * fetch path, so the barrier structure, not the ops, was the bug. */
-static void swbp_sync(unsigned long addr)
-{
-	__asm__ __volatile__("dc cvau, %0" :: "r"(addr) : "memory");
-	__asm__ __volatile__("dsb sy" ::: "memory");
-	__asm__ __volatile__("ic ivau, %0" :: "r"(addr) : "memory");
-	__asm__ __volatile__("dsb sy" ::: "memory");
-	__asm__ __volatile__("isb" ::: "memory");
-}
+static unsigned int bp_orig[MAX_BP];	/* patched-away words */
+static unsigned int bp_kind[MAX_BP];	/* 0 = BRK patch, 1 = DBGBCR slot */
 
-static unsigned int bp_orig[MAX_BP];
-
-int gdb_cpu_set_hwbp(unsigned long addr)
+int gdb_cpu_set_hwbp_kind(unsigned long addr, unsigned int kind)
 {
 	unsigned int i;
 
-	if (bp_enabled >= bp_count) {
-		return -1;
+	if ((addr & 0x3UL) != 0UL) {
+		return -1;	/* instructions are word-aligned here */
 	}
 	/* Replace if already present. */
 	for (i = 0U; i < bp_enabled; i++) {
-		if (bp_addr[i] == addr) {
+		if (bp_addr[i] == addr && bp_kind[i] == kind) {
 			return 0;
 		}
 	}
-	bp_orig[bp_enabled] = *(volatile unsigned int *)addr;
-	*(volatile unsigned int *)addr = (unsigned int)BRK_INSN(GDB_BRK_IMM);
-	swbp_sync(addr);
-	bp_addr[bp_enabled++] = addr;
+	if (bp_enabled >= bp_count) {
+		return -1;
+	}
+	i = bp_enabled++;
+	bp_addr[i] = addr;
+	bp_kind[i] = kind;
+	if (kind == 0U) {
+		/* Software: BRK into text, then the FreeBSD DDB sync. */
+		bp_orig[i] = *(volatile unsigned int *)addr;
+		*(volatile unsigned int *)addr =
+			(unsigned int)BRK_INSN(GDB_BRK_IMM);
+		board_sync_written(addr, 4UL);
+	} else {
+		bp_orig[i] = 0U;
+		dbg_sync();
+		/* Live evidence per insertion: the slot's BCR/BVR read back
+		 * through the session-muted console, splitting "write lost"
+		 * from "written but events not delivered" on the wire log. */
+		{
+			char line[96];
+
+			snprintf(line, sizeof(line),
+				 "gdb: bp%u @%lx bcr=%lx bvr=%lx mdscr=%lx\n",
+				 i, addr, dbgbcr_read(i), dbgbvr_read(i),
+				 mdscr_read());
+			board_early_print_raw(line);
+		}
+	}
+	return 0;
+}
+
+int gdb_cpu_set_hwbp(unsigned long addr)
+{
+	return gdb_cpu_set_hwbp_kind(addr, 0U);
+}
+
+int gdb_cpu_set_breakpoint_hw(unsigned long addr)
+{
+	return gdb_cpu_set_hwbp_kind(addr, 1U);
+}
+
+static int clr_bp_at(unsigned int i)
+{
+	unsigned int j;
+
+	if (bp_kind[i] == 0U) {
+		*(volatile unsigned int *)bp_addr[i] = bp_orig[i];
+		board_sync_written(bp_addr[i], 4UL);
+	}
+	for (j = i; j + 1U < bp_enabled; j++) {
+		bp_addr[j] = bp_addr[j + 1U];
+		bp_orig[j] = bp_orig[j + 1U];
+		bp_kind[j] = bp_kind[j + 1U];
+	}
+	bp_enabled--;
+	dbg_sync();	/* resyncs the DBGBCR/DBGWCR shadow; BRK patches
+			 * were already restored above */
 	return 0;
 }
 
 int gdb_cpu_clr_hwbp(unsigned long addr)
 {
-	unsigned int i, j;
+	unsigned int i;
 
 	for (i = 0U; i < bp_enabled; i++) {
-		if (bp_addr[i] == addr) {
-			*(volatile unsigned int *)addr = bp_orig[i];
-			swbp_sync(addr);
-			for (j = i; j + 1U < bp_enabled; j++) {
-				bp_addr[j] = bp_addr[j + 1U];
-				bp_orig[j] = bp_orig[j + 1U];
+		if (bp_addr[i] == addr && bp_kind[i] == 0U) {
+			return clr_bp_at(i);
+		}
+	}
+	return -1;
+}
+
+int gdb_cpu_clr_breakpoint_hw(unsigned long addr)
+{
+	unsigned int i;
+
+	for (i = 0U; i < bp_enabled; i++) {
+		if (bp_addr[i] == addr && bp_kind[i] == 1U) {
+			return clr_bp_at(i);
+		}
+	}
+	return -1;
+}
+
+/* lsc: DBGWCR LSC (bits [4:3]) - 1=load, 2=store, 3=both (Z3/Z2/Z4). */
+int gdb_cpu_set_watchpoint(unsigned long addr, unsigned long len, int lsc)
+{
+	unsigned long aligned = addr & ~0x7UL;
+	unsigned long off = addr & 0x7UL;
+	unsigned long ctrl;
+	unsigned int i;
+
+	if (len == 0UL || len > 8UL || off + len > 8UL) {
+		return -1;	/* must stay inside one aligned doubleword */
+	}
+	ctrl = ((((1UL << len) - 1UL) << off) << 5) |	/* BAS */
+	       ((unsigned long)lsc << 3) |		/* LSC */
+	       ((unsigned long)0x1 << 1) | 0x1UL;	/* PMC EL1 | E */
+	for (i = 0U; i < wp_enabled; i++) {
+		if (wp_addr[i] == aligned && wp_ctrl[i] == ctrl) {
+			return 0;
+		}
+	}
+	if (wp_enabled >= wp_count) {
+		return -1;
+	}
+	wp_addr[wp_enabled] = aligned;
+	wp_ctrl[wp_enabled] = ctrl;
+	wp_enabled++;
+	dbg_sync();
+	return 0;
+}
+
+int gdb_cpu_clr_watchpoint(unsigned long addr, unsigned long len, int lsc)
+{
+	unsigned long aligned = addr & ~0x7UL;
+	unsigned long off = addr & 0x7UL;
+	unsigned long ctrl;
+	unsigned int i, j;
+
+	if (len == 0UL || len > 8UL || off + len > 8UL) {
+		return -1;
+	}
+	ctrl = ((((1UL << len) - 1UL) << off) << 5) |
+	       ((unsigned long)lsc << 3) |
+	       ((unsigned long)0x1 << 1) | 0x1UL;
+	for (i = 0U; i < wp_enabled; i++) {
+		if (wp_addr[i] == aligned && wp_ctrl[i] == ctrl) {
+			for (j = i; j + 1U < wp_enabled; j++) {
+				wp_addr[j] = wp_addr[j + 1U];
+				wp_ctrl[j] = wp_ctrl[j + 1U];
 			}
-			bp_enabled--;
+			wp_enabled--;
+			dbg_sync();
 			return 0;
 		}
 	}
 	return -1;
 }
 
-/* Disarm every breakpoint. Detach must leave the target running exactly
- * as it was before the session: a patched BRK survives detach and would
- * trap the next fetch through the old address with no host listening -
- * the world freezes in a silent trap loop. */
+/* Detach must leave the target running exactly as it was before the
+ * session: every patched BRK restored, every debug resource disabled, no
+ * pending step - a surviving patch would trap the next fetch through the
+ * old address with no host listening. */
 void gdb_cpu_breakpoints_disarm(void)
 {
 	unsigned int i;
 
 	for (i = 0U; i < bp_enabled; i++) {
-		*(volatile unsigned int *)bp_addr[i] = bp_orig[i];
-		swbp_sync(bp_addr[i]);
+		if (bp_kind[i] == 0U) {
+			*(volatile unsigned int *)bp_addr[i] = bp_orig[i];
+			board_sync_written(bp_addr[i], 4UL);
+		}
 	}
 	bp_enabled = 0U;
+	wp_enabled = 0U;
+	dbg_sync();
 }
 
 void gdb_cpu_singlestep_set(struct gdb_trapframe *tf)
@@ -458,10 +711,14 @@ void gdb_cpu_singlestep_set(struct gdb_trapframe *tf)
 	/* PSTATE.SS in the SPSR we will restore: the instruction after the
 	 * ERET completes, then a SoftwareStep exception comes back. Masking
 	 * A/I/F keeps the step quiet; D is left alone so the step exception
-	 * can reach us. */
+	 * can reach us. KDE is required for the software step event itself;
+	 * MDE goes OFF for the stepped instruction (FreeBSD
+	 * kdb_cpu_set_singlestep) so a watchpoint or breakpoint on it
+	 * cannot pin the target in place. */
 	tf->spsr |= (1UL << 21);
 	tf->spsr |= 0x3c0UL;		/* mask A|I|F for the stepped instr */
-	mdscr |= 1UL;			/* SS */
+	mdscr |= MDSCR_SS | MDSCR_KDE;
+	mdscr &= ~MDSCR_MDE;
 	mdscr_write(mdscr);
 	__asm__ __volatile__("isb" ::: "memory");
 }
@@ -470,19 +727,35 @@ void gdb_cpu_singlestep_clear(void)
 {
 	unsigned long mdscr = mdscr_read();
 
-	mdscr &= ~1UL;			/* SS */
+	mdscr &= ~(MDSCR_SS | MDSCR_KDE);
+	if (bp_enabled != 0U || wp_enabled != 0U) {
+		mdscr |= MDSCR_MDE;
+	} else {
+		mdscr &= ~MDSCR_MDE;
+	}
 	mdscr_write(mdscr);
 	__asm__ __volatile__("isb" ::: "memory");
 }
 
-/* Host-written memory needs the I-cache line dropped before the CPU will
- * fetch it (software-injected instructions, patched data read by the
- * debugger's own path). */
+/* Host-written memory needs the I-cache dropped before the CPU will fetch
+ * it. Sequence is FreeBSD DDB's db_write_bytes + arm64
+ * cpu_icache_sync_range: stores, dsb ish, dc cvau over the range (to the
+ * point of unification), ic ialluis, dsb ish, isb. */
 void board_sync_written(unsigned long addr, unsigned long len)
 {
-	board_dcache_flush_invalidate(addr, len);
-	__asm__ __volatile__(
-		"ic	iallu\n"
-		"dsb	nsh\n"
-		"isb\n" ::: "memory");
+	unsigned long ctr;
+	unsigned long line;
+	unsigned long a;
+	unsigned long end = addr + len;
+
+	__asm__ __volatile__("mrs %0, ctr_el0" : "=r"(ctr));
+	line = 4UL << ((ctr >> 16) & 0xfUL);	/* DminLine */
+	__asm__ __volatile__("dsb ish" ::: "memory");
+	for (a = addr & ~(line - 1UL); a < end; a += line) {
+		__asm__ __volatile__("dc cvau, %0" :: "r"(a) : "memory");
+	}
+	__asm__ __volatile__("dsb ish" ::: "memory");
+	__asm__ __volatile__("ic ialluis" ::: "memory");
+	__asm__ __volatile__("dsb ish" ::: "memory");
+	__asm__ __volatile__("isb" ::: "memory");
 }

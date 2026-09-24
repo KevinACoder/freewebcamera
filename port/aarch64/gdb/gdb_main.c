@@ -3,17 +3,18 @@
  * @brief  RSP command loop.
  *
  * Command behaviour derived from FreeBSD sys/gdb/gdb_main.c (BSD-2, 2004
- * Marcel Moolenaar): the trap reply, register/memory access, hardware
- * breakpoints (Z0 aliased onto Z1 - debug resources are the hardware kind
- * on this target) and continue/single-step/detach semantics.
+ * Marcel Moolenaar): the trap reply, register/memory access, breakpoints
+ * (Z0 = BRK patch - the class this board delivers; Z1 = DBGBCR slot),
+ * hardware watchpoints (Z2 write / Z3 read / Z4 access) and the
+ * continue/single-step/detach semantics.
  *
  * Not implemented and NOT advertised: vCont (the host falls back to c/s),
- * X/qSearch, watchpoints (Z2-4). Of the qXfer family only
- * qXfer:features:read:target.xml is implemented - it declares exactly the
- * 34 core registers the g packet reports, without which GDB assumes the
- * full AArch64 set including FP and rejects the short g packet (see
- * target_xml below). An unsupported command answers with an empty packet,
- * which GDB treats as unsupported rather than fatal.
+ * X/qSearch. Of the qXfer family only qXfer:features:read:target.xml is
+ * implemented - it declares exactly the 34 core registers the g packet
+ * reports, without which GDB assumes the full AArch64 set including FP and
+ * rejects the short g packet (see target_xml below). An unsupported
+ * command answers with an empty packet, which GDB treats as unsupported
+ * rather than fatal.
  */
 
 #include <stdint.h>
@@ -310,24 +311,55 @@ void gdb_trap_loop(struct gdb_trapframe *tf, int signal, const char *reason)
 
 		case 'Z':
 		case 'z': {
+			/* "Ztype,addr,len" - the addr parse advances q to
+			 * the comma before len. Parse with gdb_hex_ul, NOT
+			 * the freestanding libc's strtol/strtoul: whatever
+			 * got linked returns 0 for bare hex digits (the m/M
+			 * parsers carry the same warning), which armed
+			 * breakpoint slot 0 on address 0 - every hit test
+			 * failed while the slot readback looked perfect. */
 			char *q;
-			long type = strtol(&buf[1], &q, 16);
+			long type = (long)gdb_hex_ul(&buf[1], &q);
 			unsigned long addr = 0UL;
-			int r;
+			unsigned long len = 4UL;
+			int r = -1;
 
 			if (*q == ',') {
-				addr = strtoul(q + 1, 0, 16);
+				addr = gdb_hex_ul(q + 1, &q);
 			}
-			if (type != 0 && type != 1) {
+			if (*q == ',') {
+				len = gdb_hex_ul(q + 1, &q);
+			}
+			if (type < 0 || type > 4) {
 				gdb_reply_str("");
 				break;
 			}
-			/* Z0 (software breakpoint) maps onto the hardware
-			 * slots: debug state owns the resource here. */
+			/* Z0 patches the reserved BRK (the class this board's
+			 * boot chain delivers); Z1 arms a DBGBCR slot;
+			 * Z2/Z3/Z4 are store/load/access watchpoints, lsc in
+			 * DBGWCR encoding (2/1/3). */
 			if (buf[0] == 'Z') {
-				r = gdb_cpu_set_hwbp(addr);
+				if (type == 0) {
+					r = gdb_cpu_set_hwbp(addr);
+				} else if (type == 1) {
+					r = gdb_cpu_set_breakpoint_hw(addr);
+				} else {
+					static const int lsc[3] = { 2, 1, 3 };
+
+					r = gdb_cpu_set_watchpoint(addr, len,
+								   lsc[type - 2]);
+				}
 			} else {
-				r = gdb_cpu_clr_hwbp(addr);
+				if (type == 0) {
+					r = gdb_cpu_clr_hwbp(addr);
+				} else if (type == 1) {
+					r = gdb_cpu_clr_breakpoint_hw(addr);
+				} else {
+					static const int lsc[3] = { 2, 1, 3 };
+
+					r = gdb_cpu_clr_watchpoint(addr, len,
+								   lsc[type - 2]);
+				}
 			}
 			if (r == 0) {
 				gdb_reply_ok();
@@ -366,8 +398,9 @@ void gdb_trap_loop(struct gdb_trapframe *tf, int signal, const char *reason)
 
 		case 'q':
 			if (strncmp(buf, "qSupported", 10) == 0) {
-				gdb_reply_str(
-				    "PacketSize=400;qXfer:features:read+");
+				gdb_reply_str("PacketSize=400;"
+					      "qXfer:features:read+;"
+					      "hwbreak+;swbreak+");
 			} else if (strncmp(buf, "qC", 2) == 0) {
 				gdb_reply_str("QC1");
 			} else if (strncmp(buf, "qfThreadInfo", 12) == 0) {
