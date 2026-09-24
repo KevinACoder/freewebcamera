@@ -77,6 +77,9 @@ struct usbd_device {
 	struct usbh_hubport *hport;
 	struct wlan_usb_dev *ud_port;
 	usb_device_descriptor_t ddesc;
+	/* the two configuration descriptors have the same layout; cached
+	 * for usbd_get_config_descriptor (rtw88 reads it at attach) */
+	usb_config_descriptor_t cdesc;
 	struct usbd_interface ifaces[USBD_SHIFACE_MAX];
 	volatile int dying;
 
@@ -202,6 +205,7 @@ static struct wlan_usb_stats {
 	unsigned stall_clear;	/* CLEAR_FEATURE(ENDPOINT_HALT) sent (bulk) */
 	unsigned task_drop;	/* usb_add_task: task ring full, task lost */
 	unsigned task_busy;	/* usb_add_task: already queued (normal) */
+	int rx_err_last;	/* last negative RX completion (cherryusb code) */
 } wlan_usb_stats;
 
 void wlan_usbdi_stats_dump(void);
@@ -245,6 +249,8 @@ static struct usbd_device *usbd_shim_register_device(struct usbh_hubport *hport,
 	dev->hport = hport;
 	dev->ud_port = port_dev;
 	memcpy(&dev->ddesc, &hport->device_desc, sizeof(dev->ddesc));
+	/* the two configuration descriptors have the same layout */
+	memcpy(&dev->cdesc, &hport->config.config_desc, sizeof(dev->cdesc));
 	for (i = 0; i < USBD_SHIFACE_MAX; i++) {
 		dev->ifaces[i].udev = dev;
 		dev->ifaces[i].ifno = i;
@@ -254,6 +260,14 @@ static struct usbd_device *usbd_shim_register_device(struct usbh_hubport *hport,
 
 usb_device_descriptor_t *usbd_get_device_descriptor(struct usbd_device *dev) {
 	return &dev->ddesc;
+}
+
+usb_config_descriptor_t *usbd_get_config_descriptor(struct usbd_device *dev) {
+	return &dev->cdesc;
+}
+
+uint8_t usbd_get_speed(struct usbd_device *dev) {
+	return (uint8_t) dev->ud_port->speed;
 }
 
 usb_interface_descriptor_t *usbd_get_interface_descriptor(
@@ -461,6 +475,24 @@ void usbd_get_xfer_status(struct usbd_xfer *xfer, void **priv, void **buffer,
 	}
 }
 
+/* RX bring-up forensics hooks (see usbdi.h).  The RX buffers are
+ * non-coherent on this port: without an invalidate before the driver
+ * reads, cached lines hide what the dongle DMAed in.  arm() writes a
+ * recognizable pattern and cleans it to DRAM so a completion that
+ * still reads the pattern proves the device never wrote that range. */
+void usbd_rx_buffer_invalidate(void *buffer, uint32_t length) {
+	if (buffer != NULL && length != 0U) {
+		usb_dcache_invalidate((uintptr_t) buffer, length);
+	}
+}
+
+void usbd_rx_buffer_arm(void *buffer, uint32_t length) {
+	if (buffer != NULL && length != 0U) {
+		memset(buffer, 0xa5, length);
+		usb_dcache_flush((uintptr_t) buffer, length);
+	}
+}
+
 /* ------------------------------------------------------------------ */
 /* async transfer plumbing */
 
@@ -477,6 +509,18 @@ static void usbd_shim_urb_complete(void *arg, int nbytes_or_err) {
 	struct usbd_device *dev;
 
 	wlan_usb_stats.complete++;
+
+	/* forensics 2026-09-24: name the raw cherryusb error for RX errors
+	 * (net_80211 9257cc1 同一修复的镜像侧移植) */
+	if (xfer != NULL && xfer->pipe != NULL &&
+	    !usbd_pipe_is_tx(xfer->pipe) && nbytes_or_err < 0) {
+		static unsigned rx_err_print;
+
+		wlan_usb_stats.rx_err_last = nbytes_or_err;
+		if (rx_err_print < 8 || (rx_err_print & 0x7f) == 0)
+			printf("shim: rx complete err=%d (%u)\n",
+			    nbytes_or_err, ++rx_err_print);
+	}
 
 	/* The async completion and the worker (which re-submits the xfer)
 	 * race on the same xfer.  Only accept the completion while the
@@ -630,13 +674,17 @@ usbd_status usbd_transfer(struct usbd_xfer *xfer) {
 	ret = usbh_submit_urb(&xfer->urb);
 	if (ret != 0) {
 		/* not connected / busy: synthesize the callback so the
-		 * driver can reclaim its tx_data */
+		 * driver can reclaim its tx_data.  Leave the xfer on
+		 * in_flight_xfers: the worker's common path unlinks it
+		 * from both pipe->pending and in_flight_xfers, and a
+		 * second SLIST_REMOVE here would walk the list with an
+		 * element that is no longer on it (undefined in
+		 * NetBSD's SLIST_REMOVE).  wd_deadline is already 0, so
+		 * the watchdog sweep skips it while it waits.
+		 * (net_80211 8505748 同一修复的镜像侧移植) */
 		wlan_usb_stats.submit_fail++;
 		xfer->in_flight = 0;
 		xfer->wd_deadline = 0U;
-		ipl = ipl_save();
-		SLIST_REMOVE(&dev->in_flight_xfers, xfer, usbd_xfer, wd_next);
-		ipl_restore(ipl);
 		xfer->status = usbd_map_err(ret);
 		usbd_ring_post(dev, xfer);
 	}
@@ -805,18 +853,20 @@ usbd_status usbd_delay_ms(struct usbd_device *dev, unsigned int ms) {
 
 char *usbd_devinfo_alloc(struct usbd_device *dev, int showclass) {
 	struct usbh_hubport *hport = dev->hport;
-	const char *vend;
-	const char *prod;
 	char *buf;
 
 	(void) showclass;
-	vend = (hport && hport->iManufacturer) ? hport->iManufacturer : "Realtek";
-	prod = (hport && hport->iProduct) ? hport->iProduct : "RTL8188EU";
 	buf = wlan_kmalloc(128, M_WAITOK, M_USB);
 	if (buf == NULL) {
 		return NULL;
 	}
-	snprintf(buf, 128, "%s %s, addr %d", vend, prod,
+	/* These dongles carry no readable product string, and naming one
+	 * after the first driver that needed this looked like a different
+	 * chip had attached: identify the device by its ids instead, the
+	 * chip drivers announce their own names. */
+	snprintf(buf, 128, "%04x:%04x, addr %d",
+	    hport ? (unsigned) hport->device_desc.idVendor : 0,
+	    hport ? (unsigned) hport->device_desc.idProduct : 0,
 	    hport ? hport->dev_addr : 0);
 	return buf;
 }

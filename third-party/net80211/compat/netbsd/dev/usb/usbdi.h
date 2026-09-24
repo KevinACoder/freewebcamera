@@ -119,6 +119,12 @@ void usbd_setup_isoc_xfer(struct usbd_xfer *, void *, uint16_t *,
 void usbd_get_xfer_status(struct usbd_xfer *, void **,
     void **, uint32_t *, usbd_status *);
 
+/* Explicit cache maintenance over a DMA buffer owned by an RX transfer
+ * (RTL8821CU bring-up forensics).  No-ops on coherent stacks; the
+ * cherryusb shim implements them through the platform dcache hooks. */
+void usbd_rx_buffer_invalidate(void *, uint32_t);
+void usbd_rx_buffer_arm(void *, uint32_t);
+
 usb_endpoint_descriptor_t *usbd_interface2endpoint_descriptor
     (struct usbd_interface *, uint8_t);
 
@@ -159,6 +165,7 @@ usb_endpoint_descriptor_t *
 
 usb_config_descriptor_t *usbd_get_config_descriptor(struct usbd_device *);
 usb_device_descriptor_t *usbd_get_device_descriptor(struct usbd_device *);
+uint8_t usbd_get_speed(struct usbd_device *);
 
 usbd_status usbd_set_interface(struct usbd_interface *, int);
 usbd_status usbd_get_interface(struct usbd_interface *, uint8_t *);

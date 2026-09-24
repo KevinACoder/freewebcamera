@@ -153,6 +153,14 @@ static void usbh_bus_event(uint8_t busid, uint8_t hub_index, uint8_t hub_port,
 		break;
 	case USBH_EVENT_DEVICE_DISCONNECTED:
 		usbh_report_port(bus, hub_index, hub_port, "gone");
+#ifdef CONFIG_USBHOST_MULTI_HCD
+		/* xHCI 侧必须释放该 root port 绑定的 slot: 否则下一次
+		 * 枚举复用死 slot, 每笔控制传输都超时(modeswitch dongle
+		 * 重连必现)。hub_index 1 = roothub。 */
+		if (USBH_BUS_IS_XHCI(busid) && hub_index == 1U) {
+			usbh_xhci_port_release(busid, hub_port);
+		}
+#endif
 		break;
 	default:
 		break;

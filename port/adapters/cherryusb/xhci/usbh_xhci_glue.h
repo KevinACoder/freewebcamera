@@ -32,6 +32,12 @@ uint32_t usbh_xhci_portsc(uint8_t busid, uint8_t port);
  * sequence tells "new port event" from "already handed to the hub thread". */
 uint32_t usbh_xhci_port_evt_seq(uint8_t busid);
 
+/* Release the slot bound to a root port after the hub layer confirmed a
+ * disconnect (USBH_EVENT_DEVICE_DISCONNECTED). Without it the stale slot
+ * silently swallows the next device's control transfers (every urb times
+ * out: the doorbell rings on a transfer ring the xHC no longer services). */
+void usbh_xhci_port_release(uint8_t busid, uint8_t port);
+
 /* The xHCI-flavoured low-level hooks. Not the generic usb_hc.h contract
  * names: usbh_glue.c dispatches that contract per busid and calls these for
  * xHCI buses (multi-HCD builds only). */

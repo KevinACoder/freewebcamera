@@ -16,7 +16,10 @@ struct ifnet;
 #include <port/bus/usb/port_usb.h>
 #include <port/bus/sd/port_sd.h>
 
-#define WLAN_PORT_MAX_IF 2
+/* 3 = SDIO module + two USB dongles (e.g. 8188EUS on the EHCI hub and the
+ * 8821CU on xHCI) can be claimed at once; the active one is picked by
+ * wlan_port_select().  NET80211_PORT(L): was 2 on the library mainline. */
+#define WLAN_PORT_MAX_IF 3
 #define WLAN_PORT_MAX_BULK_EP 4
 
 struct wlan_port_iface {

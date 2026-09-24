@@ -294,15 +294,52 @@ static int cmd_wlan(int argc, char **argv)
 		return 0;
 	}
 
+	if (argc >= 2 && strcmp(argv[1], "dbg") == 0 && argc == 3) {
+		/* runtime rtw88 debug mask (RTW_DBG_USB|RX|... bits from
+		 * dist/main.h); compiled in only with CONFIG_RTW88_DEBUG.
+		 * parse_hex, not strtoul: the shell libc's strtoul ignores
+		 * the base argument, "0x00080004" parsed as 0 */
+		extern unsigned int rtw_debug_mask;
+		rtw_debug_mask = (unsigned int) parse_hex(argv[2]);
+		csh_printf(csh, "wlan: rtw_debug_mask=0x%x\r\n",
+			   rtw_debug_mask);
+		return 0;
+	}
+
+	if (argc >= 2 && strcmp(argv[1], "rawdump") == 0) {
+		/* retained-memory raw RX capture (rtw88_usb.c): demux
+		 * ground truth without racing the console flood */
+		extern void rtw88_usb_rawdump(void);
+		rtw88_usb_rawdump();
+		return 0;
+	}
+
+	if (argc >= 2 && strcmp(argv[1], "select") == 0) {
+		/* several adapters can be attached at once (USB dongle +
+		 * SDIO module); the active one owns wlan up/scan/xmit */
+		if (argc < 3 || wlan_port_select(argv[2]) != 0) {
+			csh_printf(csh,
+				   "wlan: select <urtwn|rtw8189f|rtw88u>\r\n");
+			return 0;
+		}
+		csh_printf(csh, "wlan: active adapter %s\r\n",
+			   wlan_port_active_name());
+		return 0;
+	}
+
 	csh_printf(csh,
 		   "usage: wlan select urtwn|rtw8189f | rate 24|36|54 | "
 		   "scan [seconds] | status | net | "
 		   "wlan trace [0|1|2] | wlan usbstats | wlan stats | "
 		   "wlan sdreg | "
 		   "wlan reg read|write|txq | wlan calib [0|1] | "
-		   "wlan ra [0|1] | wlan fwfix\r\n");
+		   "wlan ra [0|1] | wlan fwfix | wlan dbg <mask> | "
+		   "wlan rawdump\r\n");
 	return 0;
 }
 
-CSH_CMD_EXPORT_ALIAS_FULL(cmd_wlan, wlan, "wlan select <adapter> | rate <Mbps> | scan | status | net | stats | usbstats",
+CSH_CMD_EXPORT_ALIAS_FULL(cmd_wlan, wlan,
+        "wlan select urtwn|rtw8189f|rtw88u | rate 24|36|54 | "
+        "scan [s] | status | net | trace [n] | usbstats | stats | "
+        "sdreg | reg | calib | ra | fwfix | dbg <mask> | rawdump",
 			  "net80211 adapter: bring up the radio and scan");

@@ -37,14 +37,16 @@
 #include <port/osal/cmsis_rtos2/wlan_port_cmsis.h>
 #include <port/net/lwip/lwip_netif.h>
 
-/* the compiled-in chip drivers (driver/urtwn/urtwn_reg.c and
- * driver/rtw8189f/rtw8189f_reg.c export them; iwm waits for the PCIe
- * backend, M5) */
+/* the compiled-in chip drivers (driver/urtwn/urtwn_reg.c,
+ * driver/rtw8189f/rtw8189f_reg.c and driver/rtw88/rtw88u_reg.c export
+ * them; iwm waits for the PCIe backend, M5) */
 extern const struct wlan_chip_driver urtwn_driver;
 extern const struct wlan_chip_driver rtw8189f_driver;
+extern const struct wlan_chip_driver rtw88u_driver;
 const struct wlan_chip_driver *const wlan_chip_drivers[] = {
 	&urtwn_driver,
 	&rtw8189f_driver,
+	&rtw88u_driver,
 	NULL
 };
 
@@ -121,6 +123,14 @@ extern const uint8_t rtl8188eufw_data[];
 extern const size_t rtl8188eufw_size;
 extern const uint8_t rtw8189ffw_data[];
 extern const size_t rtw8189ffw_size;
+extern const uint8_t rtw8821c_fw_data[];
+extern const size_t rtw8821c_fw_size;
+
+/* builds the USB class hook's VID/PID match table from
+ * wlan_chip_drivers[]; must run before the hub thread enumerates
+ * (the library's own lanes call it from net_bridge.c, which this
+ * port does not compile) */
+extern void usbh_wlan_class_init(void);
 
 /* ------------------------------------------------------------------ */
 
@@ -150,6 +160,11 @@ int wlan_start(void) {
 		(size_t) rtw8189ffw_size) != 0) {
 		return -1;
 	}
+	if (wlan_port_firmware_register("rtw8821c_fw.bin", rtw8821c_fw_data,
+		(size_t) rtw8821c_fw_size) != 0) {
+		return -1;
+	}
+	usbh_wlan_class_init();
 	wlan_started = 1;
 	return 0;
 }
