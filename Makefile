@@ -391,6 +391,12 @@ ifeq ($(THREADX_UP),1)
 BUILD  := build/$(BOARD)-threadx-uc
 TARGET := $(BUILD)/threadx-uc
 CFLAGS += -DTHREADX_BUILD=1 -DTHREADX_UP_BUILD=1 -DTX_INCLUDE_USER_DEFINE_FILE -DTX_ARMV8_2 -DEL1
+# Debug-carrier build config (D57): symbols plus near-no optimization, so
+# GDB's line table places breakpoints on addresses code actually reaches.
+# The baseline -O2 stays for the mainline images; UC_OPT=-O0 reproduces the
+# reference SDK's CONFIG_DEBUG_NOOPT exact-noopt shape.
+UC_OPT ?= -Og
+CFLAGS := $(filter-out -O2,$(CFLAGS)) $(UC_OPT) -g3
 THREADX_KERNEL_SRCS := $(wildcard third-party/threadx/common/src/*.c)
 THREADX_PORT_SRCS := $(wildcard third-party/threadx/ports/cortex_a55/gnu/src/*.S)
 KERNEL_SRCS := $(THREADX_KERNEL_SRCS) port/adapters/threadx/tx_glue.c \
