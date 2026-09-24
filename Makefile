@@ -193,12 +193,13 @@ $(TARGET).bin: $(TARGET).elf
 
 all: $(TARGET).bin
 
-# Copy to the TFTP root under the name the board's boot profile expects.
+# Copy to the TFTP root under the name the board's boot profile expects
+# (oslab `rtos` profile -> rtos.bin; the banner tells the images apart).
 # Records the hash before and after so the transfer is verifiable.
 deploy: $(TARGET).bin
-	@printf 'before: '; sha256sum /mnt/d/tftpboot/freertos.bin 2>/dev/null || echo '(absent)'
-	cp $(TARGET).bin /mnt/d/tftpboot/freertos.bin
-	@printf 'after : '; sha256sum /mnt/d/tftpboot/freertos.bin
+	@printf 'before: '; sha256sum /mnt/d/tftpboot/rtos.bin 2>/dev/null || echo '(absent)'
+	cp $(TARGET).bin /mnt/d/tftpboot/rtos.bin
+	@printf 'after : '; sha256sum /mnt/d/tftpboot/rtos.bin
 	@printf 'local : '; sha256sum $(TARGET).bin
 
 # Submodules + patches (policy: IMPORT-INFO.md and patches/README.md).
