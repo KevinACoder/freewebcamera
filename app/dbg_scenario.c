@@ -39,7 +39,7 @@
 #include "usb.h"
 #include "wlan.h"
 
-volatile int dbg_scenario;
+volatile int dbg_scenario = 7;
 volatile unsigned long dbg_probe_word;
 
 __attribute__((noinline)) void dbg_probe_breakpoint(void)
@@ -148,6 +148,19 @@ static void scenario_debug_probe(void)
 	dbg_probe_step();
 }
 
+/* --- scenario 7: wl-load ------------------------------------------------
+ * Implemented in the adapter layer
+ * (port/adapters/net80211/wl_load_scenario.c): it drives lwIP/iperf3/wpa
+ * directly, and app/ cannot reach those headers (INC_COMMON vs
+ * INC_ADAPTER). The dbg_wl_* knobs and status variables live there;
+ * dbg_scenario.h documents them for the host operator. */
+extern int wl_load_scenario_run(void);
+
+static void scenario_wl_load(void)
+{
+	(void)wl_load_scenario_run();
+}
+
 typedef void (*scenario_fn)(void);
 
 static const scenario_fn scenarios[] = {
@@ -158,6 +171,7 @@ static const scenario_fn scenarios[] = {
 	scenario_fs,	/* 4 */
 	scenario_all,	/* 5 */
 	scenario_debug_probe,	/* 6 */
+	scenario_wl_load,	/* 7 */
 };
 
 #define SCENARIO_COUNT	((int)(sizeof(scenarios) / sizeof(scenarios[0])))
@@ -174,10 +188,17 @@ void dbg_scenario_task(void *argument)
 	for (;;) {
 		int which;
 
-		/* The gate. The first break lands here before anything else
-		 * runs - it doubles as the "is the stub alive" heartbeat when
-		 * the tick poll is not an option (e.g. tick wedged). */
-		gdb_break();
+		/* The gate. With dbg_scenario == 0 (the pure attach
+		 * carrier) this is the boot park and the "is the stub
+		 * alive" heartbeat; a preset scenario runs straight
+		 * away with the console live - the host only attaches
+		 * at a park (auto stall-park, or after the run). One
+		 * run per selection: the scenario number clears to 0
+		 * below, so nothing re-runs unattended (the init
+		 * scenarios are not idempotent). */
+		if (dbg_scenario == 0) {
+			gdb_break();
+		}
 
 		which = dbg_scenario;
 		if (which < 0 || which >= SCENARIO_COUNT) {
@@ -190,5 +211,6 @@ void dbg_scenario_task(void *argument)
 		board_log("dbg: scenario %d start\n", which);
 		scenarios[which]();
 		board_log("dbg: scenario %d done\n", which);
+		dbg_scenario = 0;
 	}
 }

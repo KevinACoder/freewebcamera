@@ -776,6 +776,9 @@ SHELL_SRCS := \
 	port/adapters/wpa_supplicant/wpa_cmd.c
 ADAPTER_SRCS := $(filter-out $(SHELL_SRCS),$(ADAPTER_SRCS))
 WPA_PORT_SRCS := $(filter-out port/adapters/wpa_supplicant/wpa_cmd.c,$(WPA_PORT_SRCS))
+# scenario 7 (wl-load): drives wpa/lwIP/iperf3 directly and parks in the
+# stub on a load stall - needs the stub, so UP builds only.
+ADAPTER_SRCS += port/adapters/net80211/wl_load_scenario.c
 endif
 
 INC_ADAPTER += -Ithird-party/net80211 \
