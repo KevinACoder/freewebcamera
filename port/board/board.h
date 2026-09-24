@@ -105,6 +105,15 @@ void board_console_write(const char *message);
  * its own formatter. One line per call; not for per-packet output. */
 void board_log(const char *fmt, ...);
 
+/* gdb-session console gate (D56). While a stub session is live, the locked
+ * sinks (board_early_print / board_log) drop their output instead of
+ * spraying task logs into the middle of the RSP stream; what would have
+ * been printed is counted, and the stub flushes a one-line accounting when
+ * the session ends. The mute ask is weak-linked: the images without the
+ * stub (FreeRTOS, ThreadX SMP, ktest) never see a session, and the stub's
+ * glue supplies the strong definition. */
+void board_console_gate_report(void);
+
 /* Stamped but deliberately NOT locked: for contexts that must not spin on
  * the print lock (ISRs, the SMP bring-up window, the secondary descent -
  * the lock is taken with IRQs masked, so a non-fatal print from an ISR

@@ -337,7 +337,11 @@ static void thread_create_into_slot(thread_slot_t *slot, osThreadFunc_t func,
 	 * zero or full mask means "no constraint". smp_test's per-core
 	 * pinning rides on this; dropping it silently would break the
 	 * comparison workload's core-binding contract. Applied before the
-	 * resume so the thread never runs on a forbidden core. */
+	 * resume so the thread never runs on a forbidden core.
+	 * UP build (THREADX_UP): no exclusion API exists under common/ and
+	 * a single core runs everything - the mask is a no-op there
+	 * (TX_THREAD_SMP_CORE_MASK only exists under common_smp). */
+#ifdef TX_THREAD_SMP_CORE_MASK
 	if (affinity_mask != 0U &&
 	    (affinity_mask & (uint32_t)TX_THREAD_SMP_CORE_MASK) !=
 		    (uint32_t)TX_THREAD_SMP_CORE_MASK) {
@@ -345,6 +349,9 @@ static void thread_create_into_slot(thread_slot_t *slot, osThreadFunc_t func,
 						 (ULONG)~affinity_mask &
 						 (ULONG)TX_THREAD_SMP_CORE_MASK);
 	}
+#else
+	(void)affinity_mask;
+#endif
 
 	slot->state = SLOT_LIVE;
 	(void)tx_thread_resume(&slot->thread);

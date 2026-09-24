@@ -50,6 +50,10 @@
 #include "irq_ctrl.h"
 #include "os_tick.h"
 
+#ifdef THREADX_UP_BUILD
+#include "tx_gdb_glue.h"
+#endif
+
 /* ThreadX tick rate, mirroring the FreeRTOS image's configTICK_RATE_HZ. */
 #define TX_TICK_RATE_HZ		1000U
 
@@ -116,6 +120,12 @@ void tx_irq_handler(void)
 	}
 
 	if (id == (uint32_t)BOARD_TICK_INTID) {
+#ifdef THREADX_UP_BUILD
+		/* D56: the polled Ctrl-C watcher runs ahead of the timer
+		 * work - a break here freezes the world inside this IRQ,
+		 * and continue ERETs back into the tick handler. */
+		tx_gdb_tick_poll();
+#endif
 		/* Tick: expirations + per-core time slice, under the kernel's
 		 * own SMP protection inside _tx_timer_interrupt, then the
 		 * rearm. The rearm (OS_Tick_AcknowledgeIRQ reloads TVAL) is
@@ -132,8 +142,8 @@ void tx_irq_handler(void)
 		 * and performs the preemption itself; the IPI only has to
 		 * interrupt the target core's masked poll loop. */
 	} else if (id != 1023U) {
-		/* Everything else - console, and any SPI/LPI the board routed
-		 * - goes through the board's handler table. */
+		/* Everything else - and any SPI/LPI the board routed - goes
+		 * through the board's handler table. */
 		board_gicv3_dispatch(id);
 	} else {
 		/* Spurious (IAR=1023): same stamped raw marker as the
@@ -148,6 +158,13 @@ void tx_irq_handler(void)
 }
 
 /* --- SMP: cross-core preemption -------------------------------------------- */
+
+/* Everything in this block is common_smp-only: the UP kernel has no
+ * inter-core preemption, no preempt IPI and no secondary wait (the UP build
+ * defines THREADX_UP_BUILD, and runs with SMP_CORES=1 so startup.S parks the
+ * other cores before the kernel is ever entered). */
+
+#ifndef THREADX_UP_BUILD
 
 /* Replacement for the port's tx_thread_smp_core_preempt.S - see the file
  * comment for why the upstream encoding cannot reach this board's cores.
@@ -173,6 +190,8 @@ static void tx_smp_ipi_setup(void)
 			BOARD_IRQ_PRIORITY_SGI_RAW);
 	IRQ_Enable((IRQn_ID_t)TX_PREEMPT_SGI_INTID);
 }
+
+#endif /* !THREADX_UP_BUILD */
 
 /* --- tick ------------------------------------------------------------------ */
 
@@ -220,7 +239,16 @@ void tx_application_define(void *first_unused_memory)
 {
 	vbar_install();
 	tx_tick_setup();
+#ifndef THREADX_UP_BUILD
 	tx_smp_ipi_setup();
+#endif
+
+#ifdef THREADX_UP_BUILD
+	/* D56: serial gdb stub - dbgport first. The stub's entries are the
+	 * carrier task's startup break (app/dbg_scenario.c) and the tick
+	 * poll's Ctrl-C (tx_irq_handler). */
+	tx_gdb_init();
+#endif
 
 	tx_cmsis_application_define(first_unused_memory);
 }
@@ -232,6 +260,7 @@ void tx_application_define(void *first_unused_memory)
  * _tx_thread_schedule once core 0 finishes kernel init. Never returns. */
 void tx_secondary_main(void)
 {
+#ifndef THREADX_UP_BUILD
 	uint32_t cpu_id = board_smp_core_id();
 
 	vbar_install();
@@ -243,8 +272,11 @@ void tx_secondary_main(void)
 	board_smp_mark_core_up(cpu_id);
 
 	(void)_tx_thread_smp_initialize_wait();
+#endif
 
-	/* Not reached: the wait jumps straight into the scheduling loop. */
+	/* UP build: unreachable - startup.S parks every nonzero logical core
+	 * when SMP_CORES=1 and never hands out kernel_secondary_main. The
+	 * symbol must still link: tx_vectors.S's SPSel stub branches here. */
 	for (;;) {
 		__asm__ __volatile__("wfe");
 	}
@@ -298,8 +330,15 @@ void tx_fault_park(uint32_t kind)
 		__asm__ __volatile__("mrs %0, far_el1" : "=r"(rec->far));
 		__asm__ __volatile__("mrs %0, elr_el1" : "=r"(rec->elr));
 		__asm__ __volatile__("mov %0, x30" : "=r"(rec->lr));
+#ifdef THREADX_UP_BUILD
+		/* UP kernel: the current thread is the scalar
+		 * _tx_thread_current_ptr (tx_thread.h); the SMP getter does
+		 * not exist under common/. */
+		rec->cur_thread = (unsigned long) _tx_thread_current_ptr;
+#else
 		rec->cur_thread =
 		    (unsigned long) _tx_thread_smp_current_thread_get();
+#endif
 		fault_log_n = i + 1U;
 	}
 	fault_seq++;
@@ -330,8 +369,19 @@ void tx_fault_park(uint32_t kind)
 			unsigned long se =
 			    (unsigned long) t->tx_thread_stack_end;
 			unsigned int st = t->tx_thread_state;
+			/* Snapshot the switch-out context BEFORE anything on
+			 * this stack can clobber it: the park runs on the
+			 * faulting thread's own stack, and the diag buffer
+			 * below lands exactly on the words being read. */
+			unsigned long ctx[12];
 			char sd[64];
 			unsigned int sl;
+			unsigned int k;
+
+			for (k = 0U; k < 12U; k++) {
+				ctx[k] = ((const volatile unsigned long *)
+					  (se - 11UL * 8UL))[k];
+			}
 
 			sl = (unsigned int) cmsis_slot_diag(t, sd, sizeof(sd));
 			sd[sl] = '\0';
@@ -344,22 +394,15 @@ void tx_fault_park(uint32_t kind)
 			 * show pc/lr/sp of where it was switched out - the
 			 * real "where was it" when the faulting context is
 			 * the scheduler/IRQ path, not the thread */
-			{
-				const volatile unsigned long *ctx =
-				    (const volatile unsigned long *)
-				    (se - 11UL * 8UL);
-				unsigned int k;
-
+			o += (size_t) snprintf(dump + o,
+			    sizeof(dump) - o, "  tctx:");
+			for (k = 0U; k < 12U; k++) {
 				o += (size_t) snprintf(dump + o,
-				    sizeof(dump) - o, "  tctx:");
-				for (k = 0U; k < 12U; k++) {
-					o += (size_t) snprintf(dump + o,
-					    sizeof(dump) - o, " %08lx",
-					    ctx[k] & 0xffffffffUL);
-				}
-				o += (size_t) snprintf(dump + o,
-				    sizeof(dump) - o, "\n");
+				    sizeof(dump) - o, " %08lx",
+				    ctx[k] & 0xffffffffUL);
 			}
+			o += (size_t) snprintf(dump + o,
+			    sizeof(dump) - o, "\n");
 		}
 	}
 	if (i >= 4U) {
