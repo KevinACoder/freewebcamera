@@ -22,7 +22,7 @@
 /*
  * Driver definitions.
  */
-#define URTWN_RX_LIST_COUNT		1
+#define URTWN_RX_LIST_COUNT		4
 #define URTWN_TX_LIST_COUNT		8
 
 #define URTWN_HOST_CMD_RING_COUNT	32

@@ -8,6 +8,12 @@
  *  - usbd_transfer -> usbh_submit_urb with urb->timeout = 0, i.e. pure
  *    asynchronous per-URB QH; the NetBSD timeout watchdog stays with the
  *    driver (urtwn_watchdog -> usbd_abort_pipe);
+ *  - the NetBSD per-pipe FIFO (up_queue) is reproduced here: the HCD
+ *    keeps one urb per endpoint at a time, later xfers park on the pipe
+ *    and the urb worker arms the next in submission order
+ *    (usbd_pipe_kick) - armed urbs beyond the first are served
+ *    newest-first by the EHCI async ring, and the device emits bulk
+ *    frames in arrival order;
  *  - urb->complete runs in the EHCI interrupt handler, so it only drops
  *    the xfer into an IPL-protected ring and posts a semaphore; the
  *    driver callbacks run on the per-device worker kthread;
@@ -77,8 +83,6 @@ struct usbd_device {
 	struct usbh_hubport *hport;
 	struct wlan_usb_dev *ud_port;
 	usb_device_descriptor_t ddesc;
-	/* the two configuration descriptors have the same layout; cached
-	 * for usbd_get_config_descriptor (rtw88 reads it at attach) */
 	usb_config_descriptor_t cdesc;
 	struct usbd_interface ifaces[USBD_SHIFACE_MAX];
 	volatile int dying;
@@ -120,6 +124,17 @@ struct usbd_pipe {
 	usb_endpoint_descriptor_t ed;              /* NetBSD view */
 	uint8_t data_toggle;
 	SLIST_HEAD(, usbd_xfer) pending;
+	/* NetBSD up_queue: xfers parked while the pipe's slot at the HCD
+	 * is taken.  The cherryusb host contract is one urb per endpoint
+	 * in flight; armed xfers beyond the first are served newest-first
+	 * by the async ring and the device emits bulk frames in arrival
+	 * order, so ordering is enforced here instead.  All xq state is
+	 * mutated under the port serializer (callers hold it around
+	 * usbd_transfer; the worker takes it in usbd_pipe_kick). */
+	SLIST_HEAD(, usbd_xfer) xq;
+	struct usbd_xfer *xq_tail;
+	int xq_busy;	/* an armed xfer holds the pipe */
+	unsigned xq_len;
 };
 
 struct usbd_xfer {
@@ -133,7 +148,16 @@ struct usbd_xfer {
 	void *dma_buf;
 	usbd_status status;
 	uint32_t actlen;
+	unsigned submit_ms;
+	unsigned arm_ms;
+	unsigned done_ms;
 	volatile int in_flight;
+	int in_xq;	/* parked on pipe->xq, not yet at the HCD */
+	uint8_t on_pending;	/* linked into pipe->pending; a SLIST_REMOVE of
+				 * a non-member walks off into the heap and
+				 * both bends the list and rewrites random
+				 * allocator words */
+	uint8_t on_wd;		/* linked into dev->in_flight_xfers */
 	void *dma_raw;	/* the block dma_buf points inside of; the free
 			 * must go to this one - vPortFree on the aligned
 			 * interior point reads a phantom heap header and
@@ -144,6 +168,7 @@ struct usbd_xfer {
 	struct usbh_urb urb;
 	SLIST_ENTRY(usbd_xfer) next;
 	SLIST_ENTRY(usbd_xfer) wd_next;
+	SLIST_ENTRY(usbd_xfer) xq_next;
 };
 
 /* control bounce region: EHCI requires 64-byte aligned setup/data while
@@ -206,7 +231,37 @@ static struct wlan_usb_stats {
 	unsigned task_drop;	/* usb_add_task: task ring full, task lost */
 	unsigned task_busy;	/* usb_add_task: already queued (normal) */
 	int rx_err_last;	/* last negative RX completion (cherryusb code) */
+	unsigned q_kicks;	/* xfers armed from the pipe queue */
+	unsigned q_peak;	/* max xfers parked on one pipe */
+	unsigned q_flush;	/* xfers returned CANCELLED by abort/close */
+	unsigned q_timeout;	/* queued xfers timed out before arming */
+	unsigned q_orphan;	/* destroyed while parked (must stay 0) */
 } wlan_usb_stats;
+
+static struct wlan_usb_latency {
+	unsigned samples;
+	unsigned queue_total_ms;
+	unsigned hcd_total_ms;
+	unsigned wake_total_ms;
+	unsigned queue_max_ms;
+	unsigned hcd_max_ms;
+	unsigned wake_max_ms;
+} wlan_usb_tx_latency, wlan_usb_rx_latency;
+
+static void wlan_usb_latency_record(struct wlan_usb_latency *lat,
+	const struct usbd_xfer *xfer, unsigned now_ms) {
+	unsigned queue_ms = xfer->arm_ms - xfer->submit_ms;
+	unsigned hcd_ms = xfer->done_ms - xfer->arm_ms;
+	unsigned wake_ms = now_ms - xfer->done_ms;
+
+	lat->samples++;
+	lat->queue_total_ms += queue_ms;
+	lat->hcd_total_ms += hcd_ms;
+	lat->wake_total_ms += wake_ms;
+	if (queue_ms > lat->queue_max_ms) lat->queue_max_ms = queue_ms;
+	if (hcd_ms > lat->hcd_max_ms) lat->hcd_max_ms = hcd_ms;
+	if (wake_ms > lat->wake_max_ms) lat->wake_max_ms = wake_ms;
+}
 
 void wlan_usbdi_stats_dump(void);
 
@@ -232,6 +287,53 @@ static void usbd_ring_post(struct usbd_device *dev, struct usbd_xfer *xfer) {
 	dev->ring_tail = tail + 1;
 	wlan_usb_stats.post_ok++;
 	usb_osal_sem_give(dev->ring_sem);
+}
+
+/* --- pipe queue (NetBSD up_queue) ---------------------------------- */
+
+/* remove a parked xfer from its pipe queue; callers hold the serializer */
+static void usbd_xq_unlink(struct usbd_pipe *pipe, struct usbd_xfer *xfer) {
+	struct usbd_xfer *cur, *prev = NULL;
+
+	SLIST_FOREACH(cur, &pipe->xq, xq_next) {
+		if (cur == xfer) {
+			if (prev == NULL) {
+				SLIST_REMOVE_HEAD(&pipe->xq, xq_next);
+			} else {
+				SLIST_REMOVE_AFTER(prev, xq_next);
+			}
+			if (pipe->xq_tail == xfer) {
+				pipe->xq_tail = prev;
+			}
+			if (pipe->xq_len > 0U) {
+				pipe->xq_len--;
+			}
+			return;
+		}
+		prev = cur;
+	}
+}
+
+/* return every parked xfer to the driver with one status, without
+ * touching the HCD (they never reached it).  Completions are posted to
+ * the ring so the callbacks still run on the urb worker.  Callers hold
+ * the serializer. */
+static void usbd_xq_flush(struct usbd_pipe *pipe, usbd_status status) {
+	struct usbd_xfer *xfer;
+
+	while ((xfer = SLIST_FIRST(&pipe->xq)) != NULL) {
+		SLIST_REMOVE_HEAD(&pipe->xq, xq_next);
+		if (SLIST_FIRST(&pipe->xq) == NULL) {
+			pipe->xq_tail = NULL;
+		}
+		pipe->xq_len--;
+		xfer->in_xq = 0;
+		xfer->wd_deadline = 0U;
+		xfer->status = status;
+		xfer->actlen = 0;
+		wlan_usb_stats.q_flush++;
+		usbd_ring_post(pipe->dev, xfer);
+	}
 }
 
 /* ------------------------------------------------------------------ */
@@ -333,6 +435,7 @@ usbd_status usbd_open_pipe(struct usbd_interface *iface, uint8_t address,
 	}
 	pipe->dev = dev;
 	SLIST_INIT(&pipe->pending);
+	SLIST_INIT(&pipe->xq);
 
 	id = usbd_get_interface_descriptor(iface);
 	for (i = 0;; i++) {
@@ -362,6 +465,9 @@ void usbd_close_pipe(struct usbd_pipe *pipe) {
 	if (pipe == NULL) {
 		return;
 	}
+	wlan_port_serializer_lock();
+	usbd_xq_flush(pipe, USBD_CANCELLED);
+	wlan_port_serializer_unlock();
 	ipl = ipl_save();
 	SLIST_FOREACH(xfer, &pipe->pending, next) {
 		if (xfer->in_flight) {
@@ -380,6 +486,12 @@ void usbd_abort_pipe(struct usbd_pipe *pipe) {
 	if (pipe == NULL) {
 		return;
 	}
+	/* NetBSD aborts the whole pipe: the queued xfers never reached the
+	 * HCD, so they come straight back CANCELLED; the armed one is
+	 * killed below and its completion kicks the (now empty) queue */
+	wlan_port_serializer_lock();
+	usbd_xq_flush(pipe, USBD_CANCELLED);
+	wlan_port_serializer_unlock();
 	ipl = ipl_save();
 	SLIST_FOREACH(xfer, &pipe->pending, next) {
 		if (xfer->in_flight) {
@@ -430,8 +542,24 @@ int usbd_create_xfer(struct usbd_pipe *pipe, size_t size, unsigned int flags,
 }
 
 void usbd_destroy_xfer(struct usbd_xfer *xfer) {
+	ipl_t ipl;
+
 	if (xfer == NULL) {
 		return;
+	}
+	if (xfer->in_xq && xfer->pipe != NULL) {
+		/* a parked xfer must have been flushed or completed before
+		 * the driver destroys it; unlink defensively and stay loud */
+		wlan_usb_stats.q_orphan++;
+		wlan_port_serializer_lock();
+		ipl = ipl_save();
+		usbd_xq_unlink(xfer->pipe, xfer);
+		SLIST_REMOVE(&xfer->pipe->dev->in_flight_xfers, xfer,
+		    usbd_xfer, wd_next);
+		xfer->on_wd = 0;
+		ipl_restore(ipl);
+		wlan_port_serializer_unlock();
+		xfer->in_xq = 0;
 	}
 	if (xfer->in_flight) {
 		wlan_usb_stats.kill_calls++;
@@ -475,21 +603,19 @@ void usbd_get_xfer_status(struct usbd_xfer *xfer, void **priv, void **buffer,
 	}
 }
 
-/* RX bring-up forensics hooks (see usbdi.h).  The RX buffers are
- * non-coherent on this port: without an invalidate before the driver
- * reads, cached lines hide what the dongle DMAed in.  arm() writes a
- * recognizable pattern and cleans it to DRAM so a completion that
- * still reads the pattern proves the device never wrote that range. */
+/* RX buffers cross the non-coherent USB DMA boundary.  Invalidate before
+ * consuming a completion, and arm with a known pattern so a short/no-write
+ * completion remains distinguishable in the retained capture path. */
 void usbd_rx_buffer_invalidate(void *buffer, uint32_t length) {
 	if (buffer != NULL && length != 0U) {
-		usb_dcache_invalidate((uintptr_t) buffer, length);
+		usb_dcache_invalidate((uintptr_t)buffer, length);
 	}
 }
 
 void usbd_rx_buffer_arm(void *buffer, uint32_t length) {
 	if (buffer != NULL && length != 0U) {
 		memset(buffer, 0xa5, length);
-		usb_dcache_flush((uintptr_t) buffer, length);
+		usb_dcache_flush((uintptr_t)buffer, length);
 	}
 }
 
@@ -510,8 +636,7 @@ static void usbd_shim_urb_complete(void *arg, int nbytes_or_err) {
 
 	wlan_usb_stats.complete++;
 
-	/* forensics 2026-09-24: name the raw cherryusb error for RX errors
-	 * (net_80211 9257cc1 同一修复的镜像侧移植) */
+	/* forensics 2026-09-24: name the raw cherryusb error for RX errors */
 	if (xfer != NULL && xfer->pipe != NULL &&
 	    !usbd_pipe_is_tx(xfer->pipe) && nbytes_or_err < 0) {
 		static unsigned rx_err_print;
@@ -532,6 +657,7 @@ static void usbd_shim_urb_complete(void *arg, int nbytes_or_err) {
 		return;
 	}
 	dev = xfer->pipe->dev;
+	xfer->done_ms = wlan_port_now_ms();
 	xfer->pipe->data_toggle = xfer->urb.data_toggle;
 
 	if (nbytes_or_err < 0) {
@@ -547,27 +673,164 @@ static void usbd_shim_urb_complete(void *arg, int nbytes_or_err) {
 	}
 }
 
+/* fill the urb from pipe state and hand the transfer to the HCD; the
+ * xfer is already on the device watchdog list and carries an armed
+ * deadline from its usbd_transfer call.  On submit failure the
+ * completion is synthesized onto the ring (the driver still gets its
+ * callback) and the cherry error code is returned so the caller can
+ * release the pipe for the next queued xfer. */
+static int usbd_pipe_arm(struct usbd_xfer *xfer) {
+	struct usbd_device *dev = xfer->pipe->dev;
+	ipl_t ipl;
+	int ret;
+
+	memset(&xfer->urb, 0, sizeof(xfer->urb));
+	/* seed from the pipe: with one urb in flight per pipe this read
+	 * always happens after the previous completion wrote the toggle
+	 * back (usbd_shim_urb_complete), or after clear-halt reset it */
+	xfer->urb.data_toggle = xfer->pipe->data_toggle;
+	usbh_bulk_urb_fill(&xfer->urb, dev->hport, xfer->pipe->cherry_ep,
+	    xfer->buffer, xfer->length,
+	    0 /* timeout=0: asynchronous */, usbd_shim_urb_complete, xfer);
+	{
+		/* USBD_FORCE_SHORT_XFER: bulk OUT of an exact multiple of
+		 * the max packet size terminates with a zero-length
+		 * packet (the HCD appends it from this flag); without it
+		 * the device-side bulk FIFO can hold the last full packet
+		 * waiting for a short-packet delimiter */
+		uint16_t mps = USB_GET_MAXPACKETSIZE(xfer->pipe->cherry_ep->wMaxPacketSize);
+
+		if ((xfer->flags & USBD_FORCE_SHORT_XFER) != 0U &&
+		    xfer->length != 0U && mps != 0U &&
+		    (xfer->length % mps) == 0U) {
+			xfer->urb.transfer_flags = USBH_URB_ZERO_PACKET;
+		}
+	}
+
+	xfer->in_flight = 1;
+	xfer->arm_ms = wlan_port_now_ms();
+	if (usbd_pipe_is_tx(xfer->pipe)) {
+		wlan_usb_stats.tx_submit++;
+	} else {
+		wlan_usb_stats.rx_submit++;
+	}
+	ipl = ipl_save();
+	SLIST_INSERT_HEAD(&xfer->pipe->pending, xfer, next);
+	xfer->on_pending = 1;
+	dev->in_flight_cnt++;
+	if (dev->in_flight_cnt > wlan_usb_stats.in_flight_peak) {
+		wlan_usb_stats.in_flight_peak = dev->in_flight_cnt;
+	}
+	ipl_restore(ipl);
+	{
+		static unsigned urb_subs;
+
+		if (wlan_trace_lvl >= 1 && urb_subs < 48) {
+			printf("[wlan] urb submit #%u: ep=%02x len=%u\n",
+			    urb_subs, xfer->pipe->ed.bEndpointAddress,
+			    xfer->length);
+		}
+		urb_subs++;
+	}
+
+	if (dev->hport == NULL) {
+		ret = -USB_ERR_NOTCONN;
+	} else {
+		ret = usbh_submit_urb(&xfer->urb);
+	}
+	if (ret != 0) {
+		/* not connected / busy: synthesize the callback so the
+		 * driver can reclaim its tx_data.  Leave the xfer on
+		 * in_flight_xfers: the worker's common path unlinks it
+		 * from both pipe->pending and in_flight_xfers, and a
+		 * second SLIST_REMOVE here would walk the list with an
+		 * element that is no longer on it (undefined in
+		 * NetBSD's SLIST_REMOVE).  wd_deadline is already 0, so
+		 * the watchdog sweep skips it while it waits. */
+		wlan_usb_stats.submit_fail++;
+		xfer->in_flight = 0;
+		xfer->wd_deadline = 0U;
+		xfer->status = usbd_map_err(ret);
+		xfer->done_ms = wlan_port_now_ms();
+		usbd_ring_post(dev, xfer);
+	}
+	return ret;
+}
+
+/* arm the next parked xfer, in submission order; called from the urb
+ * worker when an armed transfer retires (the shape of NetBSD's HCD
+ * softint restarting the pipe).  Holds the serializer so thread-side
+ * usbd_transfer callers queueing behind stay exclusive.  The loop only
+ * continues past a failed arm: a successful one owns the pipe again. */
+static void usbd_pipe_kick(struct usbd_pipe *pipe) {
+	struct usbd_xfer *xfer;
+	ipl_t ipl;
+	int ret;
+
+	wlan_port_serializer_lock();
+	for (;;) {
+		ipl = ipl_save();
+		xfer = SLIST_FIRST(&pipe->xq);
+		if (xfer == NULL) {
+			pipe->xq_busy = 0;
+			ipl_restore(ipl);
+			break;
+		}
+		SLIST_REMOVE_HEAD(&pipe->xq, xq_next);
+		if (SLIST_FIRST(&pipe->xq) == NULL) {
+			pipe->xq_tail = NULL;
+		}
+		pipe->xq_len--;
+		xfer->in_xq = 0;
+		ipl_restore(ipl);
+		wlan_usb_stats.q_kicks++;
+		ret = usbd_pipe_arm(xfer);
+		if (ret == 0) {
+			break;
+		}
+	}
+	wlan_port_serializer_unlock();
+}
+
 /* worker context: unlink from the pipe, then run the driver callback */
 static void usbd_shim_urb_work(struct usbd_xfer *xfer) {
 	usbd_callback cb;
 	void *priv;
 	usbd_status status;
 	ipl_t ipl;
+	int was_armed;
 
 	if (wlan_trace_lvl >= 1 && wlan_async_trace_seq < 48) {
 		printf("[wlan] urb done: status=%d actlen=%u\n",
 		    (int) xfer->status, xfer->actlen);
 	}
 
+	was_armed = xfer->in_flight;
+	if (was_armed && xfer->status == USBD_NORMAL_COMPLETION) {
+		wlan_usb_latency_record(usbd_pipe_is_tx(xfer->pipe)
+		    ? &wlan_usb_tx_latency : &wlan_usb_rx_latency,
+		    xfer, wlan_port_now_ms());
+	}
 	xfer->in_flight = 0;
 	xfer->wd_deadline = 0U;
 	if (xfer->pipe != NULL) {
 		ipl = ipl_save();
-		SLIST_REMOVE(&xfer->pipe->pending, xfer, usbd_xfer, next);
-		SLIST_REMOVE(&xfer->pipe->dev->in_flight_xfers, xfer,
-		    usbd_xfer, wd_next);
-		if (xfer->pipe->dev->in_flight_cnt > 0U) {
-			xfer->pipe->dev->in_flight_cnt--;
+		/* only a member may be SLIST_REMOVEd: parked timeouts and
+		 * xq flushes complete xfers that were never armed, and a
+		 * blind remove here walks off into the heap (the :769
+		 * fatal) bending the list and rewriting allocator words */
+		if (xfer->on_pending) {
+			SLIST_REMOVE(&xfer->pipe->pending, xfer,
+			    usbd_xfer, next);
+			xfer->on_pending = 0;
+		}
+		if (xfer->on_wd) {
+			SLIST_REMOVE(&xfer->pipe->dev->in_flight_xfers, xfer,
+			    usbd_xfer, wd_next);
+			xfer->on_wd = 0;
+			if (xfer->pipe->dev->in_flight_cnt > 0U) {
+				xfer->pipe->dev->in_flight_cnt--;
+			}
 		}
 		ipl_restore(ipl);
 	}
@@ -586,8 +849,17 @@ static void usbd_shim_urb_work(struct usbd_xfer *xfer) {
 		/* the HCD never recovers a halted bulk endpoint on its
 		 * own; clear the halt so the driver's re-arm actually
 		 * reaches the device instead of completing STALLED
-		 * forever */
+		 * forever.  This doubles as the queue's stall gate: the
+		 * parked xfers arm only after the endpoint is walking
+		 * again and the pipe toggle is back to DATA0. */
 		(void) usbd_pipe_clear_halt(xfer->pipe);
+	}
+	if (was_armed && xfer->pipe != NULL) {
+		/* only an armed completion frees the pipe's slot at the
+		 * HCD (a parked xfer returning by timeout/flush does not);
+		 * start the next queued xfer before the driver callback
+		 * so the wire keeps flowing while it runs */
+		usbd_pipe_kick(xfer->pipe);
 	}
 	if (cb != NULL) {
 		/* Run the driver callback under the port serializer, the
@@ -607,86 +879,63 @@ static void usbd_shim_urb_work(struct usbd_xfer *xfer) {
 
 usbd_status usbd_transfer(struct usbd_xfer *xfer) {
 	struct usbd_device *dev;
-	struct usbh_hubport *hport;
+	struct usbd_pipe *pipe;
 	ipl_t ipl;
-	int ret;
 
 	if (xfer->pipe == NULL) {
 		return USBD_INVAL;
 	}
-	dev = xfer->pipe->dev;
-	hport = dev->hport;
-	if (hport == NULL) {
+	pipe = xfer->pipe;
+	dev = pipe->dev;
+	if (dev->hport == NULL) {
 		return USBD_IOERROR;
 	}
 	shim_locks_init();
 
-	memset(&xfer->urb, 0, sizeof(xfer->urb));
-	xfer->urb.data_toggle = xfer->pipe->data_toggle;
-	usbh_bulk_urb_fill(&xfer->urb, hport, xfer->pipe->cherry_ep,
-		xfer->buffer, xfer->length,
-		0 /* timeout=0: asynchronous */, usbd_shim_urb_complete, xfer);
-	{
-		/* USBD_FORCE_SHORT_XFER: bulk OUT of an exact multiple of
-		 * the max packet size terminates with a zero-length
-		 * packet (the HCD appends it from this flag); without it
-		 * the device-side bulk FIFO can hold the last full packet
-		 * waiting for a short-packet delimiter */
-		uint16_t mps = USB_GET_MAXPACKETSIZE(xfer->pipe->cherry_ep->wMaxPacketSize);
+	wlan_usb_stats.submit++;
+	xfer->submit_ms = wlan_port_now_ms();
 
-		if ((xfer->flags & USBD_FORCE_SHORT_XFER) != 0U &&
-		    xfer->length != 0U && mps != 0U &&
-		    (xfer->length % mps) == 0U) {
-			xfer->urb.transfer_flags = USBH_URB_ZERO_PACKET;
-		}
-	}
-
+	/* NetBSD usbdi serves every pipe strictly FIFO (up_queue) while
+	 * the cherryusb HCD contract is one urb per endpoint in flight:
+	 * the EHCI port arms a fresh QH at the async ring head per urb,
+	 * so several armed urbs would be served newest-first and the
+	 * device emits bulk frames in arrival order.  While the pipe's
+	 * slot at the HCD is taken, park here and let the completion
+	 * worker arm us in submission order (usbd_pipe_kick).  Callers
+	 * hold the port serializer (the splnet() discipline), which makes
+	 * this exclusive against the worker's kick. */
+	ipl = ipl_save();
+	SLIST_INSERT_HEAD(&dev->in_flight_xfers, xfer, wd_next);
+	xfer->on_wd = 1;
 	xfer->status = USBD_IN_PROGRESS;
 	xfer->actlen = 0;
-	xfer->in_flight = 1;
 	xfer->wd_deadline = (xfer->timeout != 0U)
 	    ? wlan_port_now_ms() + xfer->timeout : 0U;
-	wlan_usb_stats.submit++;
-	if (usbd_pipe_is_tx(xfer->pipe)) {
-		wlan_usb_stats.tx_submit++;
-	} else {
-		wlan_usb_stats.rx_submit++;
-	}
-	ipl = ipl_save();
-	SLIST_INSERT_HEAD(&xfer->pipe->pending, xfer, next);
-	SLIST_INSERT_HEAD(&dev->in_flight_xfers, xfer, wd_next);
-	dev->in_flight_cnt++;
-	if (dev->in_flight_cnt > wlan_usb_stats.in_flight_peak) {
-		wlan_usb_stats.in_flight_peak = dev->in_flight_cnt;
-	}
-	ipl_restore(ipl);
-	{
-		static unsigned urb_subs;
-
-		if (wlan_trace_lvl >= 1 && urb_subs < 48) {
-			printf("[wlan] urb submit #%u: ep=%02x len=%u\n",
-			    urb_subs, xfer->pipe->ed.bEndpointAddress,
-			    xfer->length);
+	if (pipe->xq_busy) {
+		if (pipe->xq_tail != NULL) {
+			SLIST_INSERT_AFTER(pipe->xq_tail, xfer, xq_next);
+		} else {
+			SLIST_INSERT_HEAD(&pipe->xq, xfer, xq_next);
 		}
-		urb_subs++;
+		pipe->xq_tail = xfer;
+		pipe->xq_len++;
+		if (pipe->xq_len > wlan_usb_stats.q_peak) {
+			wlan_usb_stats.q_peak = pipe->xq_len;
+		}
+		xfer->in_xq = 1;
+		ipl_restore(ipl);
+		return USBD_IN_PROGRESS;
 	}
+	pipe->xq_busy = 1;
+	ipl_restore(ipl);
 
-	ret = usbh_submit_urb(&xfer->urb);
-	if (ret != 0) {
-		/* not connected / busy: synthesize the callback so the
-		 * driver can reclaim its tx_data.  Leave the xfer on
-		 * in_flight_xfers: the worker's common path unlinks it
-		 * from both pipe->pending and in_flight_xfers, and a
-		 * second SLIST_REMOVE here would walk the list with an
-		 * element that is no longer on it (undefined in
-		 * NetBSD's SLIST_REMOVE).  wd_deadline is already 0, so
-		 * the watchdog sweep skips it while it waits.
-		 * (net_80211 8505748 同一修复的镜像侧移植) */
-		wlan_usb_stats.submit_fail++;
-		xfer->in_flight = 0;
-		xfer->wd_deadline = 0U;
-		xfer->status = usbd_map_err(ret);
-		usbd_ring_post(dev, xfer);
+	if (usbd_pipe_arm(xfer) != 0) {
+		/* submit failed: the synthesized completion is already on
+		 * its way through the ring and nothing is armed on this
+		 * pipe, so the slot is free again right now */
+		ipl = ipl_save();
+		pipe->xq_busy = 0;
+		ipl_restore(ipl);
 	}
 	return USBD_IN_PROGRESS;
 }
@@ -937,11 +1186,15 @@ void wlan_usbdi_trace_set(unsigned level) {
 
 /* submit/complete reconciliation for `wlan usbstats`.  Clean run:
  *   worker == post_ok == complete - guard_drop + submit_fail
- *   submit == worker + xfers still in flight, peak <= 17 (16 tx + 1 rx)
+ *   submit == worker + (xfers still armed at the HCD) + (xfers still
+ *   parked on pipe queues); q_peak <= 8 (urtwn tx pool per pipe),
+ *   q_kicks + tx_submit first-of-pipe == tx_submit total
  * A gap between complete and submit with guard_drop == 0 means the HCD
  * itself lost a completion (kill paths / IAA eat) - exactly what this
  * instrumentation is built to expose. */
 void wlan_usbdi_stats_dump(void) {
+	const struct wlan_usb_latency *tx = &wlan_usb_tx_latency;
+	const struct wlan_usb_latency *rx = &wlan_usb_rx_latency;
 	printf("[wlan] usbstats: submit=%u submit_fail=%u complete=%u "
 	    "guard_drop=%u post_ok=%u post_drop=%u worker=%u kill=%u "
 	    "peak_inflight=%u\n",
@@ -960,6 +1213,19 @@ void wlan_usbdi_stats_dump(void) {
 	    wlan_usb_stats.ctrl_fail, wlan_usb_stats.ctrl_retry,
 	    wlan_usb_stats.stall_clear,
 	    wlan_usb_stats.task_drop, wlan_usb_stats.task_busy);
+	printf("[wlan] usbstats: q_kicks=%u q_peak=%u q_flush=%u "
+	    "q_timeout=%u q_orphan=%u\n",
+	    wlan_usb_stats.q_kicks, wlan_usb_stats.q_peak,
+	    wlan_usb_stats.q_flush, wlan_usb_stats.q_timeout,
+	    wlan_usb_stats.q_orphan);
+	printf("[wlan] usbtime tx: n=%u queue=%u/%u hcd=%u/%u wake=%u/%u ms (sum/max)\n",
+	    tx->samples, tx->queue_total_ms, tx->queue_max_ms,
+	    tx->hcd_total_ms, tx->hcd_max_ms, tx->wake_total_ms,
+	    tx->wake_max_ms);
+	printf("[wlan] usbtime rx: n=%u queue=%u/%u hcd=%u/%u wake=%u/%u ms (sum/max)\n",
+	    rx->samples, rx->queue_total_ms, rx->queue_max_ms,
+	    rx->hcd_total_ms, rx->hcd_max_ms, rx->wake_total_ms,
+	    rx->wake_max_ms);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1048,17 +1314,23 @@ bool usb_task_pending(struct usbd_device *dev, struct usb_task *task) {
 /* ------------------------------------------------------------------ */
 /* workers */
 
-/* Watchdog pass: recover xfers whose NetBSD xfer timeout (armed at
- * submit, 5 s for urtwn TX) expired while in flight.  NetBSD's
- * usbd_xfer_timeout aborts the transfer and delivers USBD_TIMEOUT to
- * the driver callback once; without this the shim had no recovery at
- * all and one lost transfer leaked its driver buffer forever.  Killed
- * xfers come back through urb->complete with -USB_ERR_SHUTDOWN, which
- * maps to USBD_CANCELLED - the driver reclaims silently, so the
- * oerrors accounting of a real NetBSD timeout is not reproduced (the
- * wd_timeouts counter stands in for it).  Candidates are collected
- * under ipl_save() but killed outside it: usbh_kill_urb may take
- * milliseconds and synthesize completions. */
+/* Watchdog pass: recover PARKED xfers whose NetBSD xfer timeout expired
+ * while waiting for the pipe (they never reached the HCD, so handing
+ * USBD_TIMEOUT straight back is wire-side no-op and toggle-safe).
+ *
+ * Armed xfers are deliberately never killed.  A bulk OUT urb is stamped
+ * at arm time with the toggle of the packet AFTER the full transfer and
+ * the completion path writes that value back to the pipe for every
+ * status, CANCELLED included.  A watchdog kill of a partially consumed
+ * transfer therefore re-seeds the pipe with a toggle the device's
+ * expected sequence does not hold (k vs k' consumed packets, odd parity
+ * desyncs), bulk OUT has no other resync point, and the pipe is dead
+ * forever - while leaving the qTD chain armed lets the controller keep
+ * retrying; when the device wakes it consumes at its expected toggle
+ * and the transfer completes correctly (the HCD has no timeout of its
+ * own).  Same driver and firmware sustained 30 s @ 12.2 Mbit/s on
+ * NetBSD, which has no such kill either.  Teardown paths (pipe
+ * close/abort, xfer destroy) still kill: the pipes die right after. */
 static void usbd_watchdog_sweep(struct usbd_device *dev) {
 	struct usbd_xfer *overdue[8];
 	unsigned stuck_ms[8];
@@ -1069,10 +1341,11 @@ static void usbd_watchdog_sweep(struct usbd_device *dev) {
 
 	ipl = ipl_save();
 	SLIST_FOREACH(xfer, &dev->in_flight_xfers, wd_next) {
-		if (xfer->in_flight && xfer->wd_deadline != 0U &&
+		if (xfer->in_xq &&
+		    xfer->wd_deadline != 0U &&
 		    (int) (now - xfer->wd_deadline) >= 0) {
 			/* clear the deadline so the next sweep cannot
-			 * double-kill while the synthesized completion
+			 * double-complete while the synthesized completion
 			 * still sits in the ring */
 			stuck_ms[n] = now - xfer->wd_deadline + xfer->timeout;
 			xfer->wd_deadline = 0U;
@@ -1085,11 +1358,23 @@ static void usbd_watchdog_sweep(struct usbd_device *dev) {
 	ipl_restore(ipl);
 
 	for (i = 0; i < n; i++) {
-		wlan_usb_stats.kill_calls++;
-		wlan_usb_stats.wd_timeouts++;
-		printf("[wlan] usbdi watchdog: killing xfer stuck %u ms "
-		    "(timeout=%u)\n", stuck_ms[i], overdue[i]->timeout);
-		(void) usbh_kill_urb(&overdue[i]->urb);
+		wlan_usb_stats.q_timeout++;
+		wlan_port_serializer_lock();
+		ipl = ipl_save();
+		usbd_xq_unlink(overdue[i]->pipe, overdue[i]);
+		SLIST_REMOVE(&dev->in_flight_xfers, overdue[i],
+		    usbd_xfer, wd_next);
+		overdue[i]->on_wd = 0;
+		ipl_restore(ipl);
+		overdue[i]->in_xq = 0;
+		overdue[i]->status = USBD_TIMEOUT;
+		overdue[i]->actlen = 0;
+		if (wlan_trace_lvl >= 1) {
+			printf("[wlan] usbdi xq timeout: %u ms parked "
+			    "(timeout=%u)\n", stuck_ms[i], overdue[i]->timeout);
+		}
+		usbd_ring_post(dev, overdue[i]);
+		wlan_port_serializer_unlock();
 	}
 }
 
