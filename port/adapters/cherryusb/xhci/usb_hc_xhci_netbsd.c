@@ -825,10 +825,17 @@ static void xhci_ring_unlock(struct xhci_ring *ring, uint32_t save)
 
 static void xhci_giveback(struct usbh_urb *urb, int status, uint32_t actual)
 {
+    int callback_result;
+
     urb->actual_length = actual;
     urb->errorcode = status;
     if (urb->complete != NULL) {
-        urb->complete(urb->arg, status);
+        /* CherryUSB's completion contract carries actual bytes on success
+         * and a negative error code on failure.  Keep the two values
+         * separate: passing status for a successful transfer turns every
+         * non-empty async IN completion into actlen == 0 in the usbdi shim. */
+        callback_result = (status == 0) ? (int) actual : status;
+        urb->complete(urb->arg, callback_result);
     }
 }
 
@@ -2197,7 +2204,7 @@ static void xhci_complete_td(struct xhci_hcd *hcd, struct xhci_dev *dev,
         if (got != 0U && (urb->ep->bEndpointAddress & 0x80U) != 0U) {
             xhci_dcache_invalidate(urb->transfer_buffer, got);
         }
-        xhci_giveback(urb, (error == 0) ? (int)got : error, got);
+        xhci_giveback(urb, error, got);
         /* 武装队列头: 完成一个 pop 下一个(Linux urb_list 语义)。建环失败
          * 连环归还(环满/参数坏不该饿死后续 urb)。 */
         for (;;) {
