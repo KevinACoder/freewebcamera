@@ -33,10 +33,16 @@
 #include "usb.h"
 #include "wlan.h"
 
+#if defined(THREADX_UP_BUILD)
+#include "dbg_scenario.h"
+#endif
+
 /* Image identity: same app builds against either kernel (D39 comparison
  * line). The banner is how the two images are told apart on the console and
  * in the TFTP staging log - both deploy as freertos.bin. */
-#ifdef THREADX_BUILD
+#if defined(THREADX_UP_BUILD)
+#define IMAGE_BANNER	"\nfreewebcamera - RK3568 ThreadX UP + gdb carrier\n"
+#elif defined(THREADX_BUILD)
 #define IMAGE_BANNER	"\nfreewebcamera M0 - RK3568 ThreadX SMP carrier\n"
 #else
 #define IMAGE_BANNER	"\nfreewebcamera M0 - RK3568 FreeRTOS carrier\n"
@@ -60,6 +66,20 @@ extern void uart_console_line_probe(const char *tag);
 
 static ARM_USART_SignalEvent_t console_event;
 static volatile uint32_t spi_hits;
+
+/* --- SPI soft-trigger probe ---------------------------------------------- */
+
+static void spi_probe_handler(void)
+{
+	IRQ_ClearPending((IRQn_ID_t)SPI_PROBE_INTID);
+	spi_hits++;
+}
+
+/* M0 anchor tasks (SWITCH/TICK/SPI/CMSIS/ITS acceptance). Mainline-image
+ * code: the D56 UP debug carrier runs only the dbg_scenario task - fewer
+ * moving parts around the stub, and the anchor sequence is mainline
+ * acceptance, not a debugging aid. */
+#if !defined(THREADX_UP_BUILD)
 static volatile uint32_t task_a_wakes;
 static volatile uint32_t task_b_wakes;
 
@@ -70,14 +90,6 @@ static uint32_t rtos_check_failures;
 /* Defined below, called from the report thread. */
 static void rtos_primitives_check(void);
 static void its_check(void);
-
-/* --- SPI soft-trigger probe ---------------------------------------------- */
-
-static void spi_probe_handler(void)
-{
-	IRQ_ClearPending((IRQn_ID_t)SPI_PROBE_INTID);
-	spi_hits++;
-}
 
 /* --- tasks ---------------------------------------------------------------- */
 
@@ -354,6 +366,16 @@ static void its_check(void)
 	}
 	board_log("its: LPI OK (n=%u)\n", (unsigned)delivered);
 }
+#endif /* !THREADX_UP_BUILD */
+
+/* --- tasks (mainline boot sequence) --------------------------------------- *
+ *
+ * Compiled for the mainline images only. The D56 UP carrier replaces this
+ * whole block with the dbg_scenario task (app/dbg_scenario.c): its scenarios
+ * are these same start sequences, invoked one at a time from the gdb stub
+ * instead of all at boot.
+ */
+#if !defined(THREADX_UP_BUILD)
 
 /* Start the interactive shell.
  *
@@ -485,6 +507,7 @@ static void task_usb_start(void *argument)
 
 	osThreadTerminate(osThreadGetId());
 }
+#endif /* !THREADX_UP_BUILD */
 
 /* --- boot ----------------------------------------------------------------- */
 
@@ -521,6 +544,7 @@ void board_main(void)
 	state = osKernelGetState();
 	(void)state;
 
+#if !defined(THREADX_UP_BUILD)
 	if (osThreadNew(task_a, 0, &(osThreadAttr_t){ .name = "a",
 			.stack_size = 1024, .priority = osPriorityNormal }) == 0) {
 		board_log("fatal: thread a\n");
@@ -536,6 +560,19 @@ void board_main(void)
 		board_log("fatal: thread report\n");
 		return;
 	}
+#endif /* !THREADX_UP_BUILD */
+#if defined(THREADX_UP_BUILD)
+	/* D56 carrier: no shell, no boot-time auto-start. One task owns every
+	 * scenario (app/dbg_scenario.c); it breaks into the gdb stub on entry
+	 * and runs whatever dbg_scenario is set to, one stub-gated run at a
+	 * time. Stack: the usb/wlan scenarios descend through hub enumeration
+	 * and driver attach, deeper than any single mainline task. */
+	if (osThreadNew(dbg_scenario_task, 0, &(osThreadAttr_t){ .name = "dbgscen",
+			.stack_size = 4096, .priority = osPriorityNormal }) == 0) {
+		board_log("fatal: thread dbgscen\n");
+		return;
+	}
+#else
 	if (osThreadNew(task_shell_start, 0, &(osThreadAttr_t){ .name = "shstart",
 			.stack_size = 1024, .priority = osPriorityHigh }) == 0) {
 		board_log("fatal: thread shell\n");
@@ -565,6 +602,7 @@ void board_main(void)
 		board_log("fatal: thread usb\n");
 		return;
 	}
+#endif /* THREADX_UP_BUILD */
 
 	/* SMP: nothing to do here any more - xPortStartScheduler brings the
 	 * other cores in (see the note above task_sdio_start). */

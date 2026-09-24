@@ -38,6 +38,21 @@
  * HERE - not through the console driver (see the lock comment below). */
 extern void uart_early_puts(const char *s);
 
+/* gdb-session console gate (D56): weak here, strong in the stub's glue.
+ * Defined at the bottom of this file. */
+int board_console_muted(void);
+static unsigned long gate_suppressed;
+
+static unsigned long gate_count_str(const char *s)
+{
+	unsigned long n = 1;	/* the line terminator we did not emit */
+
+	for (; *s != '\0'; s++) {
+		n++;
+	}
+	return n;
+}
+
 /* --- boot-relative timestamp ----------------------------------------------- */
 
 /* NetBSD-shaped dmesg stamp: seconds since the first stamped print,
@@ -231,6 +246,11 @@ void board_early_print(const char *message)
 	uint64_t saved_daif;
 	char ts[BOARD_TS_STAMP_LEN];
 
+	if (board_console_muted()) {
+		gate_suppressed += gate_count_str(message);
+		return;
+	}
+
 	(void)board_uptime_stamp(ts);
 	print_lock_take(&saved_daif);
 	uart_early_puts(ts);
@@ -296,7 +316,35 @@ void board_log(const char *fmt, ...)
 	}
 	line[out] = '\0';
 
+	if (board_console_muted()) {
+		gate_suppressed += (unsigned long)out + 1U;
+		return;
+	}
+
 	print_lock_take(&saved_daif);
 	uart_early_puts(line);
 	print_lock_give(saved_daif);
+}
+
+/* --- gdb-session console gate (D56) --------------------------------------- *
+ *
+ * The stub's session flag lives in the gdb core (port/aarch64/gdb), but
+ * this file is built for every image, stub or not - so the ask goes through
+ * a weak default that never mutes, and the stub's glue (tx_gdb_glue.c, UP
+ * image only) overrides it with the real one. The counter turns "prints
+ * vanished during the session" from a mystery into a one-line accounting
+ * the stub flushes on exit. Raw output (board_early_print_raw) is NOT
+ * gated: that is the stub's and the fault path's own voice. */
+__attribute__((weak)) int board_console_muted(void)
+{
+	return 0;
+}
+
+void board_console_gate_report(void)
+{
+	if (gate_suppressed != 0UL) {
+		board_log("console: %lu line(s) suppressed during gdb session\n",
+			  gate_suppressed);
+		gate_suppressed = 0UL;
+	}
 }

@@ -746,6 +746,18 @@ void usart_rx_irq_handler(void)
 			reg_write(REG_IER, 0x00u);
 			rx_active = 0u;
 			if (usart_callback != 0) {
+				static uint32_t done_reports;
+
+				/* UP bring-up probe: did the drain complete? */
+				if (done_reports < 3U) {
+					char line[48];
+
+					done_reports++;
+					(void)snprintf(line, sizeof(line),
+						       "uart: rx done n=%u\n",
+						       (unsigned)rx_completed);
+					board_early_print_raw(line);
+				}
 				usart_callback(
 					ARM_USART_EVENT_RECEIVE_COMPLETE);
 			}

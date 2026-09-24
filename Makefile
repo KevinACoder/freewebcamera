@@ -355,6 +355,13 @@ $(error FreeRTOS is single-core only since D42 - use `make freertos` (THREADX=0 
 endif
 endif
 
+# D56: ThreadX single-core comparator. Same app and board layer on the UP
+# kernel (common/ + ports/cortex_a55, vendored alongside the SMP set) with
+# SMP concurrency removed from the equation; also the carrier for the serial
+# gdb stub (port/aarch64/gdb/). Implies SMP_CORES=1 (CNTV tick INTID 27,
+# secondaries parked by startup.S). `make threadx-uc`.
+THREADX_UP ?= 0
+
 # The ThreadX build (default since D42): same app, same
 # board layer, same cherrysh - but the kernel is Eclipse ThreadX
 # (common_smp + the cortex_a55_smp GNU port, vendored under
@@ -377,6 +384,32 @@ endif
 #   -DEL1                        port targets EL1 (SPSR/ELR selection in
 #                                the context-switch assembly)
 ifeq ($(THREADX),1)
+ifeq ($(THREADX_UP),1)
+# UP single-core comparator (D56): the UP kernel source set plus the UP
+# cortex_a55 port, and the adapter's DAIF kernel-lock shim (the SMP port's
+# spinlock assembly does not exist under common/). -DTX_ARMV8_2 is kept for
+# flag parity with the SMP image; no UP source consumes it.
+BUILD  := build/$(BOARD)-threadx-uc
+TARGET := $(BUILD)/threadx-uc
+CFLAGS += -DTHREADX_BUILD=1 -DTHREADX_UP_BUILD=1 -DTX_INCLUDE_USER_DEFINE_FILE -DTX_ARMV8_2 -DEL1
+# Debug-carrier build config (D57): symbols plus near-no optimization, so
+# GDB's line table places breakpoints on addresses code actually reaches.
+# The baseline -O2 stays for the mainline images; UC_OPT=-O0 reproduces the
+# reference SDK's CONFIG_DEBUG_NOOPT exact-noopt shape.
+UC_OPT ?= -Og
+CFLAGS := $(filter-out -O2,$(CFLAGS)) $(UC_OPT) -g3
+THREADX_KERNEL_SRCS := $(wildcard third-party/threadx/common/src/*.c)
+THREADX_PORT_SRCS := $(wildcard third-party/threadx/ports/cortex_a55/gnu/src/*.S)
+KERNEL_SRCS := $(THREADX_KERNEL_SRCS) port/adapters/threadx/tx_glue.c \
+	port/adapters/threadx/tx_up_shim.c \
+	port/adapters/threadx/tx_gdb_glue.c \
+	port/aarch64/gdb/gdb_main.c \
+	port/aarch64/gdb/gdb_packet.c \
+	port/aarch64/gdb/gdb_arch.c \
+	port/adapters/threadx/heap.c third-party/tlsf/tlsf.c
+# The carrier's scenario runner: shell commands called from main() (D56).
+APP_SRCS += app/dbg_scenario.c
+else
 BUILD  := build/$(BOARD)-threadx
 TARGET := $(BUILD)/threadx-smp
 CFLAGS += -DTHREADX_BUILD=1 -DTX_INCLUDE_USER_DEFINE_FILE -DTX_ARMV8_2 -DEL1
@@ -393,9 +426,9 @@ THREADX_KERNEL_SRCS := $(wildcard third-party/threadx/common_smp/src/*.c)
 THREADX_PORT_SRCS := $(filter-out \
 	third-party/threadx/ports_smp/cortex_a55_smp/gnu/src/tx_thread_smp_core_preempt.S, \
 	$(wildcard third-party/threadx/ports_smp/cortex_a55_smp/gnu/src/*.S))
-
 KERNEL_SRCS := $(THREADX_KERNEL_SRCS) port/adapters/threadx/tx_glue.c \
 	port/adapters/threadx/heap.c third-party/tlsf/tlsf.c
+endif
 
 # The vendored middleware lists. CherryUSB stays stubbed for now (its OSAL
 # is the P4 wave); lwIP runs the cmsis sys_arch below - same core list as
@@ -496,8 +529,14 @@ ADAPTER_SRCS := \
 # adapter's directory list is cmsis_rtos2_freertos/ itself, and only for the shared,
 # kernel-free extension header cmsis_os2_ext.h (osThreadFlagsSetFromISR,
 # consumed by the cherrysh adapter and implemented by both CMSIS twins).
-INC_ADAPTER := -Ithird-party/threadx/common_smp/inc \
-	-Ithird-party/threadx/ports_smp/cortex_a55_smp/gnu/inc \
+ifeq ($(THREADX_UP),1)
+KERN_INC := -Ithird-party/threadx/common/inc \
+	-Ithird-party/threadx/ports/cortex_a55/gnu/inc
+else
+KERN_INC := -Ithird-party/threadx/common_smp/inc \
+	-Ithird-party/threadx/ports_smp/cortex_a55_smp/gnu/inc
+endif
+INC_ADAPTER := $(KERN_INC) \
 	-Iport/adapters/threadx \
 	-Iport/adapters/cmsis_rtos2_threadx \
 	-Iport/adapters/cmsis_rtos2_freertos \
@@ -710,6 +749,34 @@ WPA_PORT_SRCS := \
 
 ADAPTER_SRCS += $(NET80211_ADAPTER_SRCS)
 
+# D56, UP carrier only: shell-free debug image. cherrysh goes (its
+# interrupt-driven RX path is exactly what the gdb stub must not fight
+# over the one UART), and every *_cmds.c goes with it - they call
+# csh_printf(), which lives in chry_shell.c. The command surface is
+# operator UI, not boot state; the carrier drives the same workers
+# through app/dbg_scenario.c and gdb function calls instead.
+ifeq ($(THREADX_UP),1)
+SHELL_SRCS := \
+	port/adapters/cherrysh/cherrysh_adapter.c \
+	third-party/cherrysh/chry_shell.c \
+	third-party/cherrysh/builtin/help.c \
+	third-party/cherrysh/builtin/clear.c \
+	third-party/cherrysh/builtin/shsize.c \
+	third-party/cherrysh/cherryrl/chry_readline.c \
+	third-party/cherryrb/chry_ringbuffer.c \
+	port/adapters/lwip/net_cmds.c \
+	port/adapters/lwip/ping_cmd.c \
+	port/adapters/lwip/iperf3_cmd.c \
+	port/adapters/fatfs/fatfs_cmds.c \
+	port/adapters/sdmmc/sdmmc_cmds.c \
+	port/adapters/periph/periph_cmds.c \
+	port/adapters/cherryusb/usbh_cmds.c \
+	port/adapters/net80211/wlan_cmds.c \
+	port/adapters/wpa_supplicant/wpa_cmd.c
+ADAPTER_SRCS := $(filter-out $(SHELL_SRCS),$(ADAPTER_SRCS))
+WPA_PORT_SRCS := $(filter-out port/adapters/wpa_supplicant/wpa_cmd.c,$(WPA_PORT_SRCS))
+endif
+
 INC_ADAPTER += -Ithird-party/net80211 \
 	-Ithird-party/net80211/port/osal/cmsis_rtos2/compat \
 	-Ithird-party/net80211/port/net/lwip \
@@ -751,20 +818,21 @@ WPA_INC := -Iport/adapters/wpa_supplicant/shim \
 	-Iport/adapters/wpa_supplicant
 WPA_CFG := -w -include stdarg.h -include port/adapters/wpa_supplicant/wpa_port_config.h
 
-# The core count and the HCD selection both change codegen everywhere but
-# leave no trace make's timestamp logic can see: a SMP_CORES=2 build after a
-# =4 build (or EHCI_ONLY=1 after the default) would silently relink stale
-# objects and link two HCDs into one image. Stamp both values into the build
-# directory (per image variant - BUILD above already separates them) and
-# drop the directory entirely on mismatch. Sits after the KTEST block so
-# BUILD_STAMP follows the same BUILD the rules use.
+# The core count, the HCD selection and the kernel shape all change codegen
+# everywhere but leave no trace make's timestamp logic can see: a
+# SMP_CORES=2 build after a =4 build (or EHCI_ONLY=1 after the default, or
+# THREADX_UP after the SMP kernel) would silently relink stale objects and
+# link two HCDs into one image. Stamp all three into the build directory
+# (per image variant - BUILD above already separates them) and drop the
+# directory entirely on mismatch. Sits after the KTEST block so BUILD_STAMP
+# follows the same BUILD the rules use.
 BUILD_STAMP := $(BUILD)/.smp-cores
-ifeq ($(shell cat $(BUILD_STAMP) 2>/dev/null),$(SMP_CORES) $(EHCI_ONLY) $(THREADX))
+ifeq ($(shell cat $(BUILD_STAMP) 2>/dev/null),$(SMP_CORES) $(EHCI_ONLY) $(THREADX) $(THREADX_UP))
 else
 $(shell rm -rf $(BUILD))
 endif
 $(BUILD_STAMP):
-	@mkdir -p $(BUILD) && echo '$(SMP_CORES) $(EHCI_ONLY) $(THREADX)' > $(BUILD_STAMP)
+	@mkdir -p $(BUILD) && echo '$(SMP_CORES) $(EHCI_ONLY) $(THREADX) $(THREADX_UP)' > $(BUILD_STAMP)
 
 # Board assembly is shared; the kernel-side assembly is the seam itself and
 # therefore per-kernel: the FreeRTOS image links portasm_smp.S (context
@@ -885,7 +953,7 @@ $(TARGET).bin: $(TARGET).elf
 # failure on the board.
 .DEFAULT_GOAL := all
 
-.PHONY: all clean deploy gates ktest ktest-deploy threadx threadx-deploy freertos freertos-deploy
+.PHONY: all clean deploy gates ktest ktest-deploy threadx threadx-deploy threadx-uc threadx-uc-deploy freertos freertos-deploy
 
 all: $(TARGET).bin
 
@@ -907,6 +975,13 @@ threadx:
 
 threadx-deploy:
 	@$(MAKE) THREADX=1 deploy
+
+# ThreadX UP single-core comparator + gdb stub carrier (D56).
+threadx-uc:
+	@$(MAKE) THREADX=1 THREADX_UP=1 SMP_CORES=1 all
+
+threadx-uc-deploy:
+	@$(MAKE) THREADX=1 THREADX_UP=1 SMP_CORES=1 deploy
 
 # FreeRTOS single-core support/comparator image (D42).
 freertos:

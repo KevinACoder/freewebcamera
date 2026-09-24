@@ -37,7 +37,11 @@
 _threadx_vector_table:
 
 	/* --- current EL with SP0 --- */
-	b	tx_fault_park_sp0		/* 0x000 sync  */
+#ifdef THREADX_UP_BUILD
+	b	tx_sync_dispatch_sp0	/* 0x000 sync  */
+#else
+	b	tx_fault_park_sp0	/* 0x000 sync  */
+#endif
 	.balign 0x80
 	b	tx_irq_first_level_handler	/* 0x080 irq   */
 	.balign 0x80
@@ -47,7 +51,11 @@ _threadx_vector_table:
 
 	/* --- current EL with SPx --- */
 	.balign 0x80
-	b	tx_fault_park_spx		/* 0x200 sync  */
+#ifdef THREADX_UP_BUILD
+	b	tx_sync_dispatch_spx	/* 0x200 sync  */
+#else
+	b	tx_fault_park_spx	/* 0x200 sync  */
+#endif
 	.balign 0x80
 	b	tx_irq_first_level_handler	/* 0x280 irq   */
 	.balign 0x80
@@ -104,6 +112,98 @@ tx_fault_park_sp0:
 tx_fault_park_spx:
 	mov	x0, #2
 	b	tx_fault_park
+
+#ifdef THREADX_UP_BUILD
+/* Sync dispatch with the gdb stub tap (D56). The UP debug carrier has ONE
+ * synchronous-exception sink: gdb_debug_interrupt receives the frame for
+ * debug AND fault exceptions alike - the C side picks the signal, real
+ * faults become host stops instead of fatal parks. The frame layout is
+ * gdb_arch.h's struct gdb_trapframe: sp,lr,elr,spsr,esr,far,x[0..29]
+ * (288 bytes).
+ *
+ * SPSel: the exception entry forced SPSel=1; the port's world runs on
+ * SP_EL0, so switch back first - the frame then lands on the interrupted
+ * context's own stack, same contract as the IRQ save path. With SPSel back
+ * to 0 and before the frame is carved, sp IS the interrupted context's sp:
+ * the stubs store it into frame[0] (the trapframe's sp slot) before it is
+ * lost to the frame arithmetic. This holds because SPSR.M is EL1t here -
+ * the invariant that nothing in this image ever runs with SPSel=1 (see the
+ * file comment); an EL1h exception would have its real SP_EL1 beyond
+ * reach, and is not a case this port can produce.
+ *
+ * Register budget of the stubs: x8/x9 are saved to their frame slots FIRST
+ * so the sp scratch (x8) can clobber x8; the common body stores every
+ * register EXCEPT x8/x9, which are already in. */
+tx_sync_dispatch_sp0:
+	msr	spsel, 0
+	sub	sp, sp, #288
+	stp	x8, x9, [sp, #112]
+	add	x8, sp, #288
+	str	x8, [sp, #0]
+	b	tx_sync_dispatch
+
+tx_sync_dispatch_spx:
+	msr	spsel, 0
+	sub	sp, sp, #288
+	stp	x8, x9, [sp, #112]
+	add	x8, sp, #288
+	str	x8, [sp, #0]
+
+tx_sync_dispatch:
+	str	x30, [sp, #8]
+	stp	x0, x1, [sp, #48]
+	stp	x2, x3, [sp, #64]
+	stp	x4, x5, [sp, #80]
+	stp	x6, x7, [sp, #96]
+	stp	x10, x11, [sp, #128]
+	stp	x12, x13, [sp, #144]
+	stp	x14, x15, [sp, #160]
+	stp	x16, x17, [sp, #176]
+	stp	x18, x19, [sp, #192]
+	stp	x20, x21, [sp, #208]
+	stp	x22, x23, [sp, #224]
+	stp	x24, x25, [sp, #240]
+	stp	x26, x27, [sp, #256]
+	stp	x28, x29, [sp, #272]
+	mrs	x1, elr_el1
+	str	x1, [sp, #16]
+	mrs	x1, spsr_el1
+	str	x1, [sp, #24]
+	mrs	x1, esr_el1
+	str	x1, [sp, #32]
+	mrs	x1, far_el1
+	str	x1, [sp, #40]
+
+	mov	x0, sp
+	bl	gdb_debug_interrupt
+
+	/* The stub returns when the host continued: the frame may hold an
+	 * edited context (pc, registers, SPSR). Restore and ERET. On a
+	 * fault continued unchanged this re-executes the faulting
+	 * instruction - the fault returns into the stub, under host
+	 * control. */
+	ldp	x2, x3, [sp, #16]	/* elr, spsr */
+	msr	elr_el1, x2
+	msr	spsr_el1, x3
+	ldp	x0, x1, [sp, #48]
+	ldp	x2, x3, [sp, #64]
+	ldp	x4, x5, [sp, #80]
+	ldp	x6, x7, [sp, #96]
+	ldp	x8, x9, [sp, #112]
+	ldp	x10, x11, [sp, #128]
+	ldp	x12, x13, [sp, #144]
+	ldp	x14, x15, [sp, #160]
+	ldp	x16, x17, [sp, #176]
+	ldp	x18, x19, [sp, #192]
+	ldp	x20, x21, [sp, #208]
+	ldp	x22, x23, [sp, #224]
+	ldp	x24, x25, [sp, #240]
+	ldp	x26, x27, [sp, #256]
+	ldp	x28, x29, [sp, #272]
+	ldr	x30, [sp, #8]
+	add	sp, sp, #288
+	eret
+#endif /* THREADX_UP_BUILD */
 
 tx_fiq_park:
 	/* No print: a FIQ here preempted the console spinlock holder, and

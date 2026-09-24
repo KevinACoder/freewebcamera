@@ -54,6 +54,10 @@ _start:
 
 	mrs	x0, CurrentEL
 	and	x0, x0, #0xc
+#ifdef THREADX_UP_BUILD
+	mov	x19, x0			/* carry entry EL past BSS clearing */
+	mov	x20, #-1			/* no EL2 observation unless reached */
+#endif
 	cmp	x0, #0xc			/* EL3 */
 	b.eq	from_el3
 	cmp	x0, #0x8			/* EL2 */
@@ -78,6 +82,9 @@ from_el2:
 	/* Stack: EL2 has its own SP_EL2; set it before any helper call. */
 	ldr	x0, =__stack_top
 	mov	sp, x0
+#ifdef THREADX_UP_BUILD
+	mrs	x20, mdcr_el2
+#endif
 
 	/* The loader may leave the EL2 MMU and caches on; turn them off
 	 * before touching memory that was mapped behind our back. */
@@ -134,6 +141,11 @@ el1_entry:
 	str	xzr, [x0], #8
 	b	1b
 2:
+#ifdef THREADX_UP_BUILD
+	adrp	x0, gdb_boot_entry_el
+	add	x0, x0, :lo12:gdb_boot_entry_el
+	stp	x19, x20, [x0]
+#endif
 
 	/* Identity-mapped MMU with caches on. Needed before C code runs:
 	 * unaligned Normal access must work, and the ITS table
@@ -145,6 +157,17 @@ el1_entry:
 3:	wfe
 	b	3b
 	.size	_start, . - _start
+
+#ifdef THREADX_UP_BUILD
+	.section .bss, "aw", %nobits
+	.align 3
+	.globl gdb_boot_entry_el
+gdb_boot_entry_el:
+	.skip 8
+	.globl gdb_boot_mdcr_el2
+gdb_boot_mdcr_el2:
+	.skip 8
+#endif
 
 /*
  * Boot vector table. Present so a fault taken before the scheduler starts
