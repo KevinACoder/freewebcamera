@@ -348,16 +348,22 @@ void usb_osal_init(uint8_t *mem, uint32_t mem_size)
 
     tx_byte_pool_create(&usb_byte_pool, "usb byte pool", mem, mem_size);
 
-    thread = usb_osal_thread_create("usb_osal", 2048, 10, usb_osal_thread, NULL);
-    if (thread == NULL) {
-        USB_LOG_ERR("Create usb_osal_thread failed\r\n");
+    /* The reaper's first action is mq_recv on usb_osal_mq, and creating
+     * the thread hands it the CPU immediately (higher priority than any
+     * init caller). The queue must therefore exist before the thread does
+     * - the upstream order (thread first, queue second) is a latent race
+     * that SMP hides by running the creator on another core and that a
+     * single core turns into a permanent deadlock on TX_PTR_ERROR. */
+    usb_osal_mq = usb_osal_mq_create(32);
+    if (usb_osal_mq == NULL) {
+        USB_LOG_ERR("Create usb_osal_mq failed\r\n");
         while (1) {
         }
     }
 
-    usb_osal_mq = usb_osal_mq_create(32);
-    if (usb_osal_mq == NULL) {
-        USB_LOG_ERR("Create usb_osal_mq failed\r\n");
+    thread = usb_osal_thread_create("usb_osal", 2048, 10, usb_osal_thread, NULL);
+    if (thread == NULL) {
+        USB_LOG_ERR("Create usb_osal_thread failed\r\n");
         while (1) {
         }
     }
