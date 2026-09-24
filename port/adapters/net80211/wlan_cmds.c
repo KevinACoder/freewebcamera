@@ -109,8 +109,9 @@ static int cmd_wlan(int argc, char **argv)
 
 	if (argc >= 2 && strcmp(argv[1], "select") == 0) {
 		if (argc != 3 || (strcmp(argv[2], "urtwn") != 0 &&
-		    strcmp(argv[2], "rtw8189f") != 0)) {
-			csh_printf(csh, "usage: wlan select urtwn|rtw8189f\r\n");
+		    strcmp(argv[2], "rtw8189f") != 0 &&
+		    strcmp(argv[2], "rtw88u") != 0)) {
+			csh_printf(csh, "usage: wlan select urtwn|rtw8189f|rtw88u\r\n");
 		} else if (wpa_port_started()) {
 			csh_printf(csh, "wlan: select before wpa start\r\n");
 		} else if (wlan_port_select(argv[2]) != 0) {
@@ -314,21 +315,8 @@ static int cmd_wlan(int argc, char **argv)
 		return 0;
 	}
 
-	if (argc >= 2 && strcmp(argv[1], "select") == 0) {
-		/* several adapters can be attached at once (USB dongle +
-		 * SDIO module); the active one owns wlan up/scan/xmit */
-		if (argc < 3 || wlan_port_select(argv[2]) != 0) {
-			csh_printf(csh,
-				   "wlan: select <urtwn|rtw8189f|rtw88u>\r\n");
-			return 0;
-		}
-		csh_printf(csh, "wlan: active adapter %s\r\n",
-			   wlan_port_active_name());
-		return 0;
-	}
-
 	csh_printf(csh,
-		   "usage: wlan select urtwn|rtw8189f | rate 24|36|54 | "
+		   "usage: wlan select urtwn|rtw8189f|rtw88u | rate 24|36|54 | "
 		   "scan [seconds] | status | net | "
 		   "wlan trace [0|1|2] | wlan usbstats | wlan stats | "
 		   "wlan sdreg | "
