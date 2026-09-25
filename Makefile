@@ -319,14 +319,18 @@ deploy: $(TARGET).bin
 # third-party/net80211 records a local-path URL (the rk3568_lab NetBSD src
 # checkout), so the file:// protocol must be allowed for the whole invocation
 # (-c beats any stale local config ordering problem on a fresh clone).
-# Its working tree is kept sparse (sys/net80211 + sys/dev/usb + the urtwn
-# firmware dist instead of the full ~7 GB src tree); sparse-checkout only
-# rewrites the submodule's working tree, the recorded gitlink is untouched.
+# Its working tree is kept sparse (the net80211 + usb + urtwn subset instead
+# of the full ~7 GB src tree); sparse-checkout only rewrites the submodule's
+# working tree, the recorded gitlink is untouched. Cone mode takes directory
+# paths only - a file path (sys/fs/unicode.h) fails the whole "set" and a
+# fresh clone silently keeps the full tree, where the imported sys/sys/
+# headers shadow the compat/netbsd ones and the build breaks. The set below
+# is the shape the checked-out lanes actually build with.
 modules:
 	git -c protocol.file.allow=always submodule update --init --recursive
 	git -C third-party/net80211 sparse-checkout set \
-		sys/net80211 sys/dev/usb sys/dev/hid sys/crypto/aes \
-		sys/fs/unicode.h external/realtek/urtwn || \
+		sys/net80211 sys/dev/usb sys/dev/ic sys/dev/hid sys/crypto/aes \
+		sys/fs external/realtek/urtwn || \
 		echo 'note: net80211 sparse-checkout not set (kept full checkout)'
 	@for p in patches/*/*.patch; do \
 		[ -e "$$p" ] || continue; \
