@@ -23,5 +23,16 @@ Rules:
   provenance lives in the tree (`third-party/tlsf/PROVENANCE.md`) and their
   registration in `IMPORT-INFO.md`.
 
-Current state: **no patches** — all three submoduled components are used
-byte-identical to their pins (verified by diff against the pinned commits).
+Current state:
+
+- `net80211/` — two patches against the netbsd-11 pin (both backports of
+  the net_80211 library line's NET80211_PORT(L) deltas, registered in
+  `IMPORT-INFO.md`):
+  - `0001-compile-out-the-sysctl-tree.patch` — the sysctl configuration
+    tree compiles out (`IEEE80211_PORT_NO_SYSCTL`); attach/detach keep
+    empty implementations.
+  - `0002-aes-ccm-mbuf-offset-order-for-compat-mbufs.patch` — the CCM
+    mbuf walker advances the offset before the length test, matching the
+    compat mbuf model (one contiguous cluster per mbuf).
+- `threadx/`, `cherrysh/`, `cherryrb/`, `lwip/` — no patches; used
+  byte-identical to their pins.
