@@ -19,6 +19,16 @@ struct callout {
 	void *hc_arg;
 	int hc_pending;
 	int hc_invoking;
+	/* per-instance forensics for the 20260925 first-scan stall: which
+	 * callout stopped being re-armed (scheds freeze) vs which callback
+	 * stopped running (fires freeze) vs timer-thread blocking
+	 * (long_fires).  hc_next threads every live callout onto the
+	 * registry list "wlan callouts" walks. */
+	unsigned hc_scheds;
+	unsigned hc_fires;
+	unsigned hc_long_fires;
+	unsigned hc_last_fire_ms;
+	struct callout *hc_next;
 };
 typedef struct callout callout_t;
 

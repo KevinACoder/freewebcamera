@@ -41,6 +41,18 @@ extern volatile unsigned wlan_callout_suppressed;
 extern unsigned wlan_callout_get_enabled(void);
 extern void wlan_callout_set_enabled(unsigned on);
 
+/* first-scan forensics (osal layer): per-callout registry walk */
+extern void wlan_callout_registry_dump(void);
+
+/* cv wakeup forensics (osal layer): 0-waiter signals release no token */
+extern volatile unsigned wlan_cv_signals;
+extern volatile unsigned wlan_cv_signals_dropped;
+extern volatile unsigned wlan_cv_broadcasts;
+extern volatile unsigned wlan_cv_broadcasts_dropped;
+
+/* scan state machine + bitmap + cmd ring (urtwn adapter) */
+extern void wlan_urtwn_chanmap_dump(void);
+
 /* the cherrysh libc strtoul ignores the base argument (parses decimal
  * regardless), so hex addresses need this tiny parser */
 static unsigned long parse_hex(const char *s)
@@ -198,9 +210,46 @@ static int cmd_wlan(int argc, char **argv)
 		return 0;
 	}
 
+	/* per-callout counters: a stalled first scan says which timer
+	 * stopped being re-armed (scheds freeze) vs which callback
+	 * stopped running (fires freeze) vs timer-thread blocking
+	 * (long fires) */
+	if (argc >= 2 && strcmp(argv[1], "callouts") == 0) {
+		wlan_callout_registry_dump();
+		return 0;
+	}
+
+	/* scan state machine + channel bitmap + host cmd ring: the
+	 * parked-first-scan state in one screen */
+	if (argc >= 2 && strcmp(argv[1], "chanmap") == 0) {
+		wlan_urtwn_chanmap_dump();
+		return 0;
+	}
+
+	if (argc >= 2 && strcmp(argv[1], "cv") == 0) {
+		csh_printf(csh, "wlan cv: signals=%u dropped=%u "
+			   "broadcasts=%u bdropped=%u\r\n",
+			   wlan_cv_signals, wlan_cv_signals_dropped,
+			   wlan_cv_broadcasts, wlan_cv_broadcasts_dropped);
+		return 0;
+	}
+
+	/* runtime usb history level (wlan_start pins it to 10; the full
+	 * ring flood drowns the interesting records) */
+	if (argc >= 2 && strcmp(argv[1], "usbdebug") == 0) {
+		extern int usbdebug;
+
+		if (argc > 2) {
+			usbdebug = atoi(argv[2]);
+		}
+		csh_printf(csh, "wlan: usbdebug=%d\r\n", usbdebug);
+		return 0;
+	}
+
 	csh_printf(csh,
 		   "usage: wlan start | scan [seconds] | status | dump | "
-		   "hist [n] | delaytest | reg read|write|txq | calib [0|1]\r\n");
+		   "hist [n] | delaytest | reg read|write|txq | calib [0|1] | "
+		   "callouts | chanmap | cv | usbdebug <n>\r\n");
 	return 0;
 }
 

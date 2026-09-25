@@ -583,12 +583,22 @@ softint_establish(int flags, void (*func)(void *), void *arg)
 void
 softint_schedule(void *sih)
 {
+	static volatile unsigned softint_drops;
 	struct softint *si = sih;
 	struct softint_q *q;
 
 	if (((softint_q_tail + 1) % SOFTINT_Q_N) ==
 	    (softint_q_head % SOFTINT_Q_N)) {
-		/* queue full: drop; the usb watchdogs recover */
+		/* queue full: drop and count loudly, once (this runs on
+		 * the EHCI interrupt, so the notice must be ISR-safe; a
+		 * dropped entry loses an xfer wakeup and the old comment
+		 * "the usb watchdogs recover" is hope, not a mechanism) */
+		if (softint_drops++ == 0) {
+			extern void board_early_print(const char *);
+
+			board_early_print(
+			    "wlan: SOFTINT QUEUE FULL, dropping xfer completions\n");
+		}
 		return;
 	}
 	q = &softint_q[softint_q_tail % SOFTINT_Q_N];

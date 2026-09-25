@@ -56,6 +56,7 @@ int wlan_port_xmit_urtwn(const uint8_t *frame, size_t len);
 int wlan_port_get_hwaddr_urtwn(uint8_t addr[6]);
 void wlan_urtwn_dump(void);
 void wlan_urtwn_scan_dump(void);
+void wlan_urtwn_chanmap_dump(void);
 
 /* the verbatim import compiled into this unit so its static glue
  * (CFATTACH_DECL_NEW tables) stays intact */
@@ -223,6 +224,48 @@ void wlan_urtwn_scan_dump(void) {
 		ieee80211_iterate_nodes(&urtwn_reg_softc->sc_ic.ic_scan,
 		    wlan_print_node_cb, NULL);
 	}
+}
+
+/* first-scan forensics: the state machine, the scan bitmap and the host
+ * command ring in one screen - which channel the heartbeat died on,
+ * whether the bitmap still has channels left, and whether the cmd ring
+ * the re-arm depends on is backed up */
+void wlan_urtwn_chanmap_dump(void) {
+	struct urtwn_softc *sc = urtwn_reg_softc;
+	struct ieee80211com *ic;
+	int chan, first;
+
+	if (sc == NULL) {
+		printf("wlan: no device\n");
+		return;
+	}
+	ic = &sc->sc_ic;
+	printf("urtwn state=%s opmode=%d curchan=%u fscan=%d\n",
+	    ic->ic_state >= 0 && ic->ic_state < IEEE80211_S_MAX ?
+	        ieee80211_state_name[ic->ic_state] : "?",
+	    ic->ic_opmode,
+	    ic->ic_curchan != NULL ? ic->ic_curchan->ic_freq : 0,
+	    (ic->ic_flags & IEEE80211_F_SCAN) ? 1 : 0);
+	printf("scan bitmap:\n");
+	for (chan = 1, first = 1; chan < (int) (sizeof(ic->ic_chan_scan) * 8);
+	    chan++) {
+		if ((ic->ic_chan_scan[chan >> 3] & (1 << (chan & 7))) != 0) {
+			printf("%s%d", first ? "  scan:" : ",", chan);
+			first = 0;
+		}
+	}
+	printf("%s\n", first ? "  scan: (empty)" : "");
+	for (chan = 1, first = 1;
+	    chan < (int) (sizeof(ic->ic_chan_active) * 8); chan++) {
+		if ((ic->ic_chan_active[chan >> 3] & (1 << (chan & 7))) != 0) {
+			printf("%s%d", first ? "  active:" : ",", chan);
+			first = 0;
+		}
+	}
+	printf("%s\n", first ? "  active: (empty)" : "");
+	printf("cmd ring cur=%d next=%d queued=%d/%d\n",
+	    sc->cmdq.cur, sc->cmdq.next, sc->cmdq.queued,
+	    URTWN_HOST_CMD_RING_COUNT);
 }
 
 /* --- register-level debug access (shell "wlan reg") ----------------------- */
