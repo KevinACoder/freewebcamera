@@ -118,13 +118,40 @@ typedef unsigned long ticks_t;
 #ifndef CTASSERT
 #define CTASSERT(x) _Static_assert((x), #x)
 #endif
+/*
+ * Assertions print instead of panicking.
+ *
+ * NetBSD's KASSERT family is the imported code's cheapest invariant
+ * witness - the USB core alone checks DMA offsets against block sizes,
+ * allocation results against NULL, lock ownership and transfer state at
+ * hundreds of points. Compiled out, the first thing the port loses is
+ * the *name* of what went wrong: a DMA buffer programmed below the
+ * firmware line shows up as a garbage descriptor, not as "offset 0x3d270
+ * vs block size 4096".  There is no panic machinery here (and a halt
+ * would end the round), so a violated assertion names its site on the
+ * console, once per site, and the run continues to the next one.
+ */
 #ifndef KASSERT
-#define KASSERT(cond) ((void) 0)
+void wlan_kassert_fail(const char *cond, const char *file, int line,
+    const char *fmt, ...);
+#define KASSERT(cond)							\
+	do {								\
+		if (!(cond))						\
+			wlan_kassert_fail(#cond, __FILE__, __LINE__, NULL); \
+	} while (0)
 #endif
 #ifndef KASSERTMSG
-#define KASSERTMSG(cond, fmt, ...) ((void) 0)
+#define KASSERTMSG(cond, fmt, ...)					\
+	do {								\
+		if (!(cond))						\
+			wlan_kassert_fail(#cond, __FILE__, __LINE__,	\
+			    fmt, ##__VA_ARGS__);			\
+	} while (0)
 #endif
 #ifndef KDASSERT
+/* KDASSERT is upstream's DEBUG-gated family: its conditions may reference
+ * DEBUG-only globals (usb_mem.c names usb_blk_fraglist/fulllist), so it
+ * stays compiled out until this port defines DEBUG deliberately. */
 #define KDASSERT(cond) ((void) 0)
 #endif
 #ifndef KDASSERTMSG

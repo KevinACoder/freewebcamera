@@ -52,6 +52,20 @@ struct softint;
 
 int cold; /* cleared once the shell is up (wlan world boots shell-first) */
 
+/*
+ * "Are we in an interrupt?"  ThreadX's Cortex-A port maintains the ISR
+ * nesting count in _tx_thread_system_state (the context-save vector
+ * increments it, context-restore decrements it), which is precisely the
+ * predicate NetBSD's sys/intr.h wants - the imported net80211 core
+ * asserts !cpu_intr_p() at two points that were compiled out until the
+ * KASSERT family became live.
+ */
+extern volatile unsigned long _tx_thread_system_state;
+
+bool cpu_intr_p(void) {
+	return _tx_thread_system_state != 0UL;
+}
+
 struct kmutex *proc_lock(struct proc *p) {
 	(void) p;
 	return NULL;

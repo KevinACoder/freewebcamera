@@ -48,6 +48,8 @@
 
 /* the global DMA tag the compat bus.h documents (bsd_bus.c) */
 extern bus_dma_tag_t wlan_bus_dma_tag;
+extern void wlan_dma_pool_range(uintptr_t *base, size_t *len,
+    uintptr_t *win_end);
 
 static bool s_usb_bus_domain_done;
 static bool s_usb2phy1_domain_done;
@@ -324,6 +326,16 @@ void usb_platform_dump(void)
 
 	hcsparams = EREAD4(sc, EHCI_HCSPARAMS);
 	hccparams = EREAD4(sc, EHCI_HCCPARAMS);
+	{
+		uintptr_t pool, win_end;
+		size_t pool_len;
+
+		wlan_dma_pool_range(&pool, &pool_len, &win_end);
+		printf("usb: dma pool %08lx..%08lx window end %08lx\n",
+		    (unsigned long) pool,
+		    (unsigned long) (pool + pool_len),
+		    (unsigned long) win_end);
+	}
 	printf("usb: irq_count=%u irq_last_sts=%08x\n",
 	    usb_ehci_irq_count, usb_ehci_irq_last_sts);
 	printf("usb: cmd=%08x sts=%08x intr=%08x frindex=%u cfgflag=%08x\n",

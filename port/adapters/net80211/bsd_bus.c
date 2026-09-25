@@ -82,12 +82,108 @@ wlan_bus_space_barrier(bus_space_tag_t t, bus_space_handle_t h,
  * bus_dma(9): identity mapping, single-segment
  */
 
+/*
+ * Guard rails.  A DMA master cannot sanity-check the address it is given:
+ * on this SoC a write below the image line (ATF/OP-TEE territory) is
+ * dropped while the controller still reports a clean transfer, which is
+ * how a bad buffer address turns into "the device answered with garbage".
+ * So every address handed to hardware is checked against the two facts
+ * this port knows: the pool it allocates from, and the board's
+ * DMA-reachable RAM window (port/board/rk3568/board_conf.h
+ * BOARD_MMU_IMAGE_RAM_BASE; the 96M cap is the linker script's RAM_SIZE -
+ * both repeated here because this unit compiles without the board include
+ * path, exactly like the dcache externs above).
+ */
+#define WLAN_DMA_WINDOW_BASE	0x0a000000UL
+#define WLAN_DMA_WINDOW_END	0x10000000UL
+
+static const uintptr_t wlan_dma_pool_base = (uintptr_t) wlan_dma_pool;
+
+/* forensics: the shape the system heap learned to carry (heap.c) - a
+ * bounded op ring plus tlsf_check, so a corrupted pool names the
+ * allocating/freeing sequence instead of handing out junk pointers */
+#define DMA_OP_RING_N 24
+
+struct dma_op {
+	uintptr_t ra;			/* __builtin_return_address(0) */
+	uintptr_t ptr;
+	uint32_t size;
+	uint8_t is_free;
+};
+
+static struct dma_op dma_ops[DMA_OP_RING_N];
+static volatile unsigned dma_op_i;
+static int dma_pool_broken;
+
+static void
+dma_pool_note(uintptr_t ra, uintptr_t ptr, uint32_t size, int is_free)
+{
+	struct dma_op *op = &dma_ops[dma_op_i % DMA_OP_RING_N];
+
+	op->ra = ra;
+	op->ptr = ptr;
+	op->size = size;
+	op->is_free = (uint8_t) is_free;
+	dma_op_i++;
+}
+
+static void
+dma_pool_check(const char *what, uintptr_t ra, uintptr_t ptr, uint32_t size)
+{
+	unsigned int i;
+
+	if (dma_pool_broken || wlan_dma_tlsf == NULL) {
+		return;
+	}
+	if (tlsf_check(wlan_dma_tlsf) == 0) {
+		return;
+	}
+	dma_pool_broken = 1;
+	printf("usb: dma pool TLSF CHECK FAILED after %s ptr=%08lx size=%lu "
+	    "ra=%08lx\n", what, (unsigned long) ptr, (unsigned long) size,
+	    (unsigned long) ra);
+	for (i = 0; i < DMA_OP_RING_N; i++) {
+		const struct dma_op *op =
+		    &dma_ops[(dma_op_i + i) % DMA_OP_RING_N];
+
+		if (op->ra == 0) {
+			continue;
+		}
+		printf("usb: dma op %s ptr=%08lx size=%lu ra=%08lx\n",
+		    op->is_free ? "free" : "alloc", (unsigned long) op->ptr,
+		    (unsigned long) op->size, (unsigned long) op->ra);
+	}
+}
+
+static int
+dma_in_pool(uintptr_t p, size_t size)
+{
+	return p >= wlan_dma_pool_base &&
+	    p + size <= wlan_dma_pool_base + WLAN_DMA_POOL_BYTES;
+}
+
+static int
+dma_in_window(uintptr_t p, size_t size)
+{
+	return p >= WLAN_DMA_WINDOW_BASE && p + size <= WLAN_DMA_WINDOW_END;
+}
+
+/* the range, for the platform dump */
+void
+wlan_dma_pool_range(uintptr_t *base, size_t *len, uintptr_t *win_end)
+{
+	*base = wlan_dma_pool_base;
+	*len = WLAN_DMA_POOL_BYTES;
+	*win_end = WLAN_DMA_WINDOW_END;
+}
+
 int
 bus_dmamem_alloc(bus_dma_tag_t tag, bus_size_t size,
 	bus_size_t alignment, bus_size_t boundary,
 	struct bus_dma_segment *segs, int nsegs, int *rsegs, int flags)
 {
 	void *p;
+	uintptr_t ra = (uintptr_t) __builtin_return_address(0);
 
 	(void) tag; (void) boundary; (void) flags;
 
@@ -99,9 +195,23 @@ bus_dmamem_alloc(bus_dma_tag_t tag, bus_size_t size,
 		alignment = 8;
 	}
 	p = tlsf_memalign(wlan_dma_tlsf, alignment, size);
+	dma_pool_note(ra, (uintptr_t) p, (uint32_t) size, 0);
 	if (p == NULL) {
 		return ENOMEM;
 	}
+	if (!dma_in_pool((uintptr_t) p, size)) {
+		/* refuse: programming this into a qTD is worse than failing */
+		printf("usb: bus_dmamem_alloc OUT OF POOL ptr=%08lx size=%lu "
+		    "align=%lu ra=%08lx pool=%08lx..%08lx\n",
+		    (unsigned long) (uintptr_t) p, (unsigned long) size,
+		    (unsigned long) alignment, (unsigned long) ra,
+		    (unsigned long) wlan_dma_pool_base,
+		    (unsigned long) (wlan_dma_pool_base + WLAN_DMA_POOL_BYTES));
+		dma_pool_check("out-of-pool alloc", ra, (uintptr_t) p,
+		    (uint32_t) size);
+		return ENOMEM;
+	}
+	dma_pool_check("alloc", ra, (uintptr_t) p, (uint32_t) size);
 	segs[0].ds_addr = (bus_addr_t) p;
 	segs[0].ds_len = size;
 	*rsegs = 1;
@@ -111,10 +221,16 @@ bus_dmamem_alloc(bus_dma_tag_t tag, bus_size_t size,
 void
 bus_dmamem_free(bus_dma_tag_t tag, struct bus_dma_segment *segs, int nsegs)
 {
+	uintptr_t ra = (uintptr_t) __builtin_return_address(0);
+
 	(void) tag;
 
 	if (nsegs >= 1 && wlan_dma_tlsf != NULL) {
+		dma_pool_note(ra, (uintptr_t) segs[0].ds_addr,
+		    (uint32_t) segs[0].ds_len, 1);
 		tlsf_free(wlan_dma_tlsf, (void *) segs[0].ds_addr);
+		dma_pool_check("free", ra, (uintptr_t) segs[0].ds_addr,
+		    (uint32_t) segs[0].ds_len);
 	}
 }
 
@@ -170,6 +286,15 @@ bus_dmamap_load(bus_dma_tag_t tag, bus_dmamap_t map, void *va,
 {
 	(void) tag; (void) ctx; (void) flags;
 
+	if (!dma_in_window((uintptr_t) va, size)) {
+		printf("usb: bus_dmamap_load OUT OF WINDOW va=%08lx size=%lu "
+		    "ra=%08lx (window %08lx..%08lx)\n", (unsigned long) (uintptr_t) va,
+		    (unsigned long) size,
+		    (unsigned long) (uintptr_t) __builtin_return_address(0),
+		    (unsigned long) WLAN_DMA_WINDOW_BASE,
+		    (unsigned long) WLAN_DMA_WINDOW_END);
+		return EINVAL;
+	}
 	map->dm_segs[0].ds_addr = (bus_addr_t) va;
 	map->dm_segs[0].ds_len = size;
 	map->dm_nsegs = 1;

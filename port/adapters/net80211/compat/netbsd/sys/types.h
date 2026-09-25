@@ -25,6 +25,72 @@ typedef uintptr_t vaddr_t;
 typedef uintptr_t paddr_t;
 typedef uintptr_t vsize_t;
 
+/*
+ * inttypes vocabulary.  NetBSD reaches the PRI and SCN macros through
+ * the sys/types.h -> machine/int_types.h -> sys/inttypes.h chain; here
+ * they have to come from somewhere, and sys/types.h is the include every
+ * imported source shares.  AArch64 is LP64, so the 64-bit forms are the
+ * 'l' ones (which this image's vsnprintf handles).  Only the names the
+ * compiled set uses are defined.
+ */
+#ifndef PRId64
+#define PRId64		"ld"
+#endif
+#ifndef PRIi64
+#define PRIi64		"li"
+#endif
+#ifndef PRIu64
+#define PRIu64		"lu"
+#endif
+#ifndef PRIx64
+#define PRIx64		"lx"
+#endif
+#ifndef PRIX64
+#define PRIX64		"lX"
+#endif
+#ifndef PRIo64
+#define PRIo64		"lo"
+#endif
+#ifndef PRId32
+#define PRId32		"d"
+#endif
+#ifndef PRIu32
+#define PRIu32		"u"
+#endif
+#ifndef PRIx32
+#define PRIx32		"x"
+#endif
+#ifndef PRIX32
+#define PRIX32		"X"
+#endif
+#ifndef PRId16
+#define PRId16		"d"
+#endif
+#ifndef PRIu16
+#define PRIu16		"u"
+#endif
+#ifndef PRIx16
+#define PRIx16		"x"
+#endif
+#ifndef PRIdPTR
+#define PRIdPTR		"ld"
+#endif
+#ifndef PRIuPTR
+#define PRIuPTR		"lu"
+#endif
+#ifndef PRIxPTR
+#define PRIxPTR		"lx"
+#endif
+#ifndef PRIdMAX
+#define PRIdMAX		"ld"
+#endif
+#ifndef PRIuMAX
+#define PRIuMAX		"lu"
+#endif
+#ifndef PRIxMAX
+#define PRIxMAX		"lx"
+#endif
+
 #endif /* _COMPAT_SYS_TYPES_H_ */
 
 /*

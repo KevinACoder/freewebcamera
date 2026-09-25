@@ -110,4 +110,14 @@
 #define __BITS(hi, lo) ((UINT64_MAX >> (63 - (hi))) & (UINT64_MAX << (lo)))
 #endif
 
+/* NetBSD's cdefs.h carries these as PRIuMAX; only the format string
+ * matters and this is an LP64 build, so they are spelled out.  Used by
+ * the KASSERTMSG formats in ehci.c. */
+#ifndef __PRIuBIT
+#define __PRIuBIT "lu"
+#endif
+#ifndef __PRIuBITS
+#define __PRIuBITS "lu"
+#endif
+
 #endif /* _COMPAT_SYS_CDEFS_H_ */

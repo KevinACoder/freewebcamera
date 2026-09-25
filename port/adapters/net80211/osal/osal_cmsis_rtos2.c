@@ -90,6 +90,43 @@ int kprintf(const char *fmt, ...) {
 	return ret;
 }
 
+/* A violated assertion names its site once and the run continues (see
+ * the KASSERT family in port_config.h).  The site table dedupes by
+ * (file,line): assert sites are string literals, so the pointer identity
+ * of __FILE__ distinguishes translation units.  Deliberately not the
+ * console's shell-paced path - assertions can fire from the USB
+ * interrupt handler, and a garbled line beats no line. */
+void wlan_kassert_fail(const char *cond, const char *file, int line,
+    const char *fmt, ...) {
+	static const char *seen_file[16];
+	static int seen_line[16];
+	static unsigned seen;
+	unsigned i;
+
+	for (i = 0; i < seen; i++) {
+		if (seen_file[i] == file && seen_line[i] == line) {
+			return;
+		}
+	}
+	if (seen < 16) {
+		seen_file[seen] = file;
+		seen_line[seen] = line;
+		seen++;
+	}
+
+	printf("KASSERT: %s at %s:%d", cond, file, line);
+	if (fmt != NULL) {
+		va_list ap;
+
+		printf(" (");
+		va_start(ap, fmt);
+		vprintf(fmt, ap);
+		va_end(ap);
+		printf(")");
+	}
+	printf("\n");
+}
+
 /* ------------------------------------------------------------------ */
 
 void *wlan_kmalloc(size_t size, int flags, int type) {

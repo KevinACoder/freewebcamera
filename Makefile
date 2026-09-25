@@ -186,15 +186,23 @@ NET80211_INC := -Iinclude \
 	-Iport/adapters/net80211 \
 	-Ithird-party/tlsf
 
-NET80211_BSD_CFG := -D_KERNEL -D_COMPAT_SYS_SYSCTL_H_ -include stdarg.h \
+NET80211_BSD_CFG := -D_KERNEL -D_KERNEL_OPT -D_COMPAT_SYS_SYSCTL_H_ \
+	-include stdarg.h \
 	-DUSBHIST_SIZE=4096 -include port/adapters/net80211/compat/netbsd/opt_usb.h \
 	-include port/adapters/net80211/port_config_bsd.h
 # USBHIST_SIZE is usb.c's history ring (the imported default is 50000
 # records, which is ~3 MB of .bss here); 4096 x 64 B keeps a whole
 # enumeration trail with room to spare.
-# opt_usb.h must be force-included: upstream reaches it through
-# `#ifdef _KERNEL_OPT #include "opt_usb.h"`, and without those defines
-# USB_DEBUG is off, which compiles the whole history/debug layer out.
+# _KERNEL_OPT makes this build behave like a config(8) kernel for the
+# imported sources: every `#ifdef _KERNEL_OPT #include "opt_*.h"` and
+# `#include "<device>.h"` fires, so the compat tree's stand-ins for the
+# generated headers are the ones used.  Without it those includes are
+# skipped silently, and so is the code they guard - a missing
+# usb_dma.h meant usbdi.c compiled its DMA buffer path out
+# (NUSB_DMA == 0) and every device transfer got a stale buffer address.
+# NOTE: editing these flags does not invalidate $(OBJS); rm -rf
+# $(BUILD)/third-party/net80211 $(BUILD)/port/adapters/net80211 after a
+# change.  Same for adding a header an existing .d file does not list.
 # the pinned upstream sources compile with warnings silenced (-w): they are
 # frozen imports, edited only through patches/
 NET80211_SUB_CFG := -w $(NET80211_BSD_CFG)
