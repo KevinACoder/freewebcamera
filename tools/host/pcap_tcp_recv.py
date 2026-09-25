@@ -20,15 +20,9 @@ import signal
 import socket
 import sys
 
-PCAP_GLOBAL_HEADER = (
-    0xA1B2C3D4.to_bytes(4, "little")	# magic
-    + (2).to_bytes(2, "little")		# version major
-    + (4).to_bytes(2, "little")		# version minor
-    + (0).to_bytes(4, "little")		# thiszone
-    + (0).to_bytes(4, "little")		# sigfigs
-    + (0xFFFF).to_bytes(4, "little")	# snaplen
-    + (1).to_bytes(4, "little")		# linktype: Ethernet
-)
+# The BOARD writes the pcap global header as the first 24 bytes of the
+# stream (rt_tcpdump_pcap_file_init) - this receiver is a pure pipe and
+# must not inject its own, or the file carries two headers.
 
 
 def main():
@@ -49,8 +43,6 @@ def main():
     conn, peer = srv.accept()
     print(f"board connected from {peer[0]} - capturing; Ctrl+C to stop")
     with open(args.out, "wb") as f:
-        f.write(PCAP_GLOBAL_HEADER)
-        f.flush()
         total = 0
         try:
             while True:

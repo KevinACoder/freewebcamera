@@ -215,6 +215,12 @@ int wlan_lwip_init(void) {
 		return -1;
 	}
 	netif_set_up(&wlan_netif);
+	/* The wlan netif is the only one in the image, so it IS the default
+	 * route. Without this, off-subnet destinations (NTP servers, anything
+	 * through the gateway) fail sendto with EHOSTUNREACH - netif-only
+	 * matching covers local-subnet traffic, which is all the earlier
+	 * feats ever tested. Found by the netutils ntp_sync, 2026-09-25. */
+	netif_set_default(&wlan_netif);
 
 	return 0;
 }

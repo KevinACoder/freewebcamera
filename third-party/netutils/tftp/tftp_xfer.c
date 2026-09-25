@@ -200,10 +200,17 @@ int tftp_send_request(struct tftp_xfer *xfer, uint16_t cmd, const char *remote_f
     {
         return -TFTP_EMEM;
     }
-    /* Packing request packet header */
+    /* Packing request packet header.
+     * fwc: NO options appended. Upstream advertised blksize/tsize but never
+     * parsed the OACK reply (RFC 2347), so any option-honouring server -
+     * e.g. the lab's oh-my-oslab TFTP, which OACKs "blksize" - broke the
+     * transfer ("Bad block recv:1 != check:27746" = the OACK's "bl" read as
+     * a block number). A plain request keeps the client usable against
+     * every server; 512-byte blocks are plenty for the RAM-slot test
+     * transfers. */
     send_packet->cmd = htons(cmd);
-    size = rt_sprintf(send_packet->info.filename, "%s%c%s%c%s%c%d%c%s%c%d%c",
-        remote_file, 0, xfer->mode, 0, "blksize", 0, xfer->blksize, 0,"tsize", 0, 0, 0) + 2;
+    size = rt_sprintf(send_packet->info.filename, "%s%c%s%c",
+        remote_file, 0, xfer->mode, 0) + 2;
     /* send data */
     r_size = sendto(xfer->sock, send_packet, size, 0,
         (struct sockaddr *)&_private->server, sizeof(struct sockaddr_in));

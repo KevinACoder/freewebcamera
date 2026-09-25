@@ -28,6 +28,7 @@
 #define RT_NAME_MAX                      16
 
 #define RT_USING_FINSH                   1
+#define FINSH_USING_MSH                  1
 
 #define PKG_NETUTILS_PING                1
 #define PKG_NETUTILS_TFTP                1

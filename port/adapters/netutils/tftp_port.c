@@ -28,8 +28,7 @@
 /* --- RAM slots ------------------------------------------------------------- */
 
 #define TFTP_SLOT_MAX		2
-#define TFTP_SLOT_CAP_MAX	(256u * 1024u)
-#define TFTP_SLOT_CAP_MIN	(16u * 1024u)
+#define TFTP_SLOT_CAP		(128u * 1024u)
 
 struct tftp_slot {
 	uint8_t in_use;
@@ -40,6 +39,12 @@ struct tftp_slot {
 	uint32_t len;
 };
 
+/* Static storage, not the TLSF heap: the wlan/wpa world already leans hard
+ * on the 1 MB heap, and a capture slot growing through realloc was the
+ * first thing to die under that pressure (board-proven 2026-09-25: the
+ * transfer stopped dead at the initial 16 KB floor). 96 MB of RAM budget
+ * vs a ~1 MB image makes .bss the honest home. */
+static uint8_t slot_storage[TFTP_SLOT_MAX][TFTP_SLOT_CAP];
 static struct tftp_slot slots[TFTP_SLOT_MAX];
 
 /* last slot touched by the hooks - what a finished transfer prints */
@@ -58,30 +63,6 @@ static uint32_t crc32_bytes(const uint8_t *p, uint32_t len)
 		}
 	}
 	return crc ^ 0xFFFFFFFFu;
-}
-
-static int slot_grow(struct tftp_slot *s, uint32_t need)
-{
-	uint32_t cap;
-	uint8_t *buf;
-
-	if (need <= s->cap) {
-		return 0;
-	}
-	cap = (s->cap == 0) ? TFTP_SLOT_CAP_MIN : s->cap;
-	while (cap < need) {
-		cap *= 2u;
-	}
-	if (cap > TFTP_SLOT_CAP_MAX) {
-		return -1;
-	}
-	buf = realloc(s->buf, cap);
-	if (buf == NULL) {
-		return -1;
-	}
-	s->buf = buf;
-	s->cap = cap;
-	return 0;
 }
 
 /* --- the four hooks the tftp core links against ----------------------------- */
@@ -105,22 +86,21 @@ void *tftp_file_open(const char *fname, const char *mode, int is_write)
 		}
 	}
 	if (s == NULL) {
+		i = victim;
 		s = &slots[victim];
 		rt_kprintf("tftp: recycling RAM slot '%s'\n", s->name);
 	}
 
 	s->in_use = 1;
 	s->is_write = is_write;
+	s->buf = slot_storage[i];	/* the storage is the slot's home */
+	s->cap = TFTP_SLOT_CAP;
 	strncpy(s->name, fname, sizeof(s->name) - 1u);
 	s->name[sizeof(s->name) - 1u] = '\0';
 	if (is_write) {
 		s->len = 0;	/* fresh target */
 	}
 	/* reads keep existing content: a push serves a previously pulled file */
-	if (s->buf == NULL && slot_grow(s, TFTP_SLOT_CAP_MIN) != 0) {
-		s->in_use = 0;
-		return NULL;
-	}
 	last_slot = s;
 	return s;
 }
@@ -133,9 +113,7 @@ int tftp_file_write(void *handle, int pos, void *buff, int len)
 		return -1;
 	}
 	if ((uint32_t)pos + (uint32_t)len > s->cap) {
-		if (slot_grow(s, (uint32_t)pos + (uint32_t)len) != 0) {
-			return -1;
-		}
+		return -1;	/* past the static slot: file too large */
 	}
 	memcpy(s->buf + pos, buff, (uint32_t)len);
 	if ((uint32_t)pos + (uint32_t)len > s->len) {

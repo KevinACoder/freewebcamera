@@ -72,11 +72,16 @@ static long sntp_query(chry_shell_t *csh, const char *host)
 	(void)setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &to, sizeof(to));
 
 	pkt[0] = 0x1b;			/* LI=0, VN=3, Mode=3 (client) */
-	if (sendto(sock, pkt, sizeof(pkt), 0, (struct sockaddr *)&srv,
-		   sizeof(srv)) < 0) {
-		csh_printf(csh, "ntp: send failed: %s\n", host);
-		lwip_close(sock);
-		return 0;
+	{
+		int sn = sendto(sock, pkt, sizeof(pkt), 0,
+				(struct sockaddr *)&srv, sizeof(srv));
+
+		if (sn < 0) {
+			csh_printf(csh, "ntp: send failed: %s (n=%d errno=%d)\n",
+				   host, sn, errno);
+			lwip_close(sock);
+			return 0;
+		}
 	}
 
 	n = recv(sock, pkt, sizeof(pkt), 0);
