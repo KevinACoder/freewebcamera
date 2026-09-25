@@ -95,6 +95,10 @@
 /* The raw API is back with the netutils ping (SOCK_RAW/ICMP): raw.c was
  * already in the compile set, this switch arms it. */
 #define LWIP_RAW                        1
+/* struct timeval comes from the toolchain's <sys/time.h> (the netutils
+ * tools include it directly); lwIP must not define its own private copy or
+ * the two clash. arch/cc.h pulls the header in for every lwIP TU. */
+#define LWIP_TIMEVAL_PRIVATE            0
 /* No libc behind this image: lwIP supplies its own errno constants
  * (lwip/errno.h) instead of reaching for <errno.h>, whose newlib shape
  * needs the reent machinery. err.c's err-to-errno table (compiled whenever

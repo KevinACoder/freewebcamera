@@ -119,6 +119,29 @@ char *strchr(const char *s, int c)
 	}
 }
 
+/* strcpy/strcat: the netutils imports build path names with them. No bounds
+ * here, matching the standard - callers hand fixed-size buffers. */
+char *strcpy(char *dest, const char *src)
+{
+	char *d = dest;
+
+	while ((*d++ = *src++) != '\0') {
+	}
+	return dest;
+}
+
+char *strcat(char *dest, const char *src)
+{
+	char *d = dest;
+
+	while (*d != '\0') {
+		d++;
+	}
+	while ((*d++ = *src++) != '\0') {
+	}
+	return dest;
+}
+
 int atoi(const char *s)
 {
 	int value = 0;

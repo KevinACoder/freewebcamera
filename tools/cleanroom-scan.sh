@@ -80,8 +80,11 @@ fi
 #                firmload(9) registry + the NetBSD header it implements)
 #                and "fcntl" (the POSIX header the usb device paths
 #                include). Reviewed 2026-09-25, no vendor traces.
+#   finsh.h (netutils feat) - the RT-Thread shell header the vendored
+#                netutils code includes by name ("finsh"); it is a shim
+#                shadow, not a vendor trace of ours. Reviewed 2026-09-25.
 # Anything else matching the pattern is still a failure.
-ALLOWED_NAMES='ffconf.h fs.h fs_stub.c fsl_common.h fsl_os_abstraction.h fsl_sdmmc_host.h fsl_sdmmc.h finterrupt.h fw_rtl8188eufw.c fw_rtw8189ffw.c firmware_cmsis.c firmload.h fcntl.h'
+ALLOWED_NAMES='ffconf.h fs.h fs_stub.c fsl_common.h fsl_os_abstraction.h fsl_sdmmc_host.h fsl_sdmmc.h finterrupt.h fw_rtl8188eufw.c fw_rtw8189ffw.c firmware_cmsis.c firmload.h fcntl.h finsh.h'
 ALLOWED_PATTERNS='port/adapters/fatfs/fatfs_*.c port/adapters/fatfs/fatfs_*.h'
 
 badnames=$(find . -path ./third-party -prune -o -path ./.git -prune -o \

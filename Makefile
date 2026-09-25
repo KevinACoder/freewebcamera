@@ -120,6 +120,8 @@ ADAPTER_SRCS := \
 	third-party/cherrysh/builtin/shsize.c \
 	third-party/cherrysh/cherryrl/chry_readline.c \
 	third-party/cherryrb/chry_ringbuffer.c \
+	port/adapters/netutils/netutils_shim.c \
+	port/adapters/netutils/tftp_port.c \
 
 DRIVER_SRCS := drivers/uart_ns16550.c
 
@@ -257,6 +259,7 @@ LWIP_SRCS := \
 	third-party/lwip/src/core/ipv4/ip4_addr.c \
 	third-party/lwip/src/core/ipv4/ip4_frag.c \
 	third-party/lwip/src/core/dns.c \
+	third-party/lwip/src/api/netdb.c \
 	third-party/lwip/src/api/err.c \
 	third-party/lwip/src/api/api_lib.c \
 	third-party/lwip/src/api/api_msg.c \
@@ -275,6 +278,25 @@ LWIP_INC := -Iport/adapters/lwip/include \
 	-Iport/adapters/lwip/cmsis/include \
 	-Ithird-party/lwip/src/include \
 	-Iport/adapters/net80211
+
+# --- netutils world (feat/netutils) --------------------------------------------
+# RT-Thread netutils, vendored (see third-party/netutils/PROVENANCE.md). The
+# shim shadow headers (rtthread.h / rtdbg.h / finsh.h / sys/socket.h) come
+# FIRST so they win over newlib's declarations-only headers; the BSD socket
+# surface resolves against lwIP via the LWIP_INC world. Vendored sources
+# compile -w (frozen import, edited only through PROVENANCE-tracked
+# deviations); the adapter port files compile with the normal adapter set.
+NETUTILS_VENDORED_SRCS := \
+	third-party/netutils/ping/ping.c \
+	third-party/netutils/tftp/tftp_client.c \
+	third-party/netutils/tftp/tftp_server.c \
+	third-party/netutils/tftp/tftp_xfer.c \
+
+NETUTILS_INC := -Iport/adapters/netutils/shim \
+	-Ithird-party/netutils/ping \
+	-Ithird-party/netutils/tftp \
+	-Iport/adapters/cherrysh \
+	-Ithird-party/cherrysh
 
 # --- wpa_supplicant (feat/wpa_supplicant) ----------------------------------------
 # The PSK-only file set (no EAP/WPS/P2P/ctrl-iface/SME), the same list the
@@ -369,11 +391,12 @@ C_SRCS := $(KERNEL_SRCS) $(ARCH_SRCS) $(ADAPTER_SRCS) $(DRIVER_SRCS) $(APP_SRCS)
 NET80211_IMPL_OBJS := $(addprefix $(BUILD)/,$(NET80211_IMPL_SRCS:.c=.o))
 NET80211_ADAPTER_OBJS := $(addprefix $(BUILD)/,$(NET80211_ADAPTER_SRCS:.c=.o))
 LWIP_OBJS := $(addprefix $(BUILD)/,$(LWIP_SRCS:.c=.o))
+NETUTILS_OBJS := $(addprefix $(BUILD)/,$(NETUTILS_VENDORED_SRCS:.c=.o))
 WPA_OBJS := $(addprefix $(BUILD)/,$(WPA_CORE_SRCS:.c=.o) $(WPA_PORT_SRCS:.c=.o))
 OBJS := $(addprefix $(BUILD)/,$(C_SRCS:.c=.o)) $(addprefix $(BUILD)/,$(ASM_SRCS:.S=.o)) \
 	$(addprefix $(BUILD)/,$(NET80211_BSD_SRCS:.c=.o)) \
 	$(NET80211_IMPL_OBJS) $(NET80211_ADAPTER_OBJS) \
-	$(LWIP_OBJS) $(WPA_OBJS)
+	$(LWIP_OBJS) $(WPA_OBJS) $(NETUTILS_OBJS)
 DEPS := $(OBJS:.o=.d)
 
 # Kernel and adapters see the vendored trees; board, drivers and app do not.
@@ -411,11 +434,18 @@ $(BUILD)/third-party/printf/printf.o: third-party/printf/printf.c
 	$(CC) $(CFLAGS) -DPRINTF_DISABLE_SUPPORT_FLOAT -DPRINTF_DISABLE_SUPPORT_EXPONENTIAL \
 		$(INC_COMMON) $(INC_ADAPTER) -MMD -MP -c $< -o $@
 
+# The netutils vendored world: shim shadows first, then the lwip world (the
+# shim's sys/socket.h reaches lwip/sockets.h through this path).
+$(BUILD)/third-party/netutils/%.o: third-party/netutils/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(NETUTILS_INC) $(LWIP_INC) -w -MMD -MP -c $< -o $@
+
 # Generic adapter code (lwip adapter files included) sees the adapter and the
 # lwip include worlds; net80211-specific files match the longer patterns above.
+# The netutils adapter files additionally see the shim + vendored headers.
 $(BUILD)/port/adapters/%.o: port/adapters/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(LWIP_INC) -MMD -MP -c $< -o $@
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(NETUTILS_INC) $(LWIP_INC) -MMD -MP -c $< -o $@
 
 # The wpa worlds. Submodule sources and the adapter glue compile in the same
 # wpa world; driver_net80211 and l2_packet_net80211 additionally see the
