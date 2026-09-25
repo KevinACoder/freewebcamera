@@ -319,12 +319,25 @@ int wlan_cv_timedwait(kcondvar_t *cv, kmutex_t *m, int ticks) {
 	return (got == osOK) ? 0 : EWOULDBLOCK;
 }
 
+/* cv forensics: a signal that found zero waiters releases no token at
+ * all - sound when the caller holds the same mutex the waiter will
+ * re-check its predicate under, but the counter makes any other (more
+ * fragile) caller visible from the shell. */
+volatile unsigned wlan_cv_signals;
+volatile unsigned wlan_cv_signals_dropped;
+volatile unsigned wlan_cv_broadcasts;
+volatile unsigned wlan_cv_broadcasts_dropped;
+
 int wlan_cv_broadcast(kcondvar_t *cv) {
 	int n;
 
 	osMutexAcquire(hc_cond_lock(cv), osWaitForever);
 	n = *hc_cond_waiters(cv);
 	osMutexRelease(hc_cond_lock(cv));
+	wlan_cv_broadcasts++;
+	if (n == 0) {
+		wlan_cv_broadcasts_dropped++;
+	}
 	while (n-- > 0) {
 		osSemaphoreRelease(hc_cond_sem(cv));
 	}
@@ -338,6 +351,10 @@ int wlan_cv_signal(kcondvar_t *cv, unsigned n) {
 		n = (unsigned) *hc_cond_waiters(cv);
 	}
 	osMutexRelease(hc_cond_lock(cv));
+	wlan_cv_signals++;
+	if (n == 0) {
+		wlan_cv_signals_dropped++;
+	}
 	while (n-- > 0) {
 		osSemaphoreRelease(hc_cond_sem(cv));
 	}
@@ -388,6 +405,23 @@ volatile unsigned wlan_callout_fires;
 volatile unsigned wlan_callout_sched;
 volatile unsigned wlan_callout_suppressed;
 volatile unsigned wlan_callout_enabled = 1;
+volatile unsigned wlan_callout_sched_failed;
+static int wlan_callout_sched_failed_reported;
+
+/* timer-thread blocking detector: a callout callback that ran longer
+ * than 20 ms froze every other timer behind it (the fire context is the
+ * kernel's single timer thread).  The first offender prints loudly, the
+ * rest only count. */
+volatile unsigned wlan_callout_long_fires;
+static int wlan_callout_long_reported;
+
+/* every callout_init() lands here so "wlan callouts" can attribute the
+ * counters to the fn pointers (callout_destroy unlinks again) */
+static callout_t *wlan_callout_registry;
+
+/* CNTVCT helpers live further down with the wall-clock shims */
+static uint64_t wlan_cntfrq(void);
+static uint64_t wlan_cntvct(void);
 
 unsigned wlan_callout_get_enabled(void) {
 	return wlan_callout_enabled;
@@ -397,8 +431,16 @@ void wlan_callout_set_enabled(unsigned on) {
 	wlan_callout_enabled = on ? 1U : 0U;
 }
 
+/* ms-since-boot for hc_last_fire_ms (CNTVCT; only relative use) */
+static unsigned wlan_now_ms(void) {
+	uint64_t frq = wlan_cntfrq();
+
+	return (unsigned) (wlan_cntvct() * 1000ULL / frq);
+}
+
 static void host_callout_fire(void *arg) {
 	callout_t *c = (callout_t *) arg;
+	uint64_t t0, t1;
 
 	c->hc_invoking = 1;
 	c->hc_pending = 0;
@@ -407,21 +449,62 @@ static void host_callout_fire(void *arg) {
 		return;
 	}
 	wlan_callout_fires++;
+	c->hc_fires++;
+	c->hc_last_fire_ms = wlan_now_ms();
 	if (c->hc_fn != NULL) {
+		t0 = wlan_cntvct();
 		c->hc_fn(c->hc_arg);
+		t1 = wlan_cntvct();
+		if (t1 - t0 > wlan_cntfrq() / 50) {
+			c->hc_long_fires++;
+			wlan_callout_long_fires++;
+			if (!wlan_callout_long_reported) {
+				wlan_callout_long_reported = 1;
+				printf("wlan: callout fn=%p ran >20ms in "
+					   "the timer thread (%lums)\n",
+				       (void *) c->hc_fn,
+				       (unsigned long)
+				           ((t1 - t0) * 1000ULL /
+				            wlan_cntfrq()));
+			}
+		}
 	}
 	c->hc_invoking = 0;
 }
 
 int callout_init(callout_t *c, int flags) {
+	callout_t **pp;
+
 	(void) flags;
+	/* the registry is a port-side addition; upstream frees xfers with
+	 * only callout_halt and re-inits recycled memory (usbd_do_request
+	 * creates + destroys an xfer per control request), so an init on
+	 * an already-linked callout must unlink it first or the list
+	 * self-loops */
+	for (pp = &wlan_callout_registry; *pp != NULL; pp = &(*pp)->hc_next) {
+		if (*pp == c) {
+			*pp = c->hc_next;
+			break;
+		}
+	}
 	c->hc_fn = NULL;
 	c->hc_arg = NULL;
 	c->hc_pending = 0;
+	c->hc_scheds = 0;
+	c->hc_fires = 0;
+	c->hc_long_fires = 0;
+	c->hc_last_fire_ms = 0;
+	c->hc_next = wlan_callout_registry;
+	wlan_callout_registry = c;
 	/* period is set at schedule time; osTimerStart starts it */
 	c->hc_timer = (void *) osTimerNew(host_callout_fire, osTimerOnce,
 	    c, NULL);
 	if (c->hc_timer == NULL) {
+		/* the verbatim drivers ignore callout_init's status; a
+		 * callout without a timer silently never fires (the
+		 * 20260925 first-scan stall) */
+		printf("wlan: callout_init FAILED - timer slots exhausted, "
+		       "fn=%p will never fire\n", (void *) c->hc_fn);
 		return ENOMEM;
 	}
 	return 0;
@@ -450,11 +533,20 @@ int callout_schedule(callout_t *c, int ticks) {
 		period = 1;
 	}
 	c->hc_pending = 1;
-	wlan_callout_sched++;
-	/* osTimerStart starts a stopped (dormant) timer */
+	/* osTimerStart starts a stopped (dormant) timer; only a real arm
+	 * counts as scheduled, otherwise the counter hides dead timers */
 	if (osTimerStart(hc_timer(c), period) != osOK) {
+		wlan_callout_sched_failed++;
+		if (!wlan_callout_sched_failed_reported) {
+			wlan_callout_sched_failed_reported = 1;
+			printf("wlan: callout_schedule FAILED to arm (no "
+			       "timer slot?) fn=%p - callback never fires\n",
+			       (void *) c->hc_fn);
+		}
 		return EINVAL;
 	}
+	c->hc_scheds++;
+	wlan_callout_sched++;
 	return 0;
 }
 
@@ -467,12 +559,41 @@ int callout_stop(callout_t *c) {
 }
 
 int callout_halt(callout_t *c, kmutex_t *lock) {
+	callout_t **pp;
+
 	(void) lock;
-	return callout_stop(c);
+	callout_stop(c);
+	/* halt is terminal for this stack's callouts: usbd_free_xfer runs
+	 * it right before kmem_free, and nothing re-arms a halted callout
+	 * here.  Upstream can get away with keeping the (embedded) timer
+	 * storage; our hc_timer is a pool object, so returning it here is
+	 * what keeps usbd_do_request's per-request xfer from leaking a
+	 * CMSIS timer slot per control transfer. */
+	for (pp = &wlan_callout_registry; *pp != NULL; pp = &(*pp)->hc_next) {
+		if (*pp == c) {
+			*pp = c->hc_next;
+			break;
+		}
+	}
+	c->hc_next = NULL;
+	if (c->hc_timer != NULL) {
+		osTimerDelete(hc_timer(c));
+		c->hc_timer = NULL;
+	}
+	return 0;
 }
 
 void callout_destroy(callout_t *c) {
+	callout_t **pp;
+
 	callout_stop(c);
+	for (pp = &wlan_callout_registry; *pp != NULL; pp = &(*pp)->hc_next) {
+		if (*pp == c) {
+			*pp = c->hc_next;
+			break;
+		}
+	}
+	c->hc_next = NULL;
 	if (c->hc_timer != NULL) {
 		osTimerDelete(hc_timer(c));
 		c->hc_timer = NULL;
@@ -485,6 +606,30 @@ bool callout_pending(callout_t *c) {
 
 bool callout_invoking(callout_t *c) {
 	return c->hc_invoking;
+}
+
+void wlan_callout_registry_dump(void) {
+	const callout_t *c;
+	int n;
+
+	printf("callout registry (fn arg scheds fires long last_ms):\n");
+	n = 0;
+	for (c = wlan_callout_registry; c != NULL && n < 128;
+	    c = c->hc_next, n++) {
+		printf("  %p %p scheds=%u fires=%u long=%u "
+		       "pending=%d last=%ums\n",
+		       (void *) c->hc_fn, c->hc_arg,
+		       c->hc_scheds, c->hc_fires, c->hc_long_fires,
+		       c->hc_pending, c->hc_last_fire_ms);
+	}
+	if (c != NULL) {
+		printf("  ... (registry walk truncated at %d)\n", n);
+	}
+	printf("callout totals: fires=%u sched=%u sched_failed=%u "
+	       "suppressed=%u long=%u enabled=%u\n",
+	       wlan_callout_fires, wlan_callout_sched,
+	       wlan_callout_sched_failed, wlan_callout_suppressed,
+	       wlan_callout_long_fires, wlan_callout_enabled);
 }
 
 int callout_ack(callout_t *c) {

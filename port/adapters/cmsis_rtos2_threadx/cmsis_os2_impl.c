@@ -168,6 +168,7 @@ slot_alert(const char *what, uint32_t used, uint32_t max)
 	static uint8_t alerted_mutex;
 	static uint8_t alerted_sem;
 	static uint8_t alerted_thread;
+	static uint8_t alerted_timer;
 	char msg[96];
 
 	/* one line per pool: the first exhaustion is the informative one */
@@ -181,6 +182,11 @@ slot_alert(const char *what, uint32_t used, uint32_t max)
 			return;
 		}
 		alerted_sem = 1;
+	} else if (what[0] == 't' && what[1] == 'i') {
+		if (alerted_timer) {
+			return;
+		}
+		alerted_timer = 1;
 	} else {
 		if (alerted_thread) {
 			return;
@@ -1266,7 +1272,11 @@ osStatus_t osMessageQueueDelete(osMessageQueueId_t mq_id)
 
 /* --- timers ---------------------------------------------------------------- */
 
-#define MAX_TIMERS	16
+/* 64 slots: the net80211 chain alone initializes ~23 callouts (every
+ * usbd xfer carries one) and the 20260925 first-scan forensics found
+ * sc_scan_to beyond slot 16 with a NULL timer - armed six times, fired
+ * never.  Exhaustion must also stay loud: see slot_alert below. */
+#define MAX_TIMERS	64
 
 typedef struct {
 	TX_TIMER     timer;
@@ -1307,6 +1317,7 @@ osTimerId_t osTimerNew(osTimerFunc_t func, osTimerType_t type,
 		}
 	}
 	if (slot == NULL) {
+		slot_alert("timer", MAX_TIMERS, MAX_TIMERS);
 		return NULL;
 	}
 

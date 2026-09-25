@@ -25,7 +25,7 @@ Rules:
 
 Current state:
 
-- `net80211/` — three patches against the netbsd-11 pin (all local
+- `net80211/` — four patches against the netbsd-11 pin (all local
   deviations the port needs, registered in `IMPORT-INFO.md`):
   - `0001-compile-out-the-sysctl-tree.patch` — the sysctl configuration
     tree compiles out (`IEEE80211_PORT_NO_SYSCTL`); attach/detach keep
@@ -38,5 +38,13 @@ Current state:
     `curlwp->l_proc->p_pid`/`l_lid`. This port models `curlwp` as the
     CMSIS thread handle, so dereferencing it as a `struct lwp` would fault
     from a log line; the two arguments become 0.
+  - `0004-urtwn-cmd-ring-keep-oldest-on-overflow.patch` — a full host
+    command ring used to advance `ring->cur` unconditionally, letting the
+    new command clobber the oldest unprocessed one (whose callback then
+    never runs). The scan heartbeat's only `callout_schedule` re-arm
+    lives at the end of `urtwn_newstate_cb`, so one clobbered newstate
+    command parked the state machine mid-bitmap on the first cold-boot
+    scan (evidence 20260925, chan 2422). The ring also grows 32 → 64
+    slots; on overflow the new command is dropped loudly instead.
 - `threadx/`, `cherrysh/`, `cherryrb/`, `lwip/` — no patches; used
   byte-identical to their pins.
