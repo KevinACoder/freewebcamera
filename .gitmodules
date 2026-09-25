@@ -7,3 +7,9 @@
 [submodule "third-party/cherryrb"]
 	path = third-party/cherryrb
 	url = https://github.com/cherry-embedded/CherryRB.git
+[submodule "third-party/net80211"]
+	path = third-party/net80211
+	url = /home/zhugy/workspace/rk3568_lab/os/netbsd/src
+[submodule "third-party/lwip"]
+	path = third-party/lwip
+	url = https://github.com/lwip-tcpip/lwip.git

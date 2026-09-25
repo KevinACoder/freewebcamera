@@ -204,8 +204,18 @@ deploy: $(TARGET).bin
 
 # Submodules + patches (policy: IMPORT-INFO.md and patches/README.md).
 # Idempotent: a patch that no longer applies cleanly is reported and kept.
+#
+# third-party/net80211 records a local-path URL (the rk3568_lab NetBSD src
+# checkout), so the file:// protocol must be allowed for the whole invocation
+# (-c beats any stale local config ordering problem on a fresh clone).
+# Its working tree is kept sparse (sys/net80211 + sys/dev/usb + the urtwn
+# firmware dist instead of the full ~7 GB src tree); sparse-checkout only
+# rewrites the submodule's working tree, the recorded gitlink is untouched.
 modules:
-	git submodule update --init --recursive
+	git -c protocol.file.allow=always submodule update --init --recursive
+	git -C third-party/net80211 sparse-checkout set \
+		sys/net80211 sys/dev/usb external/realtek/urtwn || \
+		echo 'note: net80211 sparse-checkout not set (kept full checkout)'
 	@for p in patches/*/*.patch; do \
 		[ -e "$$p" ] || continue; \
 		comp=$$(printf '%s' "$$p" | cut -d/ -f2); \
