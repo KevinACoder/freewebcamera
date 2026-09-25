@@ -557,7 +557,7 @@ int snprintf(char *buf, size_t size, const char *fmt, ...)
  * board seams, so this file keeps freestanding includes only. */
 extern void board_console_write(const char *message);
 
-int printf(const char *fmt, ...)
+__attribute__((weak)) int printf(const char *fmt, ...)
 {
 	char buf[256];
 	va_list ap;

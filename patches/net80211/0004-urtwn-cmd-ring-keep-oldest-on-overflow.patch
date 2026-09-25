@@ -1,0 +1,57 @@
+diff --git a/sys/dev/usb/if_urtwn.c b/sys/dev/usb/if_urtwn.c
+index f0e490c92673..4c0ee2aecd1e 100644
+--- a/sys/dev/usb/if_urtwn.c
++++ b/sys/dev/usb/if_urtwn.c
+@@ -962,6 +962,22 @@ urtwn_do_async(struct urtwn_softc *sc, void (*cb)(struct urtwn_softc *, void *),
+ 	s = splusb();
+ 	mutex_spin_enter(&sc->sc_task_mtx);
+ 	urtwn_cmdq_invariants(sc);
++	if (ring->queued == URTWN_HOST_CMD_RING_COUNT) {
++		/*
++		 * Upstream advances ring->cur unconditionally and lets the
++		 * new command clobber the oldest unprocessed one, whose
++		 * callback then never runs - a lost urtwn_newstate_cb
++		 * permanently stops the scan heartbeat (its only
++		 * callout_schedule re-arm lives at the end of that
++		 * callback).  Keep the oldest, drop the new command and
++		 * say so instead.
++		 */
++		device_printf(sc->sc_dev,
++		    "command queue overflow, dropping new command\n");
++		mutex_spin_exit(&sc->sc_task_mtx);
++		splx(s);
++		return;
++	}
+ 	cmd = &ring->cmd[ring->cur];
+ 	cmd->cb = cb;
+ 	KASSERT(len <= sizeof(cmd->data));
+@@ -972,9 +988,7 @@ urtwn_do_async(struct urtwn_softc *sc, void (*cb)(struct urtwn_softc *, void *),
+ 	 * Schedule a task to process the command if need be.
+ 	 */
+ 	if (!sc->sc_dying) {
+-		if (ring->queued == URTWN_HOST_CMD_RING_COUNT)
+-			device_printf(sc->sc_dev, "command queue overflow\n");
+-		else if (ring->queued++ == 0)
++		if (ring->queued++ == 0)
+ 			schedtask = true;
+ 	}
+ 	mutex_spin_exit(&sc->sc_task_mtx);
+diff --git a/sys/dev/usb/if_urtwnvar.h b/sys/dev/usb/if_urtwnvar.h
+index 6b15b6f0338a..78f667cca47b 100644
+--- a/sys/dev/usb/if_urtwnvar.h
++++ b/sys/dev/usb/if_urtwnvar.h
+@@ -25,7 +25,13 @@
+ #define URTWN_RX_LIST_COUNT		1
+ #define URTWN_TX_LIST_COUNT		8
+ 
+-#define URTWN_HOST_CMD_RING_COUNT	32
++/*
++ * 64 slots: the 20260925 first-scan stall traced to this ring backing up
++ * during cold-boot firmware bring-up and the overflow eating a
++ * newstate_cb (the scan re-arm lives at its end).  Upstream's 32 slots
++ * overflow after ~6 s of a stalled taskq at the observed ~6 cmd/s.
++ */
++#define URTWN_HOST_CMD_RING_COUNT	64
+ 
+ #define URTWN_RXBUFSZ	(16 * 1024)
+ #define URTWN_TXBUFSZ	(sizeof(struct r92c_tx_desc_usb) + IEEE80211_MAX_LEN + 8)

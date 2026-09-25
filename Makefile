@@ -123,6 +123,97 @@ DRIVER_SRCS := drivers/uart_ns16550.c
 
 APP_SRCS := app/main.c app/dbg_scenario.c
 
+# --- net80211 + usb world (feat/net80211) -------------------------------------
+# The NetBSD import (third-party/net80211, see IMPORT-INFO.md) compiles in
+# its own world: the compat shadow headers stand in for the NetBSD kernel
+# headers (compat first, so the shadows win over anything the sparse tree
+# carries), port_config_bsd.h force-includes the preamble, and the if_urtwn
+# driver compiles inside port/adapters/net80211/urtwn_reg.c so its static
+# CFATTACH glue stays intact. The adapter impl units (bus_dma/autoconf/osal
+# backends) compile in the same world; the shell-facing adapter files compile
+# like any other adapter code.
+
+NET80211_BSD_SRCS := \
+	third-party/net80211/sys/net80211/ieee80211.c \
+	third-party/net80211/sys/net80211/ieee80211_amrr.c \
+	third-party/net80211/sys/net80211/ieee80211_crypto.c \
+	third-party/net80211/sys/net80211/ieee80211_crypto_ccmp.c \
+	third-party/net80211/sys/net80211/ieee80211_crypto_none.c \
+	third-party/net80211/sys/net80211/ieee80211_input.c \
+	third-party/net80211/sys/net80211/ieee80211_netbsd.c \
+	third-party/net80211/sys/net80211/ieee80211_node.c \
+	third-party/net80211/sys/net80211/ieee80211_output.c \
+	third-party/net80211/sys/net80211/ieee80211_proto.c \
+	third-party/net80211/sys/crypto/aes/aes_bear.c \
+	third-party/net80211/sys/crypto/aes/aes_ccm.c \
+	third-party/net80211/sys/crypto/aes/aes_ccm_mbuf.c \
+	third-party/net80211/sys/crypto/aes/aes_ct.c \
+	third-party/net80211/sys/crypto/aes/aes_ct_dec.c \
+	third-party/net80211/sys/crypto/aes/aes_ct_enc.c \
+	third-party/net80211/sys/dev/usb/usbdi.c \
+	third-party/net80211/sys/dev/usb/usbdi_util.c \
+	third-party/net80211/sys/dev/usb/usb_mem.c \
+	third-party/net80211/sys/dev/usb/usb_subr.c \
+	third-party/net80211/sys/dev/usb/usb.c \
+	third-party/net80211/sys/dev/usb/usb_quirks.c \
+	third-party/net80211/sys/dev/usb/uhub.c \
+	third-party/net80211/sys/dev/usb/usbroothub.c \
+	third-party/net80211/sys/dev/usb/ehci.c
+
+NET80211_IMPL_SRCS := \
+	port/adapters/net80211/aes_impl_compat.c \
+	port/adapters/net80211/bsd_bus.c \
+	port/adapters/net80211/bsd_autoconf.c \
+	port/adapters/net80211/bsd_kernhist.c \
+	port/adapters/net80211/osal/osal_cmsis_rtos2.c \
+	port/adapters/net80211/osal/firmware_cmsis.c \
+	port/adapters/net80211/net/bsd_mbuf.c \
+	port/adapters/net80211/net/bsd_ifnet.c \
+	port/adapters/net80211/urtwn_reg.c
+
+NET80211_ADAPTER_SRCS := \
+	port/adapters/net80211/wlan_adapter.c \
+	port/adapters/net80211/wlan_console.c \
+	port/adapters/net80211/wlan_cmds.c \
+	port/adapters/net80211/usb_platform.c \
+	port/adapters/net80211/fw_rtl8188eufw.c
+
+NET80211_INC := -Iinclude \
+	-Iport/adapters/net80211/compat/netbsd \
+	-Ithird-party/net80211/sys \
+	-Iport/adapters/net80211/osal \
+	-Iport/adapters/net80211/osal/compat \
+	-Iport/adapters/net80211 \
+	-Ithird-party/tlsf
+
+NET80211_BSD_CFG := -D_KERNEL -D_KERNEL_OPT -DDIAGNOSTIC \
+	-D_COMPAT_SYS_SYSCTL_H_ -include stdarg.h \
+	-DUSBHIST_SIZE=4096 -include port/adapters/net80211/compat/netbsd/opt_usb.h \
+	-include port/adapters/net80211/port_config_bsd.h
+# USBHIST_SIZE is usb.c's history ring (the imported default is 50000
+# records, which is ~3 MB of .bss here); 4096 x 64 B keeps a whole
+# enumeration trail with room to spare.
+# _KERNEL_OPT makes this build behave like a config(8) kernel for the
+# imported sources: every `#ifdef _KERNEL_OPT #include "opt_*.h"` and
+# `#include "<device>.h"` fires, so the compat tree's stand-ins for the
+# generated headers are the ones used.  Without it those includes are
+# skipped silently, and so is the code they guard - a missing
+# usb_dma.h meant usbdi.c compiled its DMA buffer path out
+# (NUSB_DMA == 0) and every device transfer got a stale buffer address.
+# NOTE: editing these flags does not invalidate $(OBJS); rm -rf
+# $(BUILD)/third-party/net80211 $(BUILD)/port/adapters/net80211 after a
+# change.  Same for adding a header an existing .d file does not list.
+# DIAGNOSTIC is on for the bring-up rounds: upstream makes the KASSERT
+# family (and the xfer state it inspects - ux_state, ex_isdone) live only
+# under DIAGNOSTIC, so without it the asserts this port prints are
+# checking state nobody maintains.  No panic() lives inside a DIAGNOSTIC
+# block anywhere in the compiled set (audited), and it also switches on
+# the DIAGNOSTIC-only prints (uhub's "port %d, device not enabled", the
+# ehci xfer dumps).
+# the pinned upstream sources compile with warnings silenced (-w): they are
+# frozen imports, edited only through patches/
+NET80211_SUB_CFG := -w $(NET80211_BSD_CFG)
+
 # Board assembly is shared; the kernel-side assembly is the seam itself:
 # tx_vectors.S (runtime vector table + SPSel entry stubs) plus the kernel
 # port's own assembly.
@@ -135,13 +226,33 @@ ASM_SRCS := \
 # --- rules --------------------------------------------------------------------
 
 C_SRCS := $(KERNEL_SRCS) $(ARCH_SRCS) $(ADAPTER_SRCS) $(DRIVER_SRCS) $(APP_SRCS)
-OBJS := $(addprefix $(BUILD)/,$(C_SRCS:.c=.o)) $(addprefix $(BUILD)/,$(ASM_SRCS:.S=.o))
+NET80211_IMPL_OBJS := $(addprefix $(BUILD)/,$(NET80211_IMPL_SRCS:.c=.o))
+NET80211_ADAPTER_OBJS := $(addprefix $(BUILD)/,$(NET80211_ADAPTER_SRCS:.c=.o))
+OBJS := $(addprefix $(BUILD)/,$(C_SRCS:.c=.o)) $(addprefix $(BUILD)/,$(ASM_SRCS:.S=.o)) \
+	$(addprefix $(BUILD)/,$(NET80211_BSD_SRCS:.c=.o)) \
+	$(NET80211_IMPL_OBJS) $(NET80211_ADAPTER_OBJS)
 DEPS := $(OBJS:.o=.d)
 
 # Kernel and adapters see the vendored trees; board, drivers and app do not.
 $(BUILD)/third-party/%.o: third-party/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) -MMD -MP -c $< -o $@
+
+# The net80211 worlds: submodule sources (-w, frozen upstream) and the
+# adapter impl units compile against the compat shadows; the shell-facing
+# adapter files additionally see the standard adapter include path.
+$(BUILD)/third-party/net80211/%.o: third-party/net80211/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(NET80211_INC) $(NET80211_SUB_CFG) -MMD -MP -c $< -o $@
+
+$(NET80211_IMPL_OBJS): $(BUILD)/port/adapters/net80211/%.o: port/adapters/net80211/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(NET80211_INC) $(NET80211_BSD_CFG) -MMD -MP -c $< -o $@
+
+$(NET80211_ADAPTER_OBJS): $(BUILD)/port/adapters/net80211/%.o: port/adapters/net80211/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(NET80211_INC) \
+		$(NET80211_BSD_CFG) -MMD -MP -c $< -o $@
 
 $(BUILD)/port/adapters/%.o: port/adapters/%.c
 	@mkdir -p $(dir $@)
@@ -204,8 +315,19 @@ deploy: $(TARGET).bin
 
 # Submodules + patches (policy: IMPORT-INFO.md and patches/README.md).
 # Idempotent: a patch that no longer applies cleanly is reported and kept.
+#
+# third-party/net80211 records a local-path URL (the rk3568_lab NetBSD src
+# checkout), so the file:// protocol must be allowed for the whole invocation
+# (-c beats any stale local config ordering problem on a fresh clone).
+# Its working tree is kept sparse (sys/net80211 + sys/dev/usb + the urtwn
+# firmware dist instead of the full ~7 GB src tree); sparse-checkout only
+# rewrites the submodule's working tree, the recorded gitlink is untouched.
 modules:
-	git submodule update --init --recursive
+	git -c protocol.file.allow=always submodule update --init --recursive
+	git -C third-party/net80211 sparse-checkout set \
+		sys/net80211 sys/dev/usb sys/dev/hid sys/crypto/aes \
+		sys/fs/unicode.h external/realtek/urtwn || \
+		echo 'note: net80211 sparse-checkout not set (kept full checkout)'
 	@for p in patches/*/*.patch; do \
 		[ -e "$$p" ] || continue; \
 		comp=$$(printf '%s' "$$p" | cut -d/ -f2); \
