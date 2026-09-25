@@ -90,6 +90,11 @@ typedef uintptr_t vsize_t;
 #ifndef PRIxMAX
 #define PRIxMAX		"lx"
 #endif
+/* the imported drivers reach this through <sys/types.h> on LP64;
+ * xhci.c concatenates it into printf formats ("%" __PRIxBITS) */
+#ifndef __PRIxBITS
+#define __PRIxBITS	PRIx64
+#endif
 
 #endif /* _COMPAT_SYS_TYPES_H_ */
 

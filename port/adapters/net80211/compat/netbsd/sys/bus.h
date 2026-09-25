@@ -67,6 +67,16 @@ static inline void bus_space_write_4(bus_space_tag_t t,
 	*(volatile uint32_t *) (h + o) = v;
 }
 
+/* the identity map makes a subregion a plain offset; xhci_init slices
+ * its capability/operational/doorbell/runtime windows this way */
+static inline int bus_space_subregion(bus_space_tag_t t,
+	bus_space_handle_t h, bus_size_t o, bus_size_t s,
+	bus_space_handle_t *hp) {
+	(void) t; (void) s;
+	*hp = h + o;
+	return 0;
+}
+
 #define BUS_SPACE_BARRIER_READ  0x01
 #define BUS_SPACE_BARRIER_WRITE 0x02
 

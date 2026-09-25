@@ -18,5 +18,7 @@
 #define USB_DEBUG_DEFAULT 10
 #define EHCI_DEBUG 1
 #define EHCI_DEBUG_DEFAULT 10
+#define XHCI_DEBUG 1
+#define XHCI_DEBUG_DEFAULT 10
 
 #endif /* _OPT_USB_H_ */

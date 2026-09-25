@@ -1,0 +1,13 @@
+--- a/sys/dev/usb/xhci.c
++++ b/sys/dev/usb/xhci.c
+@@ -79,7 +79,7 @@
+ #define HEXDUMP(a, b, c) \
+     do { \
+ 	    if (xhcidebug > 0) \
+ 		    hexdump(printf, a, b, c); \
+     } while (/*CONSTCOND*/0)
+-static int xhcidebug = 0;
++static int xhcidebug = XHCI_DEBUG_DEFAULT;
+
+ SYSCTL_SETUP(sysctl_hw_xhci_setup, "sysctl hw.xhci setup")
+ {
