@@ -185,9 +185,13 @@ static struct device usb_ehci_dev[USBH_EHCI_NUM];
 
 /* the CMSIS IRQ front hands no argument; keep the one softc we armed */
 static struct ehci_softc *usb_ehci_isr_sc;
+volatile unsigned usb_ehci_irq_count;
+volatile unsigned usb_ehci_irq_last_sts;
 
 static void usb_ehci_isr(void)
 {
+	usb_ehci_irq_count++;
+	usb_ehci_irq_last_sts = EREAD4(usb_ehci_isr_sc, EHCI_USBSTS);
 	(void) ehci_intr(usb_ehci_isr_sc);
 }
 
@@ -225,7 +229,11 @@ static int usb_ehci_attach(int id)
 	sc->sc_bus.ub_revision = USBREV_2_0;
 	sc->sc_bus.ub_hctype = USBHCTYPE_EHCI;
 	sc->sc_ncomp = 0;
-	sc->sc_flags = 0;
+	/* the DWC core carries an embedded transaction translator: FS/LS
+	 * devices (the CH334P hub) enumerate straight on the root port,
+	 * exactly what U-Boot's ehci does (ehci_fdt's
+	 * has-transaction-translator) */
+	sc->sc_flags = EHCIF_ETTF;
 	sc->sc_size = 0x10000UL;
 	sc->iot = (bus_space_tag_t) { 0 };
 	sc->ioh = (bus_space_handle_t) base;
@@ -259,9 +267,77 @@ static int usb_ehci_attach(int id)
 	return 0;
 }
 
+void usb_platform_dump(void)
+{
+	struct ehci_softc *sc = &usb_ehci_sc[1];
+	uint32_t sts, portsc;
+
+	if (!s_usb2phy1_domain_done) {
+		printf("usb: platform not started\n");
+		return;
+	}
+	sts = EREAD4(sc, EHCI_USBSTS);
+	portsc = EREAD4(sc, EHCI_PORTSC(1));
+	printf("usb: irq_count=%u irq_last_sts=%08x\n",
+	    usb_ehci_irq_count, usb_ehci_irq_last_sts);
+	printf("usb: cmd=%08x sts=%08x intr=%08x portsc1=%08x\n",
+	    EREAD4(sc, EHCI_USBCMD), sts, EREAD4(sc, EHCI_USBINTR),
+	    portsc);
+}
+
+/* raw register window: identify the true layout (DWC EHCI cores put
+ * the operational regs at CAPLENGTH, which is not 0 here) */
+void usb_platform_reg_dump(void)
+{
+	struct ehci_softc *sc = &usb_ehci_sc[1];
+	uint32_t base = (uintptr_t) USBH_EHCI_BASE(1);
+	int i;
+
+	for (i = 0; i < 0x80; i += 4) {
+		printf("usb: reg[%02x] = %08x\n", i,
+		    *(volatile uint32_t *) (base + i));
+	}
+	printf("usb: sc_offs=%02x\n", sc->sc_offs);
+}
+
+/* raw descriptor chase: what the (halted) DMA engine was pointed at */
+void usb_platform_qh_dump(void)
+{
+	struct ehci_softc *sc = &usb_ehci_sc[1];
+	uint32_t alist, plist;
+	volatile uint32_t *qh;
+	int i;
+
+	if (!s_usb2phy1_domain_done) {
+		printf("usb: platform not started\n");
+		return;
+	}
+	alist = EREAD4(sc, EHCI_ASYNCLISTADDR);
+	plist = EREAD4(sc, EHCI_PERIODICLISTBASE);
+	printf("usb: asynclist=%08x periodiclist=%08x\n", alist, plist);
+
+	qh = (volatile uint32_t *) (uintptr_t) (alist & ~31u);
+	for (i = 0; i < 8; i++) {
+		printf("usb: qh[%d] @%p = %08x %08x %08x %08x\n", i,
+		    (void *) (qh + i * 4), qh[i * 4], qh[i * 4 + 1],
+		    qh[i * 4 + 2], qh[i * 4 + 3]);
+	}
+	if (plist != 0) {
+		volatile uint32_t *fl = (volatile uint32_t *) (uintptr_t) plist;
+
+		for (i = 0; i < 4; i++) {
+			printf("usb: fl[%d] = %08x\n", i, fl[i]);
+		}
+	}
+}
+
 int usb_platform_init(void)
 {
 	int error;
+
+	/* the config worker drains config_interrupts/config_defer hooks -
+	 * usb.c defers its whole attach (taskq threads + root hub) there */
+	config_deferred_run();
 
 	error = usb_ehci_attach(1); /* the panel Type-A pair (CH334P hub) */
 	if (error != 0) {

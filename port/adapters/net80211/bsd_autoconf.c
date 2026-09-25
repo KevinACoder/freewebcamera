@@ -115,6 +115,10 @@ extern const struct cfattach urtwn_ca;
 /* the usb event-device selection shells (no device table here) */
 int root_is_mounted;
 
+/* the usb history log level (usbhist.h declares it under USB_DEBUG);
+ * brought up hot so the enumeration rounds leave a trail */
+int usbdebug = 10;
+
 const char ostype[] = "NetBSD";
 const char osrelease[] = "11.0";
 const char version[] = "freewebcamera net80211 carrier (netbsd-11 import)";

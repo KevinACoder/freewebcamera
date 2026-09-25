@@ -1,11 +1,6 @@
-/*
- * @file
- * @brief kernel option: USB debug/options defaults.
- */
-
-#ifndef _OPT_USB_H_
-#define _OPT_USB_H_
-
-/* #define URTWN_DEBUG - off */
-
-#endif /* _OPT_USB_H_ */
+/* config(8)-generated: the bring-up rounds run with the usb history
+ * logs on (level set through EHCI_DEBUG_DEFAULT / usbdebug); flip to
+ * empty for the quiet production shape. */
+#define USB_DEBUG 1
+#define EHCI_DEBUG 1
+#define EHCI_DEBUG_DEFAULT 10

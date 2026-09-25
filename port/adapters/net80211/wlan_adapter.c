@@ -81,6 +81,13 @@ int wlan_start(void) {
 	}
 	wlan_osal_cmsis_init();
 	wlan_console_ready();
+		/* the netbsd usb history log level for the bring-up rounds
+		 * (ehci's level comes from EHCI_DEBUG_DEFAULT) */
+		{
+			extern int usbdebug;
+
+			usbdebug = 10;
+		}
 	if (wlan_port_firmware_register("rtl8188eufw.bin", rtl8188eufw_data,
 		(size_t) rtl8188eufw_size) != 0) {
 		printf("wlan: firmware registration failed\n");

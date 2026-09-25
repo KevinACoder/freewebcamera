@@ -23,6 +23,10 @@
 
 #include "wlan_adapter.h"
 
+extern void usb_platform_dump(void);
+extern void usb_platform_qh_dump(void);
+extern void usb_platform_reg_dump(void);
+
 /* register-level debug access (urtwn adapter) */
 extern int wlan_urtwn_reg_read(unsigned addr, unsigned *val);
 extern int wlan_urtwn_reg_write(unsigned addr, unsigned val);
@@ -94,6 +98,7 @@ static int cmd_wlan(int argc, char **argv)
 				   "(run: wlan start)\r\n");
 		}
 		wlan_port_status_dump();
+		usb_platform_dump();
 		return 0;
 	}
 
@@ -115,6 +120,13 @@ static int cmd_wlan(int argc, char **argv)
 		osDelay((uint32_t) wait_s * osKernelGetTickFreq());
 		csh_printf(csh, "wlan: scan results:\r\n");
 		wlan_port_scan_dump();
+		return 0;
+	}
+
+	if (argc >= 2 && strcmp(argv[1], "dump") == 0) {
+		usb_platform_dump();
+		usb_platform_qh_dump();
+		usb_platform_reg_dump();
 		return 0;
 	}
 
