@@ -49,6 +49,7 @@
  */
 #include <limits.h>
 #include <sys/types.h>
+#include <sys/time.h>	/* struct timeval, LWIP_TIMEVAL_PRIVATE=0 */
 #define SSIZE_MAX	LONG_MAX
 
 /* --- libc ---------------------------------------------------------------- */

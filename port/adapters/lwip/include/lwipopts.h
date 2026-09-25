@@ -17,11 +17,12 @@
  *    the stack's memory use visible at link time instead of showing up as
  *    runtime heap exhaustion.
  *
- *  - IPv6, sockets, netconn, DNS, autoip/ACD, PPP and the app directories are
- *    off, and the files for them are not even compiled (see the Makefile's
- *    LWIP_SRCS). This feat line ends at DHCP + ICMP ping over the wlan netif;
- *    the sequential API lands with the iperf3 line, which turns
- *    LWIP_NETCONN/LWIP_SOCKET (and their api/ files) back on together.
+ *  - IPv6, autoip/ACD, PPP and the app directories are off. The sequential
+ *    API (netconn + sockets) lands with the netutils line: iperf3_embedded
+ *    and the ported netutils tools (ping/tftp/ntp/telnet/netio/tcpdump) are
+ *    BSD-socket citizens, so LWIP_NETCONN/LWIP_SOCKET/LWIP_RAW/LWIP_DNS turn
+ *    on together with their api/ and dns.c files (see the Makefile's
+ *    LWIP_SRCS). This line ends at DHCP + ICMP/UDP/TCP over the wlan netif.
  *
  *  - Thread priorities here are CMSIS BANDS (sys_arch.c maps band*8 onto
  *    osPriority): the ladder this image relies on is
@@ -44,9 +45,14 @@
 #define NO_SYS                          0
 #define SYS_LIGHTWEIGHT_PROT            1
 #define LWIP_TCPIP_CORE_LOCKING         0
-/* Off for this line: the raw API (DHCP, ICMP ping) needs neither. */
-#define LWIP_NETCONN                    0
-#define LWIP_SOCKET                     0
+/* The sequential API (netconn/sockets) is the netutils line's entire surface:
+ * iperf3_embedded and the ported netutils tools are socket citizens. Netconn
+ * is the layer sockets.c sits on, so the two come back as a pair and their
+ * api/ files join LWIP_SRCS in the same commit. */
+#define LWIP_NETCONN                    1
+#define LWIP_SOCKET                     1
+/* iperf3_embedded sets SO_RCVTIMEO; netutils' tftp/ntp/ping rely on it too. */
+#define LWIP_SO_RCVTIMEO                1
 #define LWIP_NETIF_API                  1
 #define LWIP_TIMERS                     1
 
@@ -77,18 +83,22 @@
 #define LWIP_ETHERNET                   1
 #define LWIP_ARP                        1
 #define LWIP_ICMP                       1
-/* igmp.c / dns.c / autoip.c / acd.c are not compiled: switching these on
- * would mean adding the file to LWIP_SRCS at the same time. */
+/* igmp.c / autoip.c / acd.c are not compiled: switching these on would mean
+ * adding the file to LWIP_SRCS at the same time. dns.c IS compiled (netutils
+ * line: ping/ntp resolve names). */
 #define LWIP_IGMP                       0
-#define LWIP_DNS                        0
+#define LWIP_DNS                        1
 #define LWIP_DHCP                       1
 #define LWIP_AUTOIP                     0
 #define LWIP_UDP                        1
 #define LWIP_TCP                        1
-/* The raw API rides back in with the ping app: the comprehensive-network-
- * test feat re-ports lwip-contrib apps/ping (the vendored copy's target
- * parsing misfired on the board, and that stage wants its own suite). */
-#define LWIP_RAW                        0
+/* The raw API is back with the netutils ping (SOCK_RAW/ICMP): raw.c was
+ * already in the compile set, this switch arms it. */
+#define LWIP_RAW                        1
+/* struct timeval comes from the toolchain's <sys/time.h> (the netutils
+ * tools include it directly); lwIP must not define its own private copy or
+ * the two clash. arch/cc.h pulls the header in for every lwIP TU. */
+#define LWIP_TIMEVAL_PRIVATE            0
 /* No libc behind this image: lwIP supplies its own errno constants
  * (lwip/errno.h) instead of reaching for <errno.h>, whose newlib shape
  * needs the reent machinery. err.c's err-to-errno table (compiled whenever
@@ -105,7 +115,10 @@
 #define MEMP_NUM_UDP_PCB                8
 #define MEMP_NUM_RAW_PCB                8
 #define MEMP_NUM_NETBUF                 4
-#define MEMP_NUM_NETCONN                4
+/* One netconn per socket user, worst case all running at once: iperf3 (1),
+ * telnet server + one session (2), tftp client/server (1), ntp (1),
+ * netio server (1), spare (4). */
+#define MEMP_NUM_NETCONN                10
 #define MEMP_NUM_TCPIP_MSG_API          16
 /* D54: 16 dropped 1799 messages over a 600s downlink once the driver worker
  * outranked tcpip; 64 is the number the old workspace converged on. */

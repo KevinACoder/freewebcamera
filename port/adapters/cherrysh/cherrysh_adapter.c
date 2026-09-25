@@ -232,13 +232,6 @@ static char shell_history[1024];
 static char shell_prompt_buf[64];
 static char shell_line_buf[CONFIG_CSH_LNBUFF_SIZE];
 
-/* Section bounds provided by the link script. CherrySH finds its commands by
- * walking these, which is why they must be KEEP()ed there. */
-extern const chry_syscall_t __fsymtab_start;
-extern const chry_syscall_t __fsymtab_end;
-extern const chry_sysvar_t __vsymtab_start;
-extern const chry_sysvar_t __vsymtab_end;
-
 static void shell_task(void *argument)
 {
 	static uint8_t rearm_reported;
@@ -285,6 +278,15 @@ static void shell_task(void *argument)
 }
 
 /* --- commands ------------------------------------------------------------- */
+
+/* Section bounds provided by the link script. CherrySH finds its commands by
+ * walking these, which is why they must be KEEP()ed there. (The netutils
+ * telnetd re-declares these for its second shell instance - anonymous
+ * typedefs cannot be forward-declared in the shared header.) */
+extern const chry_syscall_t __fsymtab_start;
+extern const chry_syscall_t __fsymtab_end;
+extern const chry_sysvar_t __vsymtab_start;
+extern const chry_sysvar_t __vsymtab_end;
 
 /* CSH_FROM_ARGV (CherrySH hands the shell pointer over as argv[argc+1]) is
  * defined in cherrysh_adapter.h, because other adapters export commands into
