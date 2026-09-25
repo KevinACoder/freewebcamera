@@ -25,14 +25,18 @@ Rules:
 
 Current state:
 
-- `net80211/` — two patches against the netbsd-11 pin (both backports of
-  the net_80211 library line's NET80211_PORT(L) deltas, registered in
-  `IMPORT-INFO.md`):
+- `net80211/` — three patches against the netbsd-11 pin (all local
+  deviations the port needs, registered in `IMPORT-INFO.md`):
   - `0001-compile-out-the-sysctl-tree.patch` — the sysctl configuration
     tree compiles out (`IEEE80211_PORT_NO_SYSCTL`); attach/detach keep
     empty implementations.
   - `0002-aes-ccm-mbuf-offset-order-for-compat-mbufs.patch` — the CCM
     mbuf walker advances the offset before the length test, matching the
     compat mbuf model (one contiguous cluster per mbuf).
+  - `0003-usbdi-miss-out-ack-log-without-lwp-chain.patch` — one DPRINTF
+    (only compiled under `USB_DEBUG`, which the port turns on) logs
+    `curlwp->l_proc->p_pid`/`l_lid`. This port models `curlwp` as the
+    CMSIS thread handle, so dereferencing it as a `struct lwp` would fault
+    from a log line; the two arguments become 0.
 - `threadx/`, `cherrysh/`, `cherryrb/`, `lwip/` — no patches; used
   byte-identical to their pins.

@@ -164,6 +164,7 @@ NET80211_IMPL_SRCS := \
 	port/adapters/net80211/aes_impl_compat.c \
 	port/adapters/net80211/bsd_bus.c \
 	port/adapters/net80211/bsd_autoconf.c \
+	port/adapters/net80211/bsd_kernhist.c \
 	port/adapters/net80211/osal/osal_cmsis_rtos2.c \
 	port/adapters/net80211/osal/firmware_cmsis.c \
 	port/adapters/net80211/net/bsd_mbuf.c \
@@ -186,7 +187,14 @@ NET80211_INC := -Iinclude \
 	-Ithird-party/tlsf
 
 NET80211_BSD_CFG := -D_KERNEL -D_COMPAT_SYS_SYSCTL_H_ -include stdarg.h \
+	-DUSBHIST_SIZE=4096 -include port/adapters/net80211/compat/netbsd/opt_usb.h \
 	-include port/adapters/net80211/port_config_bsd.h
+# USBHIST_SIZE is usb.c's history ring (the imported default is 50000
+# records, which is ~3 MB of .bss here); 4096 x 64 B keeps a whole
+# enumeration trail with room to spare.
+# opt_usb.h must be force-included: upstream reaches it through
+# `#ifdef _KERNEL_OPT #include "opt_usb.h"`, and without those defines
+# USB_DEBUG is off, which compiles the whole history/debug layer out.
 # the pinned upstream sources compile with warnings silenced (-w): they are
 # frozen imports, edited only through patches/
 NET80211_SUB_CFG := -w $(NET80211_BSD_CFG)

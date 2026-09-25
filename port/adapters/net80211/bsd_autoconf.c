@@ -115,9 +115,8 @@ extern const struct cfattach urtwn_ca;
 /* the usb event-device selection shells (no device table here) */
 int root_is_mounted;
 
-/* the usb history log level (usbhist.h declares it under USB_DEBUG);
- * brought up hot so the enumeration rounds leave a trail */
-int usbdebug = 10;
+/* usbdebug is defined by usb.c now that USB_DEBUG is on (opt_usb.h is
+ * force-included); the bring-up still raises the level explicitly */
 
 const char ostype[] = "NetBSD";
 const char osrelease[] = "11.0";

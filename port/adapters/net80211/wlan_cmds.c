@@ -26,6 +26,8 @@
 extern void usb_platform_dump(void);
 extern void usb_platform_qh_dump(void);
 extern void usb_platform_reg_dump(void);
+extern void usb_platform_hist_dump(unsigned int max);
+extern void usb_platform_delay_test(void);
 
 /* register-level debug access (urtwn adapter) */
 extern int wlan_urtwn_reg_read(unsigned addr, unsigned *val);
@@ -130,6 +132,27 @@ static int cmd_wlan(int argc, char **argv)
 		return 0;
 	}
 
+	/* the usb history ring: what the imported core logged, which is
+	 * the only place a failed enumeration says "why" */
+	if (argc >= 2 && (strcmp(argv[1], "hist") == 0 ||
+			  strcmp(argv[1], "history") == 0)) {
+		unsigned max = 0;
+
+		if (argc > 2) {
+			max = (unsigned) atoi(argv[2]);
+		}
+		usb_platform_hist_dump(max);
+		return 0;
+	}
+
+	/* requested vs measured waits: the EHCI port reset holds PR for
+	 * 250 ms through this path, and a short wait would look exactly
+	 * like a dead PHY */
+	if (argc >= 2 && strcmp(argv[1], "delaytest") == 0) {
+		usb_platform_delay_test();
+		return 0;
+	}
+
 	if (argc >= 2 && strcmp(argv[1], "reg") == 0) {
 		unsigned long addr;
 		unsigned val;
@@ -176,10 +199,10 @@ static int cmd_wlan(int argc, char **argv)
 	}
 
 	csh_printf(csh,
-		   "usage: wlan start | scan [seconds] | status | "
-		   "wlan reg read|write|txq | wlan calib [0|1]\r\n");
+		   "usage: wlan start | scan [seconds] | status | dump | "
+		   "hist [n] | delaytest | reg read|write|txq | calib [0|1]\r\n");
 	return 0;
 }
 
-CSH_CMD_EXPORT_ALIAS_FULL(cmd_wlan, wlan, "wlan start | scan [s] | status | reg",
+CSH_CMD_EXPORT_ALIAS_FULL(cmd_wlan, wlan, "wlan start | scan [s] | status | hist",
 			  "net80211 over NetBSD usb: bring up the radio and scan");

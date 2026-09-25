@@ -37,6 +37,7 @@
 #include <dev/usb/usb_quirks.h>
 #include <dev/usb/ehcireg.h>
 #include <dev/usb/ehcivar.h>
+#include <dev/usb/usbhist.h>
 
 #include "irq_ctrl.h"
 
@@ -182,6 +183,7 @@ static void usb_usb2phy1_domain_init(void)
 
 static struct ehci_softc usb_ehci_sc[USBH_EHCI_NUM];
 static struct device usb_ehci_dev[USBH_EHCI_NUM];
+static bool s_usb_ehci_attached;
 
 /* the CMSIS IRQ front hands no argument; keep the one softc we armed */
 static struct ehci_softc *usb_ehci_isr_sc;
@@ -191,7 +193,9 @@ volatile unsigned usb_ehci_irq_last_sts;
 static void usb_ehci_isr(void)
 {
 	usb_ehci_irq_count++;
-	usb_ehci_irq_last_sts = EREAD4(usb_ehci_isr_sc, EHCI_USBSTS);
+	/* USBSTS is an operational register: an EREAD here reads the
+	 * capability window (HCSPARAMS) and says nothing about the irq */
+	usb_ehci_irq_last_sts = EOREAD4(usb_ehci_isr_sc, EHCI_USBSTS);
 	(void) ehci_intr(usb_ehci_isr_sc);
 }
 
@@ -228,12 +232,16 @@ static int usb_ehci_attach(int id)
 	sc->sc_bus.ub_dmatag = wlan_bus_dma_tag;
 	sc->sc_bus.ub_revision = USBREV_2_0;
 	sc->sc_bus.ub_hctype = USBHCTYPE_EHCI;
-	sc->sc_ncomp = 0;
-	/* the DWC core carries an embedded transaction translator: FS/LS
-	 * devices (the CH334P hub) enumerate straight on the root port,
-	 * exactly what U-Boot's ehci does (ehci_fdt's
-	 * has-transaction-translator) */
-	sc->sc_flags = EHCIF_ETTF;
+	/* The board shape, not a guess: this DTS carries no
+	 * has-transaction-translator, so ehci_fdt.c leaves ETTF off and
+	 * sets sc_ncomp = 1, letting ehci_init reconcile against HCSPARAMS
+	 * (this silicon reports 1 companion / 1 port).  The NetBSD kernel
+	 * that runs this board enumerates the panel ports in exactly this
+	 * shape, and the CH334P is a 480 Mb/s hub whose own multiple TTs
+	 * translate the FS/LS traffic behind it - the EHCI's embedded TT
+	 * is never involved. */
+	sc->sc_ncomp = 1;
+	sc->sc_flags = 0;
 	sc->sc_size = 0x10000UL;
 	sc->iot = (bus_space_tag_t) { 0 };
 	sc->ioh = (bus_space_handle_t) base;
@@ -264,25 +272,81 @@ static int usb_ehci_attach(int id)
 		printf("ehci%d: usbus attach failed\n", id);
 		return ENODEV;
 	}
+	s_usb_ehci_attached = true;
 	return 0;
+}
+
+/* ------------------------------------------------------------------
+ * diagnostics
+ *
+ * Two rules learned the hard way on this core: capability registers are
+ * read with EREAD and operational ones with EOREAD (sc_offs is 0x10, so
+ * an EREAD of PORTSC lands 0x10 short), and anything the DMA engine
+ * wrote (QH/qTD) has to be invalidated before the CPU reads it, or the
+ * dump shows whatever cache line the driver last touched.
+ */
+
+static const char *usb_pspd_str(uint32_t portsc)
+{
+	switch (portsc & EHCI_PS_PSPD) {
+	case EHCI_PS_PSPD_FS:
+		return "full";
+	case EHCI_PS_PSPD_LS:
+		return "low";
+	case EHCI_PS_PSPD_HS:
+		return "high";
+	default:
+		return "rsvd";
+	}
+}
+
+static void usb_portsc_line(const char *tag, uint32_t v)
+{
+	printf("usb: %s=%08x ccs=%u csc=%u pe=%u pec=%u pr=%u susp=%u pp=%u "
+	    "po=%u pspd=%s ls=%u\n", tag, v,
+	    (v & EHCI_PS_CS) ? 1U : 0U, (v & EHCI_PS_CSC) ? 1U : 0U,
+	    (v & EHCI_PS_PE) ? 1U : 0U, (v & EHCI_PS_PEC) ? 1U : 0U,
+	    (v & EHCI_PS_PR) ? 1U : 0U, (v & EHCI_PS_SUSP) ? 1U : 0U,
+	    (v & EHCI_PS_PP) ? 1U : 0U, (v & EHCI_PS_PO) ? 1U : 0U,
+	    usb_pspd_str(v), (unsigned) ((v & EHCI_PS_LS) >> 10));
 }
 
 void usb_platform_dump(void)
 {
 	struct ehci_softc *sc = &usb_ehci_sc[1];
-	uint32_t sts, portsc;
+	uint32_t hcsparams, hccparams;
+	int i;
 
-	if (!s_usb2phy1_domain_done) {
+	if (!s_usb_ehci_attached) {
 		printf("usb: platform not started\n");
 		return;
 	}
-	sts = EREAD4(sc, EHCI_USBSTS);
-	portsc = EREAD4(sc, EHCI_PORTSC(1));
+
+	hcsparams = EREAD4(sc, EHCI_HCSPARAMS);
+	hccparams = EREAD4(sc, EHCI_HCCPARAMS);
 	printf("usb: irq_count=%u irq_last_sts=%08x\n",
 	    usb_ehci_irq_count, usb_ehci_irq_last_sts);
-	printf("usb: cmd=%08x sts=%08x intr=%08x portsc1=%08x\n",
-	    EREAD4(sc, EHCI_USBCMD), sts, EREAD4(sc, EHCI_USBINTR),
-	    portsc);
+	printf("usb: cmd=%08x sts=%08x intr=%08x frindex=%u cfgflag=%08x\n",
+	    EOREAD4(sc, EHCI_USBCMD), EOREAD4(sc, EHCI_USBSTS),
+	    EOREAD4(sc, EHCI_USBINTR), EOREAD4(sc, EHCI_FRINDEX),
+	    EOREAD4(sc, EHCI_CONFIGFLAG));
+	printf("usb: hcsparams=%08x ports=%u ppc=%u ncc=%u npcc=%u hccparams=%08x\n",
+	    hcsparams, (unsigned) EHCI_HCS_N_PORTS(hcsparams),
+	    (unsigned) EHCI_HCS_PPC(hcsparams), (unsigned) EHCI_HCS_N_CC(hcsparams),
+	    (unsigned) EHCI_HCS_N_PCC(hcsparams), hccparams);
+	printf("usb: sc_flags=%x ncomp=%u npcomp=%u noport=%d hasppc=%u offs=%02x "
+	    "isreset=", sc->sc_flags, sc->sc_ncomp, sc->sc_npcomp,
+	    sc->sc_noport, sc->sc_hasppc, sc->sc_offs);
+	for (i = 1; i <= sc->sc_noport; i++) {
+		printf("%d", sc->sc_isreset[i] != 0);
+	}
+	printf(" usbdebug=%d\n", usbdebug);
+	for (i = 1; i <= sc->sc_noport; i++) {
+		char tag[16];
+
+		snprintf(tag, sizeof(tag), "portsc%d", i);
+		usb_portsc_line(tag, EOREAD4(sc, EHCI_PORTSC(i)));
+	}
 }
 
 /* raw register window: identify the true layout (DWC EHCI cores put
@@ -300,34 +364,141 @@ void usb_platform_reg_dump(void)
 	printf("usb: sc_offs=%02x\n", sc->sc_offs);
 }
 
-/* raw descriptor chase: what the (halted) DMA engine was pointed at */
+/* one qTD: the state bits are the whole story of a stalled transfer -
+ * a halted qTD with XACTERR is a device/bus error, with BUFERR the
+ * controller could not move the data, still-active means the schedule
+ * never got to it */
+static void usb_qtd_line(const char *tag, const volatile ehci_qtd_t *td,
+	int idx)
+{
+	uint32_t st = td->qtd_status;
+
+	printf("usb: %s[%d] st=%08x %s%s%s%s%s%s bytes=%u pid=%u cerr=%u "
+	    "next=%08x alt=%08x buf0=%08x\n", tag, idx, st,
+	    (st & EHCI_QTD_ACTIVE) ? "act" : "---",
+	    (st & EHCI_QTD_HALTED) ? " halt" : "",
+	    (st & EHCI_QTD_BUFERR) ? " buferr" : "",
+	    (st & EHCI_QTD_BABBLE) ? " babble" : "",
+	    (st & EHCI_QTD_XACTERR) ? " xacterr" : "",
+	    (st & EHCI_QTD_MISSEDMICRO) ? " miss" : "",
+	    (unsigned) EHCI_QTD_GET_BYTES(st), (unsigned) EHCI_QTD_GET_PID(st),
+	    (unsigned) EHCI_QTD_GET_CERR(st), td->qtd_next, td->qtd_altnext,
+	    td->qtd_buffer[0]);
+}
+
+/* the async schedule walk: every QH the controller is working, with its
+ * overlay and the qTD chain it is parked on */
 void usb_platform_qh_dump(void)
 {
 	struct ehci_softc *sc = &usb_ehci_sc[1];
-	uint32_t alist, plist;
-	volatile uint32_t *qh;
+	uint32_t alist;
+	volatile ehci_qh_t *qh;
 	int i;
 
-	if (!s_usb2phy1_domain_done) {
+	if (!s_usb_ehci_attached) {
 		printf("usb: platform not started\n");
 		return;
 	}
-	alist = EREAD4(sc, EHCI_ASYNCLISTADDR);
-	plist = EREAD4(sc, EHCI_PERIODICLISTBASE);
-	printf("usb: asynclist=%08x periodiclist=%08x\n", alist, plist);
 
-	qh = (volatile uint32_t *) (uintptr_t) (alist & ~31u);
-	for (i = 0; i < 8; i++) {
-		printf("usb: qh[%d] @%p = %08x %08x %08x %08x\n", i,
-		    (void *) (qh + i * 4), qh[i * 4], qh[i * 4 + 1],
-		    qh[i * 4 + 2], qh[i * 4 + 3]);
+	alist = EOREAD4(sc, EHCI_ASYNCLISTADDR);
+	printf("usb: asynclist=%08x periodiclist=%08x\n", alist,
+	    EOREAD4(sc, EHCI_PERIODICLISTBASE));
+	if (alist == 0) {
+		return;
 	}
-	if (plist != 0) {
-		volatile uint32_t *fl = (volatile uint32_t *) (uintptr_t) plist;
 
-		for (i = 0; i < 4; i++) {
-			printf("usb: fl[%d] = %08x\n", i, fl[i]);
+	qh = (volatile ehci_qh_t *) (uintptr_t) (alist & ~0x1fU);
+	for (i = 0; i < 8; i++) {
+		uint32_t link, endp, endphub, cur;
+		int t;
+
+		board_dcache_invalidate((uintptr_t) qh, sizeof(*qh));
+		link = qh->qh_link;
+		endp = qh->qh_endp;
+		endphub = qh->qh_endphub;
+		cur = qh->qh_curqtd;
+		printf("usb: qh[%d]@%08x link=%08x%s hrecl=%u ctl=%u addr=%u ep=%u "
+		    "eps=%u mpl=%u nrl=%u huba=%u port=%u cur=%08x\n", i,
+		    (unsigned) (uintptr_t) qh, link,
+		    (link & EHCI_LINK_TERMINATE) ? "(T)" : "",
+		    (unsigned) EHCI_QH_GET_HRECL(endp),
+		    (unsigned) EHCI_QH_GET_CTL(endp),
+		    (unsigned) EHCI_QH_GET_ADDR(endp),
+		    (unsigned) EHCI_QH_GET_ENDPT(endp),
+		    (unsigned) EHCI_QH_GET_EPS(endp),
+		    (unsigned) EHCI_QH_GET_MPL(endp),
+		    (unsigned) EHCI_QH_GET_NRL(endp),
+		    (unsigned) EHCI_QH_GET_HUBA(endphub),
+		    (unsigned) EHCI_QH_GET_PORT(endphub), cur);
+		usb_qtd_line("usb: overlay", &qh->qh_qtd, 0);
+
+		for (t = 0; t < 6; t++) {
+			volatile ehci_qtd_t *td = (volatile ehci_qtd_t *)
+			    (uintptr_t) (cur & ~0x1fU);
+			uint32_t next;
+
+			if (td == NULL) {
+				break;
+			}
+			if (td != &qh->qh_qtd) {
+				board_dcache_invalidate((uintptr_t) td,
+				    sizeof(*td));
+			}
+			next = td->qtd_next;
+			if (td != &qh->qh_qtd) {
+				usb_qtd_line("usb: qtd", td, t);
+			}
+			if (next & EHCI_LINK_TERMINATE) {
+				break;
+			}
+			cur = next;
 		}
+
+		if ((link & EHCI_LINK_TERMINATE) ||
+		    EHCI_LINK_TYPE(link) != EHCI_LINK_QH) {
+			break;
+		}
+		qh = (volatile ehci_qh_t *) (uintptr_t) (link & ~0x1fU);
+	}
+}
+
+/* the usb history ring (kernhist): every state transition the imported
+ * core logged, oldest first */
+void usb_platform_hist_dump(unsigned int max)
+{
+	wlan_kernhist_dump(&usbhist, max);
+}
+
+/* Measure the two wait primitives the EHCI core rides on.  usb_delay_ms
+ * (the 250 ms port-reset hold) goes through kpause/tsleep in this port,
+ * and a short wait there would break the reset while leaving the PHY
+ * looking perfectly healthy - so print requested against measured. */
+void usb_platform_delay_test(void)
+{
+	static const unsigned int ms_list[] = { 1, 20, 50, 250 };
+	static const unsigned int us_list[] = { 100, 1000, 2000 };
+	unsigned long long t0, t1;
+	size_t i;
+
+	if (!s_usb_ehci_attached) {
+		printf("usb: delaytest needs the platform (wlan start first)\n");
+		return;
+	}
+
+	printf("usb: delaytest hz=%d tickfreq=%u\n", hz,
+	    (unsigned) osKernelGetTickFreq());
+
+	for (i = 0; i < sizeof(us_list) / sizeof(us_list[0]); i++) {
+		t0 = wlan_kernhist_now_us();
+		delay(us_list[i]);
+		t1 = wlan_kernhist_now_us();
+		printf("usb: delay(%u us) -> %llu us\n", us_list[i], t1 - t0);
+	}
+	for (i = 0; i < sizeof(ms_list) / sizeof(ms_list[0]); i++) {
+		t0 = wlan_kernhist_now_us();
+		usb_delay_ms(&usb_ehci_sc[1].sc_bus, ms_list[i]);
+		t1 = wlan_kernhist_now_us();
+		printf("usb: usb_delay_ms(%u) -> %llu us\n", ms_list[i], t1 - t0);
 	}
 }
 

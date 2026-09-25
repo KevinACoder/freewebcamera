@@ -16,4 +16,10 @@ void usb_platform_dump(void);
 void usb_platform_reg_dump(void);
 void usb_platform_qh_dump(void);
 
+/* the usb history ring: every state transition the imported core
+ * logged, oldest first (max = 0 prints the whole ring) */
+void usb_platform_hist_dump(unsigned int max);
+/* requested against measured wait times for delay()/usb_delay_ms() */
+void usb_platform_delay_test(void);
+
 #endif /* NET80211_USB_PLATFORM_H_ */
