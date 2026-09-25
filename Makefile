@@ -295,11 +295,13 @@ NETUTILS_VENDORED_SRCS := \
 	third-party/netutils/tftp/tftp_server.c \
 	third-party/netutils/tftp/tftp_xfer.c \
 	third-party/iperf3_embedded/iperf3_embedded.c \
+	third-party/netutils/netio/netio.c \
 
 NETUTILS_INC := -Iport/adapters/netutils/shim \
 	-Iport/adapters/netutils \
 	-Ithird-party/netutils/ping \
 	-Ithird-party/netutils/tftp \
+	-Ithird-party/netutils/netio \
 	-Ithird-party/iperf3_embedded \
 	-Iport/adapters/cherrysh \
 	-Ithird-party/cherrysh

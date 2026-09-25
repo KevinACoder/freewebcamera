@@ -17,6 +17,7 @@
 | `tftp/tftp_server.c` | none |
 | `tftp/tftp_xfer.c` | none |
 | `tftp/tftp_xfer.h` | none |
+| `netio/netio.c` | one-line fix: the 6-second send window was hardcoded as 600 ticks (RT-Thread's 100 Hz default); this trunk ticks at 1 ms, so it is now `6 * RT_TICK_PER_SECOND` |
 | `tftp/tftp_port.c` | **NOT vendored** — it is the upstream port file (RTOS glue + dfs file hooks + msh CLI); this trunk's first-party port file lives at `port/adapters/netutils/tftp_port.c` (RAM-buffer file hooks, CRC32 integrity print, CherrySH command) |
 
 ## What binds the vendored code to this image
