@@ -398,6 +398,9 @@ modules:
 		sys/net80211 sys/dev/usb sys/dev/ic sys/dev/hid sys/crypto/aes \
 		sys/fs external/realtek/urtwn || \
 		echo 'note: net80211 sparse-checkout not set (kept full checkout)'
+	git -C third-party/wpa_supplicant sparse-checkout set \
+		src wpa_supplicant || \
+		echo 'note: wpa_supplicant sparse-checkout not set (kept full checkout)'
 	@for p in patches/*/*.patch; do \
 		[ -e "$$p" ] || continue; \
 		comp=$$(printf '%s' "$$p" | cut -d/ -f2); \
