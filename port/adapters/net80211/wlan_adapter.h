@@ -10,11 +10,9 @@
 #ifndef FREEWEBCAMERA_WLAN_ADAPTER_H
 #define FREEWEBCAMERA_WLAN_ADAPTER_H
 
-/* Register the lwIP presentation (rx hooks + wlan netif). Lazy: the
- * TCP/IP thread must be up, so this cannot run inside wlan_start();
- * the shell commands and the supplicant glue call it on first use.
- * Returns 0 once registered. */
-int wlan_lwip_start(void);
+/* (The lwIP presentation used to be registered lazily from here via
+ * wlan_lwip_start(); since the lwip feat it boots from the lwip adapter
+ * instead - net_start() runs wlan_lwip_init() at boot, "net: READY".) */
 
 /* Console output goes live only after the USART driver is
  * initialized (wlan_console.c). */

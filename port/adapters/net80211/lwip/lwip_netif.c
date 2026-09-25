@@ -2,7 +2,7 @@
  * @file
  * @brief lwIP presentation of the net_80211 port hooks.
  *
- * Maps the port hooks in port/port.h onto an lwIP netif: data frames
+ * Maps the port hooks in port.h onto an lwIP netif: data frames
  * go into pbufs handed to tcpip_input, the linkoutput feeds
  * wlan_port_xmit, and the scan/assoc events drive the link state and
  * DHCP. EAPOL is counted but dropped until a supplicant exists.
@@ -25,7 +25,7 @@
 #include "lwip/etharp.h"
 #include "lwip/sys.h"
 
-#include <port/port.h>
+#include <port.h>
 
 static struct netif wlan_netif;
 static int wlan_lwip_rx_probe;

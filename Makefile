@@ -214,6 +214,137 @@ NET80211_BSD_CFG := -D_KERNEL -D_KERNEL_OPT -DDIAGNOSTIC \
 # frozen imports, edited only through patches/
 NET80211_SUB_CFG := -w $(NET80211_BSD_CFG)
 
+# --- lwip + wlan netif bridge (feat/wpa_supplicant) -----------------------------
+# lwIP 2.2.1 (pinned submodule). The set follows upstream src/Filelists.mk for
+# the core/IPv4 groups plus the api files the NO_SYS=0 tcpip model needs
+# (tcpip.c, netifapi.c, err.c); netconn/sockets are switched off in
+# lwipopts.h and their files are not compiled - the iperf3 feat turns them on
+# together. acd.c is in because LWIP_ACD follows LWIP_DHCP by default and
+# etharp.c then calls into it; dns.c/autoip.c/igmp.c stay out. The sys_arch
+# is the CMSIS twin; lwipopts.h and
+# arch/*.h are the adapter's shadow copies and sit ahead of the vendored tree
+# on the include path. The wlan netif bridge (net80211/lwip/lwip_netif.c)
+# lives next to the port hooks it consumes but compiles in this world: it
+# needs no BSD headers, and the BSD cfg's force-included endian.h clashes
+# with lwip's htons macros. Upstream sources compile with warnings silenced
+# (-w): frozen imports, edited only through patches/.
+LWIP_SRCS := \
+	third-party/lwip/src/core/def.c \
+	third-party/lwip/src/core/inet_chksum.c \
+	third-party/lwip/src/core/init.c \
+	third-party/lwip/src/core/ip.c \
+	third-party/lwip/src/core/mem.c \
+	third-party/lwip/src/core/memp.c \
+	third-party/lwip/src/core/netif.c \
+	third-party/lwip/src/core/pbuf.c \
+	third-party/lwip/src/core/raw.c \
+	third-party/lwip/src/core/stats.c \
+	third-party/lwip/src/core/sys.c \
+	third-party/lwip/src/core/tcp.c \
+	third-party/lwip/src/core/tcp_in.c \
+	third-party/lwip/src/core/tcp_out.c \
+	third-party/lwip/src/core/timeouts.c \
+	third-party/lwip/src/core/udp.c \
+	third-party/lwip/src/core/ipv4/acd.c \
+	third-party/lwip/src/core/ipv4/dhcp.c \
+	third-party/lwip/src/core/ipv4/etharp.c \
+	third-party/lwip/src/core/ipv4/icmp.c \
+	third-party/lwip/src/core/ipv4/ip4.c \
+	third-party/lwip/src/core/ipv4/ip4_addr.c \
+	third-party/lwip/src/core/ipv4/ip4_frag.c \
+	third-party/lwip/src/api/err.c \
+	third-party/lwip/src/api/netifapi.c \
+	third-party/lwip/src/api/tcpip.c \
+	third-party/lwip/src/netif/ethernet.c \
+	port/adapters/net80211/lwip/lwip_netif.c \
+	port/adapters/lwip/cmsis/sys_arch.c \
+	port/adapters/lwip/lwip_adapter.c \
+	port/adapters/lwip/lwip_diag.c \
+	port/adapters/lwip/net_cmd.c
+
+LWIP_INC := -Iport/adapters/lwip/include \
+	-Iport/adapters/lwip/cmsis/include \
+	-Ithird-party/lwip/src/include \
+	-Iport/adapters/net80211
+
+# --- wpa_supplicant (feat/wpa_supplicant) ----------------------------------------
+# The PSK-only file set (no EAP/WPS/P2P/ctrl-iface/SME), the same list the
+# frozen workspace compiled from this fork; upstream sources compile with
+# warnings silenced (WPA_CFG's -w): frozen imports, edited only through
+# patches/. The whole world gets wpa_port_config.h force-included, which
+# steers the fork's includes.h/build_config.h onto the plain-libc path
+# (CONFIG_OS_EMBOX) and selects our driver slot in src/drivers/drivers.c
+# (CONFIG_DRIVER_EMBOX; the ops live in the adapter's driver_net80211.c).
+# The shim/ directory comes first for the wpa-world units: newlib has no
+# net/if.h or netinet/in.h, and pulling the net80211 compat shadows instead
+# would drag the BSD macro world (kalloc-style malloc) in with them.
+WPA_CORE_SRCS := \
+	third-party/wpa_supplicant/src/common/wpa_common.c \
+	third-party/wpa_supplicant/src/common/ieee802_11_common.c \
+	third-party/wpa_supplicant/src/common/hw_features_common.c \
+	third-party/wpa_supplicant/src/drivers/driver_common.c \
+	third-party/wpa_supplicant/src/drivers/drivers.c \
+	third-party/wpa_supplicant/src/rsn_supp/wpa.c \
+	third-party/wpa_supplicant/src/rsn_supp/wpa_ie.c \
+	third-party/wpa_supplicant/src/rsn_supp/pmksa_cache.c \
+	third-party/wpa_supplicant/src/rsn_supp/preauth.c \
+	third-party/wpa_supplicant/src/utils/common.c \
+	third-party/wpa_supplicant/src/utils/wpabuf.c \
+	third-party/wpa_supplicant/src/utils/base64.c \
+	third-party/wpa_supplicant/src/utils/bitfield.c \
+	third-party/wpa_supplicant/src/utils/wpa_debug.c \
+	third-party/wpa_supplicant/src/crypto/crypto_internal.c \
+	third-party/wpa_supplicant/src/crypto/aes-internal.c \
+	third-party/wpa_supplicant/src/crypto/aes-internal-dec.c \
+	third-party/wpa_supplicant/src/crypto/aes-internal-enc.c \
+	third-party/wpa_supplicant/src/crypto/aes-wrap.c \
+	third-party/wpa_supplicant/src/crypto/aes-unwrap.c \
+	third-party/wpa_supplicant/src/crypto/aes-omac1.c \
+	third-party/wpa_supplicant/src/crypto/sha1.c \
+	third-party/wpa_supplicant/src/crypto/sha1-internal.c \
+	third-party/wpa_supplicant/src/crypto/sha1-prf.c \
+	third-party/wpa_supplicant/src/crypto/sha1-pbkdf2.c \
+	third-party/wpa_supplicant/src/crypto/md5.c \
+	third-party/wpa_supplicant/src/crypto/md5-internal.c \
+	third-party/wpa_supplicant/src/crypto/rc4.c \
+	third-party/wpa_supplicant/src/crypto/sha256.c \
+	third-party/wpa_supplicant/src/crypto/sha256-internal.c \
+	third-party/wpa_supplicant/src/crypto/sha256-prf.c \
+	third-party/wpa_supplicant/src/crypto/tls_none.c \
+	third-party/wpa_supplicant/wpa_supplicant/wpa_supplicant.c \
+	third-party/wpa_supplicant/wpa_supplicant/events.c \
+	third-party/wpa_supplicant/wpa_supplicant/scan.c \
+	third-party/wpa_supplicant/wpa_supplicant/bss.c \
+	third-party/wpa_supplicant/wpa_supplicant/config.c \
+	third-party/wpa_supplicant/wpa_supplicant/config_none.c \
+	third-party/wpa_supplicant/wpa_supplicant/notify.c \
+	third-party/wpa_supplicant/wpa_supplicant/wpas_glue.c \
+	third-party/wpa_supplicant/wpa_supplicant/bssid_ignore.c \
+	third-party/wpa_supplicant/wpa_supplicant/eap_register.c \
+	third-party/wpa_supplicant/wpa_supplicant/op_classes.c \
+	third-party/wpa_supplicant/wpa_supplicant/rrm.c \
+	third-party/wpa_supplicant/wpa_supplicant/robust_av.c
+
+WPA_PORT_SRCS := \
+	port/adapters/wpa_supplicant/os_port.c \
+	port/adapters/wpa_supplicant/eloop_port.c \
+	port/adapters/wpa_supplicant/supp_main_cmsis.c \
+	port/adapters/wpa_supplicant/wpa_cmd.c \
+	port/adapters/wpa_supplicant/l2_packet_net80211.c \
+	port/adapters/wpa_supplicant/driver_net80211.c
+
+WPA_INC := -Iport/adapters/wpa_supplicant/shim \
+	-Ithird-party/wpa_supplicant \
+	-Ithird-party/wpa_supplicant/src \
+	-Ithird-party/wpa_supplicant/src/utils \
+	-Ithird-party/wpa_supplicant/src/drivers \
+	-Ithird-party/wpa_supplicant/src/l2_packet \
+	-Ithird-party/wpa_supplicant/wpa_supplicant \
+	-Iport/adapters/wpa_supplicant
+
+WPA_CFG := -w -include stdarg.h \
+	-include port/adapters/wpa_supplicant/wpa_port_config.h
+
 # Board assembly is shared; the kernel-side assembly is the seam itself:
 # tx_vectors.S (runtime vector table + SPSel entry stubs) plus the kernel
 # port's own assembly.
@@ -228,9 +359,12 @@ ASM_SRCS := \
 C_SRCS := $(KERNEL_SRCS) $(ARCH_SRCS) $(ADAPTER_SRCS) $(DRIVER_SRCS) $(APP_SRCS)
 NET80211_IMPL_OBJS := $(addprefix $(BUILD)/,$(NET80211_IMPL_SRCS:.c=.o))
 NET80211_ADAPTER_OBJS := $(addprefix $(BUILD)/,$(NET80211_ADAPTER_SRCS:.c=.o))
+LWIP_OBJS := $(addprefix $(BUILD)/,$(LWIP_SRCS:.c=.o))
+WPA_OBJS := $(addprefix $(BUILD)/,$(WPA_CORE_SRCS:.c=.o) $(WPA_PORT_SRCS:.c=.o))
 OBJS := $(addprefix $(BUILD)/,$(C_SRCS:.c=.o)) $(addprefix $(BUILD)/,$(ASM_SRCS:.S=.o)) \
 	$(addprefix $(BUILD)/,$(NET80211_BSD_SRCS:.c=.o)) \
-	$(NET80211_IMPL_OBJS) $(NET80211_ADAPTER_OBJS)
+	$(NET80211_IMPL_OBJS) $(NET80211_ADAPTER_OBJS) \
+	$(LWIP_OBJS) $(WPA_OBJS)
 DEPS := $(OBJS:.o=.d)
 
 # Kernel and adapters see the vendored trees; board, drivers and app do not.
@@ -254,9 +388,39 @@ $(NET80211_ADAPTER_OBJS): $(BUILD)/port/adapters/net80211/%.o: port/adapters/net
 	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(NET80211_INC) \
 		$(NET80211_BSD_CFG) -MMD -MP -c $< -o $@
 
+# lwIP world: the pinned upstream core compiles in its own include world
+# (adapter shadows first, so lwipopts.h/arch/*.h win), warnings silenced.
+$(BUILD)/third-party/lwip/%.o: third-party/lwip/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(LWIP_INC) -w -MMD -MP -c $< -o $@
+
+# Generic adapter code (lwip adapter files included) sees the adapter and the
+# lwip include worlds; net80211-specific files match the longer patterns above.
 $(BUILD)/port/adapters/%.o: port/adapters/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) -MMD -MP -c $< -o $@
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(LWIP_INC) -MMD -MP -c $< -o $@
+
+# The wpa worlds. Submodule sources and the adapter glue compile in the same
+# wpa world; driver_net80211 and l2_packet_net80211 additionally see the
+# net80211/BSD world (they call net80211 directly and link into the
+# supplicant - the compat shadows must precede the wpa include set for them).
+$(BUILD)/third-party/wpa_supplicant/%.o: third-party/wpa_supplicant/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(WPA_INC) $(WPA_CFG) -MMD -MP -c $< -o $@
+
+$(BUILD)/port/adapters/wpa_supplicant/%.o: port/adapters/wpa_supplicant/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(WPA_INC) $(WPA_CFG) -MMD -MP -c $< -o $@
+
+$(BUILD)/port/adapters/wpa_supplicant/driver_net80211.o: port/adapters/wpa_supplicant/driver_net80211.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(NET80211_INC) $(NET80211_BSD_CFG) \
+		$(WPA_INC) $(WPA_CFG) -MMD -MP -c $< -o $@
+
+$(BUILD)/port/adapters/wpa_supplicant/l2_packet_net80211.o: port/adapters/wpa_supplicant/l2_packet_net80211.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(NET80211_INC) $(NET80211_BSD_CFG) \
+		$(WPA_INC) $(WPA_CFG) -MMD -MP -c $< -o $@
 
 # The rules below deliberately omit INC_ADAPTER.
 $(BUILD)/port/aarch64/%.o: port/aarch64/%.c
@@ -319,15 +483,22 @@ deploy: $(TARGET).bin
 # third-party/net80211 records a local-path URL (the rk3568_lab NetBSD src
 # checkout), so the file:// protocol must be allowed for the whole invocation
 # (-c beats any stale local config ordering problem on a fresh clone).
-# Its working tree is kept sparse (sys/net80211 + sys/dev/usb + the urtwn
-# firmware dist instead of the full ~7 GB src tree); sparse-checkout only
-# rewrites the submodule's working tree, the recorded gitlink is untouched.
+# Its working tree is kept sparse (the net80211 + usb + urtwn subset instead
+# of the full ~7 GB src tree); sparse-checkout only rewrites the submodule's
+# working tree, the recorded gitlink is untouched. Cone mode takes directory
+# paths only - a file path (sys/fs/unicode.h) fails the whole "set" and a
+# fresh clone silently keeps the full tree, where the imported sys/sys/
+# headers shadow the compat/netbsd ones and the build breaks. The set below
+# is the shape the checked-out lanes actually build with.
 modules:
 	git -c protocol.file.allow=always submodule update --init --recursive
 	git -C third-party/net80211 sparse-checkout set \
-		sys/net80211 sys/dev/usb sys/dev/hid sys/crypto/aes \
-		sys/fs/unicode.h external/realtek/urtwn || \
+		sys/net80211 sys/dev/usb sys/dev/ic sys/dev/hid sys/crypto/aes \
+		sys/fs external/realtek/urtwn || \
 		echo 'note: net80211 sparse-checkout not set (kept full checkout)'
+	git -C third-party/wpa_supplicant sparse-checkout set \
+		src wpa_supplicant || \
+		echo 'note: wpa_supplicant sparse-checkout not set (kept full checkout)'
 	@for p in patches/*/*.patch; do \
 		[ -e "$$p" ] || continue; \
 		comp=$$(printf '%s' "$$p" | cut -d/ -f2); \

@@ -9,6 +9,7 @@
  *                        the future USB/xHCI line will sit on)
  *   app: SPI SOFTTRIG OK a software-pended SPI reached its handler (GIC)
  *   shell: READY         cherrysh task runs, console RX armed, prompt up
+ *   net: READY           lwip tcpip thread runs, wlan netif registered
  *
  * The gdb stub is present from boot (tx_gdb_init() runs in the ThreadX
  * port's kernel entry) but never owns the console unless a session starts:
@@ -25,6 +26,7 @@
 #include "cmsis_os2.h"
 #include "irq_ctrl.h"
 #include "shell.h"
+#include "net.h"
 
 #include "dbg_scenario.h"
 
@@ -96,6 +98,21 @@ static void task_shell_start(void *argument)
 	osThreadTerminate(osThreadGetId());
 }
 
+/* --- network bring-up task -------------------------------------------------- */
+
+/* Separate from the shell task: the "net: READY" anchor should not depend on
+ * shell timing, and a stack start failure must not keep the console from
+ * coming up. net_start() runs once and the task leaves. */
+static void task_net_start(void *argument)
+{
+	(void)argument;
+
+	if (net_start() != 0) {
+		board_log("net: FAIL\n");
+	}
+	osThreadTerminate(osThreadGetId());
+}
+
 /* --- boot ----------------------------------------------------------------- */
 
 void board_main(void)
@@ -131,6 +148,12 @@ void board_main(void)
 	if (osThreadNew(task_shell_start, 0, &(osThreadAttr_t){ .name = "shstart",
 			.stack_size = 2048, .priority = osPriorityHigh }) == 0) {
 		board_log("fatal: thread shell\n");
+		return;
+	}
+
+	if (osThreadNew(task_net_start, 0, &(osThreadAttr_t){ .name = "netstart",
+			.stack_size = 2048, .priority = osPriorityNormal }) == 0) {
+		board_log("fatal: thread net\n");
 		return;
 	}
 
