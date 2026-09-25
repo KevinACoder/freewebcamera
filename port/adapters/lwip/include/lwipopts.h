@@ -85,7 +85,10 @@
 #define LWIP_AUTOIP                     0
 #define LWIP_UDP                        1
 #define LWIP_TCP                        1
-#define LWIP_RAW                        1
+/* The raw API rides back in with the ping app: the comprehensive-network-
+ * test feat re-ports lwip-contrib apps/ping (the vendored copy's target
+ * parsing misfired on the board, and that stage wants its own suite). */
+#define LWIP_RAW                        0
 /* No libc behind this image: lwIP supplies its own errno constants
  * (lwip/errno.h) instead of reaching for <errno.h>, whose newlib shape
  * needs the reent machinery. err.c's err-to-errno table (compiled whenever

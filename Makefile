@@ -260,13 +260,10 @@ LWIP_SRCS := \
 	port/adapters/lwip/cmsis/sys_arch.c \
 	port/adapters/lwip/lwip_adapter.c \
 	port/adapters/lwip/lwip_diag.c \
-	port/adapters/lwip/net_cmd.c \
-	port/adapters/lwip/ping/ping.c \
-	port/adapters/lwip/ping_cmd.c
+	port/adapters/lwip/net_cmd.c
 
 LWIP_INC := -Iport/adapters/lwip/include \
 	-Iport/adapters/lwip/cmsis/include \
-	-Iport/adapters/lwip/ping \
 	-Ithird-party/lwip/src/include \
 	-Iport/adapters/net80211
 
