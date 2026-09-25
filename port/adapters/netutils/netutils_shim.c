@@ -442,6 +442,36 @@ rt_err_t rt_mb_delete(rt_mailbox_t mb)
 		       : -RT_ERROR;
 }
 
+/* --- wall clock (RAM epoch, no RTC on this trunk) --------------------------- */
+
+/* The synced wall clock is a UNIX-epoch value anchored at the tick it was
+ * set at; elapsed ticks advance it. 0 means "never synced" (tick 0 would be
+ * indistinguishable anyway this early in the boot). */
+static long ntp_epoch;
+static rt_tick_t ntp_epoch_tick;
+
+void netutils_ntp_set_epoch(long unix_sec)
+{
+	rt_base_t level = rt_hw_interrupt_disable();
+
+	ntp_epoch = unix_sec;
+	ntp_epoch_tick = tx_time_get();
+	rt_hw_interrupt_enable(level);
+}
+
+long netutils_ntp_get_epoch(void)
+{
+	rt_base_t level = rt_hw_interrupt_disable();
+	long now = ntp_epoch;
+	rt_tick_t anchor = ntp_epoch_tick;
+
+	rt_hw_interrupt_enable(level);
+	if (now == 0) {
+		return 0;
+	}
+	return now + (long)((rt_tick_t)tx_time_get() - anchor) / 1000;
+}
+
 /* --- interrupts ------------------------------------------------------------------- */
 
 rt_base_t rt_hw_interrupt_disable(void)
