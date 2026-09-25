@@ -20,5 +20,10 @@
 #define EHCI_DEBUG_DEFAULT 10
 #define XHCI_DEBUG 1
 #define XHCI_DEBUG_DEFAULT 10
+/* the bus provides 8-byte accessors and the board maps the controller
+ * Device-nGnRE, so the driver's Qword register writes (CRCR et al) go
+ * out as single 8-byte stores - the two-Dword fallback leaves the
+ * command ring unprogrammed (CRCR ignores half-writes per xHCI 5.4.11) */
+#define XHCI_USE_BUS_SPACE_8 1
 
 #endif /* _OPT_USB_H_ */

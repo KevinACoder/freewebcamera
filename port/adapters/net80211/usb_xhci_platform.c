@@ -289,12 +289,14 @@ int usb_xhci_attach(void)
 	sc->sc_iot = (bus_space_tag_t) { 0 };
 	sc->sc_ioh = (bus_space_handle_t) base;
 
-	/* quiet until xhci_init turns RUN on, so arm like dwc3_fdt
-	 * does: establish, then init */
+	/* arm the handler but keep the line masked: the domain ramp posts
+	 * port-change events into the ring before the usb children exist,
+	 * and the ISR schedules its softint through the usbus shells -
+	 * the first interrupt must only arrive after config_found, and
+	 * it then drains everything queued up */
 	IRQ_SetHandler((IRQn_ID_t) irq, usb_xhci_isr);
 	usb_xhci_isr_sc = sc;
 	IRQ_SetPriority((IRQn_ID_t) irq, BOARD_IRQ_PRIORITY_API_CALL_RAW);
-	IRQ_Enable((IRQn_ID_t) irq);
 	printf("xhci0: interrupting on INTID %u\n", irq);
 
 	error = xhci_init(sc);
@@ -316,6 +318,10 @@ int usb_xhci_attach(void)
 	sc->sc_child2 = config_found(dev, &sc->sc_bus2, usbctlprint,
 	    CFARGS(.iattr = "usbus"));
 
+	/* both usbuses attached - unmask and let the first interrupt
+	 * drain the queued port-change events */
+	IRQ_Enable((IRQn_ID_t) irq);
+
 	s_usb_xhci_attached = true;
 	return 0;
 }
@@ -334,6 +340,7 @@ void usb_xhci_dump(void)
 	uintptr_t cap = (uintptr_t) sc->sc_cbh;
 	uintptr_t op = (uintptr_t) sc->sc_obh;
 	uintptr_t rt = (uintptr_t) sc->sc_rbh;
+	uint32_t dboff = *(volatile uint32_t *) (cap + XHCI_DBOFF);
 	uint32_t hcs1, hcs2, hcc;
 	int i;
 
@@ -352,16 +359,20 @@ void usb_xhci_dump(void)
 	    (unsigned) XHCI_HCS1_MAXSLOTS(hcs1),
 	    (unsigned) XHCI_HCS1_MAXINTRS(hcs1),
 	    hcs2, (unsigned) XHCI_HCS2_MAXSPBUF(hcs2), hcc);
-	printf("usb: xhci cmd=%08x sts=%08x pagesize=%08x crcr=%08x%08x\n",
+	printf("usb: xhci cmd=%08x sts=%08x pagesize=%08x dboff=%08x "
+	    "db0=%08x db1=%08x\n",
 	    *(volatile uint32_t *) (op + XHCI_USBCMD),
 	    *(volatile uint32_t *) (op + XHCI_USBSTS),
 	    *(volatile uint32_t *) (op + XHCI_PAGESIZE),
-	    *(volatile uint32_t *) (op + XHCI_CRCR_HI),
-	    *(volatile uint32_t *) (op + XHCI_CRCR));
-	printf("usb: xhci dcbaap=%08x config=%08x iman=%08x imod=%08x "
-	    "erstsz=%u erstba=%08x erdp=%08x irq_count=%u\n",
+	    dboff,
+	    *(volatile uint32_t *) ((uintptr_t) sc->sc_dbh + 0U * 4U),
+	    *(volatile uint32_t *) ((uintptr_t) sc->sc_dbh + 1U * 4U));
+	printf("usb: xhci crcr=%016llx dcbaap=%08x config=%08x\n",
+	    (unsigned long long) *(volatile uint64_t *) (op + XHCI_CRCR),
 	    *(volatile uint32_t *) (op + XHCI_DCBAAP),
-	    *(volatile uint32_t *) (op + XHCI_CONFIG),
+	    *(volatile uint32_t *) (op + XHCI_CONFIG));
+	printf("usb: xhci iman=%08x imod=%08x erstsz=%u erstba=%08x "
+	    "erdp=%08x irq_count=%u\n",
 	    *(volatile uint32_t *) (rt + XHCI_IMAN(0)),
 	    *(volatile uint32_t *) (rt + XHCI_IMOD(0)),
 	    (unsigned) (*(volatile uint32_t *) (rt + XHCI_ERSTSZ(0)) &
@@ -369,6 +380,61 @@ void usb_xhci_dump(void)
 	    *(volatile uint32_t *) (rt + XHCI_ERSTBA(0)),
 	    *(volatile uint32_t *) (rt + XHCI_ERDP(0)),
 	    usb_xhci_irq_count);
+
+	/* what the controller is being handed: the command ring's first
+	 * TRBs and the event-ring segment table entry, invalidated
+	 * first so DRAM (not a stale cache line) is printed */
+	{
+		volatile struct xhci_soft_trb *cr =
+		    (volatile struct xhci_soft_trb *)
+			KERNADDR(&sc->sc_cr->xr_dma, 0);
+
+		board_dcache_invalidate((uintptr_t) cr, 4U * XHCI_TRB_SIZE);
+		for (i = 0; i < 4; i++) {
+			printf("usb: xhci cr[%d] %08x%08x %08x %08x\n", i,
+			    (unsigned) (cr[i].trb_0 >> 32),
+			    (unsigned) cr[i].trb_0,
+			    (unsigned) cr[i].trb_2, (unsigned) cr[i].trb_3);
+		}
+	}
+	{
+		volatile uint32_t *erst =
+		    (volatile uint32_t *) KERNADDR(&sc->sc_eventst_dma, 0);
+
+		board_dcache_invalidate((uintptr_t) erst, 16U);
+		printf("usb: xhci erst[0] %08x%08x %08x\n",
+		    erst[1], erst[0], erst[2]);
+
+		/* the event ring itself: a completion sitting here that
+		 * the softint never consumed points at our side; an empty
+		 * ring points at the controller not running the command */
+		{
+			volatile struct xhci_soft_trb *er =
+			    (volatile struct xhci_soft_trb *)
+				KERNADDR(&sc->sc_er->xr_dma, 0);
+
+			board_dcache_invalidate((uintptr_t) er,
+			    4U * XHCI_TRB_SIZE);
+			for (i = 0; i < 4; i++) {
+				printf("usb: xhci er[%d] %08x%08x %08x "
+				    "%08x\n", i,
+				    (unsigned) (er[i].trb_0 >> 32),
+				    (unsigned) er[i].trb_0,
+				    (unsigned) er[i].trb_2,
+				    (unsigned) er[i].trb_3);
+			}
+		}
+	}
+	{
+		volatile uint64_t *dcbaa =
+		    (volatile uint64_t *) KERNADDR(&sc->sc_dcbaa_dma, 0);
+
+		board_dcache_invalidate((uintptr_t) dcbaa, 3U * 8U);
+		printf("usb: xhci dcbaa[0..2] %016llx %016llx %016llx\n",
+		    (unsigned long long) dcbaa[0],
+		    (unsigned long long) dcbaa[1],
+		    (unsigned long long) dcbaa[2]);
+	}
 
 	for (i = 0; i < sc->sc_maxports; i++) {
 		uint32_t v = *(volatile uint32_t *)

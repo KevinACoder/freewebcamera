@@ -320,6 +320,10 @@ void usb_platform_dump(void)
 	uint32_t hcsparams, hccparams;
 	int i;
 
+	/* the xHCI section speaks for itself when ehci is not attached
+	 * (the diag build) */
+	usb_xhci_dump();
+
 	if (!s_usb_ehci_attached) {
 		printf("usb: platform not started\n");
 		return;
@@ -360,8 +364,6 @@ void usb_platform_dump(void)
 		snprintf(tag, sizeof(tag), "portsc%d", i);
 		usb_portsc_line(tag, EOREAD4(sc, EHCI_PORTSC(i)));
 	}
-
-	usb_xhci_dump();
 }
 
 /* raw register window: identify the true layout (DWC EHCI cores put
