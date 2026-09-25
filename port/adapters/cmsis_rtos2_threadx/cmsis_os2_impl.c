@@ -153,6 +153,47 @@ static def_record_t deferrals[MAX_DEFERRED];
 static uint32_t deferral_count;
 static uint8_t  kernel_objects_live;	/* set once replay has run */
 
+/*
+ * A slot pool that runs dry must say so.  The failure mode is silent by
+ * construction - the constructor returns NULL, the caller keeps a NULL
+ * handle, and the object quietly becomes a no-op (a NetBSD mutex that
+ * never locks, a cv whose wait returns at once).  One line per pool,
+ * through the polled console: it works from any context.
+ */
+extern void board_early_print(const char *s);
+
+static void
+slot_alert(const char *what, uint32_t used, uint32_t max)
+{
+	static uint8_t alerted_mutex;
+	static uint8_t alerted_sem;
+	static uint8_t alerted_thread;
+	char msg[96];
+
+	/* one line per pool: the first exhaustion is the informative one */
+	if (what[0] == 'm') {
+		if (alerted_mutex) {
+			return;
+		}
+		alerted_mutex = 1;
+	} else if (what[0] == 's') {
+		if (alerted_sem) {
+			return;
+		}
+		alerted_sem = 1;
+	} else {
+		if (alerted_thread) {
+			return;
+		}
+		alerted_thread = 1;
+	}
+
+	(void)snprintf(msg, sizeof(msg),
+	    "cmsis: %s pool exhausted (%u/%u in use) - objects degrade to no-ops\n",
+	    what, (unsigned)used, (unsigned)max);
+	board_early_print(msg);
+}
+
 static int defer(def_kind_t kind, void *slot,
 		 uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3)
 {
@@ -252,6 +293,7 @@ static thread_slot_t *thread_slot_alloc(void)
 		}
 	}
 	_tx_thread_smp_unprotect(save);
+	slot_alert("thread", MAX_THREADS, MAX_THREADS);
 	return NULL;
 }
 
@@ -859,7 +901,20 @@ osStatus_t osEventFlagsDelete(osEventFlagsId_t ef_id)
 
 /* --- mutexes --------------------------------------------------------------- */
 
-#define MAX_MUTEXES	16
+/*
+ * Sized for the net80211 + USB world, which is what exhausted the
+ * original 16 slots on 2026-09-25.  That world takes a lock per device,
+ * per pipe and per condition variable (the port's kcondvar emulation
+ * keeps a host mutex + a host semaphore per cv), and net80211 adds its
+ * per-interface and scan locks on top.
+ *
+ * Exhaustion is not benign: osMutexNew returning NULL turns a NetBSD
+ * mutex into a no-op, and a cv whose host objects are NULL makes
+ * cv_wait() return immediately - the urtwn register read spun forever in
+ * usbd_transfer's while (!xfer->ux_done) loop instead of blocking for
+ * its completion.  Bigger pools, and a failure that says so.
+ */
+#define MAX_MUTEXES	96
 
 typedef struct {
 	TX_MUTEX     mutex;
@@ -897,6 +952,7 @@ osMutexId_t osMutexNew(const osMutexAttr_t *attr)
 		}
 	}
 	if (slot == NULL) {
+		slot_alert("mutex", MAX_MUTEXES, MAX_MUTEXES);
 		return NULL;
 	}
 
@@ -968,7 +1024,7 @@ osStatus_t osMutexDelete(osMutexId_t mutex_id)
 
 /* --- semaphores ------------------------------------------------------------ */
 
-#define MAX_SEMAPHORES	32
+#define MAX_SEMAPHORES	160
 
 typedef struct {
 	TX_SEMAPHORE sem;
@@ -997,6 +1053,7 @@ osSemaphoreId_t osSemaphoreNew(uint32_t max_count, uint32_t initial_count,
 		}
 	}
 	if (slot == NULL) {
+		slot_alert("semaphore", MAX_SEMAPHORES, MAX_SEMAPHORES);
 		return NULL;
 	}
 
