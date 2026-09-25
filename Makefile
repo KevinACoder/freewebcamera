@@ -214,6 +214,62 @@ NET80211_BSD_CFG := -D_KERNEL -D_KERNEL_OPT -DDIAGNOSTIC \
 # frozen imports, edited only through patches/
 NET80211_SUB_CFG := -w $(NET80211_BSD_CFG)
 
+# --- lwip + wlan netif bridge (feat/wpa_supplicant) -----------------------------
+# lwIP 2.2.1 (pinned submodule). The set follows upstream src/Filelists.mk for
+# the core/IPv4 groups plus the api files the NO_SYS=0 tcpip model needs
+# (tcpip.c, netifapi.c, err.c); netconn/sockets are switched off in
+# lwipopts.h and their files are not compiled - the iperf3 feat turns them on
+# together. acd.c is in because LWIP_ACD follows LWIP_DHCP by default and
+# etharp.c then calls into it; dns.c/autoip.c/igmp.c stay out. The sys_arch
+# is the CMSIS twin; lwipopts.h and
+# arch/*.h are the adapter's shadow copies and sit ahead of the vendored tree
+# on the include path. The wlan netif bridge (net80211/lwip/lwip_netif.c)
+# lives next to the port hooks it consumes but compiles in this world: it
+# needs no BSD headers, and the BSD cfg's force-included endian.h clashes
+# with lwip's htons macros. Upstream sources compile with warnings silenced
+# (-w): frozen imports, edited only through patches/.
+LWIP_SRCS := \
+	third-party/lwip/src/core/def.c \
+	third-party/lwip/src/core/inet_chksum.c \
+	third-party/lwip/src/core/init.c \
+	third-party/lwip/src/core/ip.c \
+	third-party/lwip/src/core/mem.c \
+	third-party/lwip/src/core/memp.c \
+	third-party/lwip/src/core/netif.c \
+	third-party/lwip/src/core/pbuf.c \
+	third-party/lwip/src/core/raw.c \
+	third-party/lwip/src/core/stats.c \
+	third-party/lwip/src/core/sys.c \
+	third-party/lwip/src/core/tcp.c \
+	third-party/lwip/src/core/tcp_in.c \
+	third-party/lwip/src/core/tcp_out.c \
+	third-party/lwip/src/core/timeouts.c \
+	third-party/lwip/src/core/udp.c \
+	third-party/lwip/src/core/ipv4/acd.c \
+	third-party/lwip/src/core/ipv4/dhcp.c \
+	third-party/lwip/src/core/ipv4/etharp.c \
+	third-party/lwip/src/core/ipv4/icmp.c \
+	third-party/lwip/src/core/ipv4/ip4.c \
+	third-party/lwip/src/core/ipv4/ip4_addr.c \
+	third-party/lwip/src/core/ipv4/ip4_frag.c \
+	third-party/lwip/src/api/err.c \
+	third-party/lwip/src/api/netifapi.c \
+	third-party/lwip/src/api/tcpip.c \
+	third-party/lwip/src/netif/ethernet.c \
+	port/adapters/net80211/lwip/lwip_netif.c \
+	port/adapters/lwip/cmsis/sys_arch.c \
+	port/adapters/lwip/lwip_adapter.c \
+	port/adapters/lwip/lwip_diag.c \
+	port/adapters/lwip/net_cmd.c \
+	port/adapters/lwip/ping/ping.c \
+	port/adapters/lwip/ping_cmd.c
+
+LWIP_INC := -Iport/adapters/lwip/include \
+	-Iport/adapters/lwip/cmsis/include \
+	-Iport/adapters/lwip/ping \
+	-Ithird-party/lwip/src/include \
+	-Iport/adapters/net80211
+
 # Board assembly is shared; the kernel-side assembly is the seam itself:
 # tx_vectors.S (runtime vector table + SPSel entry stubs) plus the kernel
 # port's own assembly.
@@ -228,9 +284,11 @@ ASM_SRCS := \
 C_SRCS := $(KERNEL_SRCS) $(ARCH_SRCS) $(ADAPTER_SRCS) $(DRIVER_SRCS) $(APP_SRCS)
 NET80211_IMPL_OBJS := $(addprefix $(BUILD)/,$(NET80211_IMPL_SRCS:.c=.o))
 NET80211_ADAPTER_OBJS := $(addprefix $(BUILD)/,$(NET80211_ADAPTER_SRCS:.c=.o))
+LWIP_OBJS := $(addprefix $(BUILD)/,$(LWIP_SRCS:.c=.o))
 OBJS := $(addprefix $(BUILD)/,$(C_SRCS:.c=.o)) $(addprefix $(BUILD)/,$(ASM_SRCS:.S=.o)) \
 	$(addprefix $(BUILD)/,$(NET80211_BSD_SRCS:.c=.o)) \
-	$(NET80211_IMPL_OBJS) $(NET80211_ADAPTER_OBJS)
+	$(NET80211_IMPL_OBJS) $(NET80211_ADAPTER_OBJS) \
+	$(LWIP_OBJS)
 DEPS := $(OBJS:.o=.d)
 
 # Kernel and adapters see the vendored trees; board, drivers and app do not.
@@ -254,9 +312,17 @@ $(NET80211_ADAPTER_OBJS): $(BUILD)/port/adapters/net80211/%.o: port/adapters/net
 	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(NET80211_INC) \
 		$(NET80211_BSD_CFG) -MMD -MP -c $< -o $@
 
+# lwIP world: the pinned upstream core compiles in its own include world
+# (adapter shadows first, so lwipopts.h/arch/*.h win), warnings silenced.
+$(BUILD)/third-party/lwip/%.o: third-party/lwip/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(LWIP_INC) -w -MMD -MP -c $< -o $@
+
+# Generic adapter code (lwip adapter files included) sees the adapter and the
+# lwip include worlds; net80211-specific files match the longer patterns above.
 $(BUILD)/port/adapters/%.o: port/adapters/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) -MMD -MP -c $< -o $@
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(LWIP_INC) -MMD -MP -c $< -o $@
 
 # The rules below deliberately omit INC_ADAPTER.
 $(BUILD)/port/aarch64/%.o: port/aarch64/%.c
