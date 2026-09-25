@@ -125,6 +125,7 @@ ADAPTER_SRCS := \
 	port/adapters/netutils/iperf3_port.c \
 	port/adapters/netutils/iperf3_cmd.c \
 	port/adapters/netutils/ntp_port.c \
+	port/adapters/netutils/telnet_port.c \
 
 DRIVER_SRCS := drivers/uart_ns16550.c
 

@@ -38,6 +38,7 @@ int cherrysh_init(void);
  */
 #define CSH_FROM_ARGV(argc, argv) ((chry_shell_t *)(void *)(argv)[(argc) + 1])
 
+
 #ifdef __cplusplus
 }
 #endif

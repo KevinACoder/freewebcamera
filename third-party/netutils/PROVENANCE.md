@@ -37,8 +37,19 @@
 
 ## Not ported (this feat)
 
+- `telnet/` - NOT vendored: its architecture is RT-Thread's console switch
+  (char device + rt_console_set_device + the one finsh thread), which has no
+  equivalent here. CherrySH is a multi-instance shell, so the honest port is
+  a first-party telnetd (`port/adapters/netutils/telnet_port.c`): one
+  chry_shell_t per connection sharing the FSymTab command table, IAC
+  negotiation + CR/LF de-duplication in the socket RX filter, and the
+  session bound into the shim's output router.
+- `ntp/` - NOT vendored: `ntp.h` carries a legacy GPL-2 header, and the
+  clean-room constraint admits only BSD/MIT/Apache/ISC. First-party SNTP
+  client instead (`port/adapters/netutils/ntp_port.c`, RFC 4330).
+
 - `iperf/` — RT-Thread's own iperf is not protocol-compatible with real
   iperf2/iperf3; this line's iperf carrier is `third-party/iperf3_embedded`
   (real iperf3 protocol, board-validated against esnet iperf 3.19.1).
-- `netio/`, `ntp/`, `telnet/`, `tcpdump/` — each lands in its own milestone
-  of the netutils feat (see the feat issue for the adaptation notes).
+- `netio/` landed with a one-line tick-rate fix; `tcpdump/` lands in its
+  own milestone.
