@@ -68,6 +68,7 @@ INC_ADAPTER := -Ithird-party/threadx/common/inc \
 	-Iport/adapters/threadx \
 	-Iport/adapters/cmsis_rtos2_threadx \
 	-Ithird-party/tlsf \
+	-Ithird-party/printf \
 	-Iport/adapters/cherrysh \
 	-Ithird-party/cherrysh \
 	-Ithird-party/cherrysh/cherryrl \
@@ -85,6 +86,7 @@ KERNEL_SRCS := $(wildcard third-party/threadx/common/src/*.c) \
 	port/adapters/threadx/tx_gdb_glue.c \
 	port/adapters/threadx/heap.c \
 	third-party/tlsf/tlsf.c \
+	third-party/printf/printf.c \
 	port/aarch64/gdb/gdb_main.c \
 	port/aarch64/gdb/gdb_packet.c \
 	port/aarch64/gdb/gdb_arch.c
@@ -393,6 +395,14 @@ $(NET80211_ADAPTER_OBJS): $(BUILD)/port/adapters/net80211/%.o: port/adapters/net
 $(BUILD)/third-party/lwip/%.o: third-party/lwip/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(LWIP_INC) -w -MMD -MP -c $< -o $@
+
+# mpaland/printf (vendored, third-party/printf): float/exponential rendering
+# is compiled out - the image is -mgeneral-regs-only, there is no FP state to
+# format into, such specifiers degrade like unknown ones. See PROVENANCE.md.
+$(BUILD)/third-party/printf/printf.o: third-party/printf/printf.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -DPRINTF_DISABLE_SUPPORT_FLOAT -DPRINTF_DISABLE_SUPPORT_EXPONENTIAL \
+		$(INC_COMMON) $(INC_ADAPTER) -MMD -MP -c $< -o $@
 
 # Generic adapter code (lwip adapter files included) sees the adapter and the
 # lwip include worlds; net80211-specific files match the longer patterns above.
