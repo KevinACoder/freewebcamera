@@ -32,7 +32,7 @@ Rules:
 
 Current state:
 
-- `net80211/` — four patches against the netbsd-11 pin (all local
+- `net80211/` — five patches against the netbsd-11 pin (all local
   deviations the port needs, registered in `IMPORT-INFO.md`):
   - `0001-compile-out-the-sysctl-tree.patch` — the sysctl configuration
     tree compiles out (`IEEE80211_PORT_NO_SYSCTL`); attach/detach keep
@@ -53,5 +53,9 @@ Current state:
     command parked the state machine mid-bitmap on the first cold-boot
     scan (evidence 20260925, chan 2422). The ring also grows 32 → 64
     slots; on overflow the new command is dropped loudly instead.
+  - `0005-xhci-debug-level-from-opt.patch` — `xhcidebug` initializes from
+    `XHCI_DEBUG_DEFAULT` (same treatment as ehci's debug level) instead of
+    a hard 0, so the xHCI debug verbosity is compile-time configurable via
+    the compat `opt_usb.h` (introduced with the xHCI line).
 - `threadx/`, `cherrysh/`, `cherryrb/`, `lwip/` — no patches; used
   byte-identical to their pins.
