@@ -270,6 +270,84 @@ LWIP_INC := -Iport/adapters/lwip/include \
 	-Ithird-party/lwip/src/include \
 	-Iport/adapters/net80211
 
+# --- wpa_supplicant (feat/wpa_supplicant) ----------------------------------------
+# The PSK-only file set (no EAP/WPS/P2P/ctrl-iface/SME), the same list the
+# frozen workspace compiled from this fork; upstream sources compile with
+# warnings silenced (WPA_CFG's -w): frozen imports, edited only through
+# patches/. The whole world gets wpa_port_config.h force-included, which
+# steers the fork's includes.h/build_config.h onto the plain-libc path
+# (CONFIG_OS_EMBOX) and selects our driver slot in src/drivers/drivers.c
+# (CONFIG_DRIVER_EMBOX; the ops live in the adapter's driver_net80211.c).
+# The shim/ directory comes first for the wpa-world units: newlib has no
+# net/if.h or netinet/in.h, and pulling the net80211 compat shadows instead
+# would drag the BSD macro world (kalloc-style malloc) in with them.
+WPA_CORE_SRCS := \
+	third-party/wpa_supplicant/src/common/wpa_common.c \
+	third-party/wpa_supplicant/src/common/ieee802_11_common.c \
+	third-party/wpa_supplicant/src/common/hw_features_common.c \
+	third-party/wpa_supplicant/src/drivers/driver_common.c \
+	third-party/wpa_supplicant/src/drivers/drivers.c \
+	third-party/wpa_supplicant/src/rsn_supp/wpa.c \
+	third-party/wpa_supplicant/src/rsn_supp/wpa_ie.c \
+	third-party/wpa_supplicant/src/rsn_supp/pmksa_cache.c \
+	third-party/wpa_supplicant/src/rsn_supp/preauth.c \
+	third-party/wpa_supplicant/src/utils/common.c \
+	third-party/wpa_supplicant/src/utils/wpabuf.c \
+	third-party/wpa_supplicant/src/utils/base64.c \
+	third-party/wpa_supplicant/src/utils/bitfield.c \
+	third-party/wpa_supplicant/src/utils/wpa_debug.c \
+	third-party/wpa_supplicant/src/crypto/crypto_internal.c \
+	third-party/wpa_supplicant/src/crypto/aes-internal.c \
+	third-party/wpa_supplicant/src/crypto/aes-internal-dec.c \
+	third-party/wpa_supplicant/src/crypto/aes-internal-enc.c \
+	third-party/wpa_supplicant/src/crypto/aes-wrap.c \
+	third-party/wpa_supplicant/src/crypto/aes-unwrap.c \
+	third-party/wpa_supplicant/src/crypto/aes-omac1.c \
+	third-party/wpa_supplicant/src/crypto/sha1.c \
+	third-party/wpa_supplicant/src/crypto/sha1-internal.c \
+	third-party/wpa_supplicant/src/crypto/sha1-prf.c \
+	third-party/wpa_supplicant/src/crypto/sha1-pbkdf2.c \
+	third-party/wpa_supplicant/src/crypto/md5.c \
+	third-party/wpa_supplicant/src/crypto/md5-internal.c \
+	third-party/wpa_supplicant/src/crypto/rc4.c \
+	third-party/wpa_supplicant/src/crypto/sha256.c \
+	third-party/wpa_supplicant/src/crypto/sha256-internal.c \
+	third-party/wpa_supplicant/src/crypto/sha256-prf.c \
+	third-party/wpa_supplicant/src/crypto/tls_none.c \
+	third-party/wpa_supplicant/wpa_supplicant/wpa_supplicant.c \
+	third-party/wpa_supplicant/wpa_supplicant/events.c \
+	third-party/wpa_supplicant/wpa_supplicant/scan.c \
+	third-party/wpa_supplicant/wpa_supplicant/bss.c \
+	third-party/wpa_supplicant/wpa_supplicant/config.c \
+	third-party/wpa_supplicant/wpa_supplicant/config_none.c \
+	third-party/wpa_supplicant/wpa_supplicant/notify.c \
+	third-party/wpa_supplicant/wpa_supplicant/wpas_glue.c \
+	third-party/wpa_supplicant/wpa_supplicant/bssid_ignore.c \
+	third-party/wpa_supplicant/wpa_supplicant/eap_register.c \
+	third-party/wpa_supplicant/wpa_supplicant/op_classes.c \
+	third-party/wpa_supplicant/wpa_supplicant/rrm.c \
+	third-party/wpa_supplicant/wpa_supplicant/robust_av.c
+
+WPA_PORT_SRCS := \
+	port/adapters/wpa_supplicant/os_port.c \
+	port/adapters/wpa_supplicant/eloop_port.c \
+	port/adapters/wpa_supplicant/supp_main_cmsis.c \
+	port/adapters/wpa_supplicant/wpa_cmd.c \
+	port/adapters/wpa_supplicant/l2_packet_net80211.c \
+	port/adapters/wpa_supplicant/driver_net80211.c
+
+WPA_INC := -Iport/adapters/wpa_supplicant/shim \
+	-Ithird-party/wpa_supplicant \
+	-Ithird-party/wpa_supplicant/src \
+	-Ithird-party/wpa_supplicant/src/utils \
+	-Ithird-party/wpa_supplicant/src/drivers \
+	-Ithird-party/wpa_supplicant/src/l2_packet \
+	-Ithird-party/wpa_supplicant/wpa_supplicant \
+	-Iport/adapters/wpa_supplicant
+
+WPA_CFG := -w -include stdarg.h \
+	-include port/adapters/wpa_supplicant/wpa_port_config.h
+
 # Board assembly is shared; the kernel-side assembly is the seam itself:
 # tx_vectors.S (runtime vector table + SPSel entry stubs) plus the kernel
 # port's own assembly.
@@ -285,10 +363,11 @@ C_SRCS := $(KERNEL_SRCS) $(ARCH_SRCS) $(ADAPTER_SRCS) $(DRIVER_SRCS) $(APP_SRCS)
 NET80211_IMPL_OBJS := $(addprefix $(BUILD)/,$(NET80211_IMPL_SRCS:.c=.o))
 NET80211_ADAPTER_OBJS := $(addprefix $(BUILD)/,$(NET80211_ADAPTER_SRCS:.c=.o))
 LWIP_OBJS := $(addprefix $(BUILD)/,$(LWIP_SRCS:.c=.o))
+WPA_OBJS := $(addprefix $(BUILD)/,$(WPA_CORE_SRCS:.c=.o) $(WPA_PORT_SRCS:.c=.o))
 OBJS := $(addprefix $(BUILD)/,$(C_SRCS:.c=.o)) $(addprefix $(BUILD)/,$(ASM_SRCS:.S=.o)) \
 	$(addprefix $(BUILD)/,$(NET80211_BSD_SRCS:.c=.o)) \
 	$(NET80211_IMPL_OBJS) $(NET80211_ADAPTER_OBJS) \
-	$(LWIP_OBJS)
+	$(LWIP_OBJS) $(WPA_OBJS)
 DEPS := $(OBJS:.o=.d)
 
 # Kernel and adapters see the vendored trees; board, drivers and app do not.
@@ -323,6 +402,28 @@ $(BUILD)/third-party/lwip/%.o: third-party/lwip/%.c
 $(BUILD)/port/adapters/%.o: port/adapters/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(LWIP_INC) -MMD -MP -c $< -o $@
+
+# The wpa worlds. Submodule sources and the adapter glue compile in the same
+# wpa world; driver_net80211 and l2_packet_net80211 additionally see the
+# net80211/BSD world (they call net80211 directly and link into the
+# supplicant - the compat shadows must precede the wpa include set for them).
+$(BUILD)/third-party/wpa_supplicant/%.o: third-party/wpa_supplicant/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(WPA_INC) $(WPA_CFG) -MMD -MP -c $< -o $@
+
+$(BUILD)/port/adapters/wpa_supplicant/%.o: port/adapters/wpa_supplicant/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(WPA_INC) $(WPA_CFG) -MMD -MP -c $< -o $@
+
+$(BUILD)/port/adapters/wpa_supplicant/driver_net80211.o: port/adapters/wpa_supplicant/driver_net80211.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(NET80211_INC) $(NET80211_BSD_CFG) \
+		$(WPA_INC) $(WPA_CFG) -MMD -MP -c $< -o $@
+
+$(BUILD)/port/adapters/wpa_supplicant/l2_packet_net80211.o: port/adapters/wpa_supplicant/l2_packet_net80211.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(NET80211_INC) $(NET80211_BSD_CFG) \
+		$(WPA_INC) $(WPA_CFG) -MMD -MP -c $< -o $@
 
 # The rules below deliberately omit INC_ADAPTER.
 $(BUILD)/port/aarch64/%.o: port/aarch64/%.c
