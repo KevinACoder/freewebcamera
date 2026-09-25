@@ -34,6 +34,7 @@
 #define PKG_NETUTILS_NTP                 1
 #define PKG_NETUTILS_TELNET              1
 #define PKG_NETUTILS_TCPDUMP             1
+#define PKG_NETUTILS_TCPDUMP_PRINT       1
 #define PKG_NETUTILS_NETIO               1
 
 #endif /* FWC_NETUTILS_SHIM_RTCONFIG_H */
