@@ -28,6 +28,8 @@ extern void usb_platform_qh_dump(void);
 extern void usb_platform_reg_dump(void);
 extern void usb_platform_hist_dump(unsigned int max);
 extern void usb_platform_delay_test(void);
+extern void usb_xhci_dump(void);
+extern void usb_xhci_reg_dump(void);
 
 /* register-level debug access (urtwn adapter) */
 extern int wlan_urtwn_reg_read(unsigned addr, unsigned *val);
@@ -141,6 +143,20 @@ static int cmd_wlan(int argc, char **argv)
 		usb_platform_dump();
 		usb_platform_qh_dump();
 		usb_platform_reg_dump();
+		return 0;
+	}
+
+	/* the xHCI state and its command/event-ring windows: the place a
+	 * "command timeout" actually gets decided - the completions may
+	 * be sitting in the ring unconsumed (feat/xhci evidence) */
+	if (argc >= 2 && strcmp(argv[1], "xhci") == 0) {
+		usb_xhci_dump();
+		return 0;
+	}
+
+	/* raw xhci register rows over the three windows */
+	if (argc >= 2 && strcmp(argv[1], "xreg") == 0) {
+		usb_xhci_reg_dump();
 		return 0;
 	}
 

@@ -27,6 +27,8 @@ void usb_bus_domain_once(void);
 void usb_usb3_domain_init(void);
 int usb_xhci_attach(void);
 void usb_xhci_dump(void);
+/* raw capability/operational/runtime/doorbell register rows */
+void usb_xhci_reg_dump(void);
 
 /* the usb history ring: every state transition the imported core
  * logged, oldest first (max = 0 prints the whole ring) */

@@ -449,3 +449,54 @@ void usb_xhci_dump(void)
 		    (unsigned) XHCI_PS_SPEED_GET(v));
 	}
 }
+
+/* raw register rows over the three windows (the ehci reg_dump habit):
+ * when a bring-up misbehaves the derived fields above say what the
+ * driver believes, these say what the silicon reports */
+void usb_xhci_reg_dump(void)
+{
+	struct xhci_softc *sc = &usb_xhci_sc;
+	uintptr_t cap = (uintptr_t) sc->sc_cbh;
+	uintptr_t op = (uintptr_t) sc->sc_obh;
+	uintptr_t rt = (uintptr_t) sc->sc_rbh;
+	int i;
+
+	if (!s_usb_xhci_attached) {
+		printf("usb: xhci not started\n");
+		return;
+	}
+
+	printf("usb: xhci cap[00]=%08x[04]=%08x[08]=%08x[0c]=%08x\n",
+	    *(volatile uint32_t *) (cap + 0x00),
+	    *(volatile uint32_t *) (cap + 0x04),
+	    *(volatile uint32_t *) (cap + 0x08),
+	    *(volatile uint32_t *) (cap + 0x0c));
+	printf("usb: xhci cap[10]=%08x[14]=%08x[18]=%08x[1c]=%08x\n",
+	    *(volatile uint32_t *) (cap + 0x10),
+	    *(volatile uint32_t *) (cap + 0x14),
+	    *(volatile uint32_t *) (cap + 0x18),
+	    *(volatile uint32_t *) (cap + 0x1c));
+	for (i = 0; i < 0x60; i += 0x10) {
+		printf("usb: xhci op[%02x]=%08x[%02x]=%08x[%02x]=%08x"
+		    "[%02x]=%08x\n", i,
+		    *(volatile uint32_t *) (op + i), i + 4,
+		    *(volatile uint32_t *) (op + i + 4), i + 8,
+		    *(volatile uint32_t *) (op + i + 8), i + 0xc,
+		    *(volatile uint32_t *) (op + i + 0xc));
+	}
+	printf("usb: xhci rt mfin=%08x iman=%08x imod=%08x "
+	    "erstsz=%08x\n",
+	    *(volatile uint32_t *) rt,
+	    *(volatile uint32_t *) (rt + XHCI_IMAN(0)),
+	    *(volatile uint32_t *) (rt + XHCI_IMOD(0)),
+	    *(volatile uint32_t *) (rt + XHCI_ERSTSZ(0)));
+	printf("usb: xhci rt erstba=%08x%08x erdp=%08x%08x\n",
+	    *(volatile uint32_t *) (rt + XHCI_ERSTBA(0) + 4),
+	    *(volatile uint32_t *) (rt + XHCI_ERSTBA(0)),
+	    *(volatile uint32_t *) (rt + XHCI_ERDP(0) + 4),
+	    *(volatile uint32_t *) (rt + XHCI_ERDP(0)));
+	printf("usb: xhci db[0]=%08x db[1]=%08x irq_count=%u\n",
+	    *(volatile uint32_t *) ((uintptr_t) sc->sc_dbh + 0U),
+	    *(volatile uint32_t *) ((uintptr_t) sc->sc_dbh + 4U),
+	    usb_xhci_irq_count);
+}
