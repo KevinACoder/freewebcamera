@@ -122,6 +122,8 @@ ADAPTER_SRCS := \
 	third-party/cherryrb/chry_ringbuffer.c \
 	port/adapters/netutils/netutils_shim.c \
 	port/adapters/netutils/tftp_port.c \
+	port/adapters/netutils/iperf3_port.c \
+	port/adapters/netutils/iperf3_cmd.c \
 
 DRIVER_SRCS := drivers/uart_ns16550.c
 
@@ -291,10 +293,13 @@ NETUTILS_VENDORED_SRCS := \
 	third-party/netutils/tftp/tftp_client.c \
 	third-party/netutils/tftp/tftp_server.c \
 	third-party/netutils/tftp/tftp_xfer.c \
+	third-party/iperf3_embedded/iperf3_embedded.c \
 
 NETUTILS_INC := -Iport/adapters/netutils/shim \
+	-Iport/adapters/netutils \
 	-Ithird-party/netutils/ping \
 	-Ithird-party/netutils/tftp \
+	-Ithird-party/iperf3_embedded \
 	-Iport/adapters/cherrysh \
 	-Ithird-party/cherrysh
 
@@ -437,6 +442,12 @@ $(BUILD)/third-party/printf/printf.o: third-party/printf/printf.c
 # The netutils vendored world: shim shadows first, then the lwip world (the
 # shim's sys/socket.h reaches lwip/sockets.h through this path).
 $(BUILD)/third-party/netutils/%.o: third-party/netutils/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(NETUTILS_INC) $(LWIP_INC) -w -MMD -MP -c $< -o $@
+
+# The iperf3_embedded vendored world: same include set (its OS glue is the
+# netutils adapter's iperf3_port.h; sockets resolve against lwIP).
+$(BUILD)/third-party/iperf3_embedded/%.o: third-party/iperf3_embedded/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(NETUTILS_INC) $(LWIP_INC) -w -MMD -MP -c $< -o $@
 
