@@ -9,7 +9,12 @@ the submodule working tree:
 
 `make modules` re-initializes the submodules at their pins and replays every
 patch (`git apply`, idempotent: an already-applied patch is reported and
-kept).
+kept).  A replayed working tree is an intermediate state, not an end state:
+`make sync` materializes it as a commit on branch `fwc/<component>` inside
+the submodule (that commit's parent IS the pin) and stages the gitlink bump
+for the round's parent commit — so the repo ends every round with a clean
+`git status`.  The patches here stay the source of truth; the `fwc/*` commits
+are mechanical and are never pushed to a submodule's origin.
 
 Rules:
 
@@ -18,6 +23,8 @@ Rules:
   it.
 - If an upstream update rewords the touched lines, rebase the patch onto the
   new pin, bump the pin and the registration together.
+- End of every round: `make sync`, commit the staged gitlink, `git status`
+  clean.
 - Components without a usable upstream git home (today: `tlsf`, vendored from
   the baisoku.org 3.1 package) are vendored instead of submoduled; their
   provenance lives in the tree (`third-party/tlsf/PROVENANCE.md`) and their
