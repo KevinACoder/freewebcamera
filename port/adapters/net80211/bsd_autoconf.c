@@ -66,6 +66,13 @@ bool cpu_intr_p(void) {
 	return _tx_thread_system_state != 0UL;
 }
 
+/* xhci.c asks this around its softint-driven completion paths; the
+ * port's softint handlers run on a plain worker thread, so the answer
+ * is always "no" there (the same shape cpu_intr_p's predicate has) */
+bool cpu_softintr_p(void) {
+	return false;
+}
+
 struct kmutex *proc_lock(struct proc *p) {
 	(void) p;
 	return NULL;
@@ -80,24 +87,27 @@ struct usb_subr_copy_30_hook_t usb_subr_copy_30_hook = { .hooked = false };
  * cfdrivers: ioconf.c would generate these from the config file
  */
 
-static device_t usb_devs[2];
-static device_t uroothub_devs[2];
+/* usb shells: ehci1's usbus + the xHCI's two buses (USB3 + USB2);
+ * roothub shells: one per usbus, same count */
+static device_t usb_devs[4];
+static device_t uroothub_devs[4];
 static device_t uhub_devs[4];
 static device_t ehci_devs[2];
+static device_t xhci_devs[2];
 static device_t urtwn_devs[2];
 
 struct cfdriver usb_cd = {
 	.cd_devs = usb_devs,
 	.cd_name = "usb",
 	.cd_class = DV_DULL,
-	.cd_ndevs = 2,
+	.cd_ndevs = 4,
 };
 
 struct cfdriver uroothub_cd = {
 	.cd_devs = uroothub_devs,
 	.cd_name = "uroothub",
 	.cd_class = DV_DULL,
-	.cd_ndevs = 2,
+	.cd_ndevs = 4,
 };
 
 struct cfdriver uhub_cd = {
@@ -110,6 +120,16 @@ struct cfdriver uhub_cd = {
 struct cfdriver ehci_cd = {
 	.cd_devs = ehci_devs,
 	.cd_name = "ehci",
+	.cd_class = DV_DULL,
+	.cd_ndevs = 2,
+};
+
+/* the xHCI attaches manually (usb_xhci_platform.c composes its softc
+ * and populates cd_devs like ehci's attach does); the cfdata table
+ * never matches it, only its usbus children */
+struct cfdriver xhci_cd = {
+	.cd_devs = xhci_devs,
+	.cd_name = "xhci",
 	.cd_class = DV_DULL,
 	.cd_ndevs = 2,
 };

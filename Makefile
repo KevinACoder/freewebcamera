@@ -166,13 +166,15 @@ NET80211_BSD_SRCS := \
 	third-party/net80211/sys/dev/usb/usb_quirks.c \
 	third-party/net80211/sys/dev/usb/uhub.c \
 	third-party/net80211/sys/dev/usb/usbroothub.c \
-	third-party/net80211/sys/dev/usb/ehci.c
+	third-party/net80211/sys/dev/usb/ehci.c \
+	third-party/net80211/sys/dev/usb/xhci.c
 
 NET80211_IMPL_SRCS := \
 	port/adapters/net80211/aes_impl_compat.c \
 	port/adapters/net80211/bsd_bus.c \
 	port/adapters/net80211/bsd_autoconf.c \
 	port/adapters/net80211/bsd_kernhist.c \
+	port/adapters/net80211/bsd_subr_prf.c \
 	port/adapters/net80211/osal/osal_cmsis_rtos2.c \
 	port/adapters/net80211/osal/firmware_cmsis.c \
 	port/adapters/net80211/net/bsd_mbuf.c \
@@ -184,6 +186,7 @@ NET80211_ADAPTER_SRCS := \
 	port/adapters/net80211/wlan_console.c \
 	port/adapters/net80211/wlan_cmds.c \
 	port/adapters/net80211/usb_platform.c \
+	port/adapters/net80211/usb_xhci_platform.c \
 	port/adapters/net80211/fw_rtl8188eufw.c
 
 NET80211_INC := -Iinclude \

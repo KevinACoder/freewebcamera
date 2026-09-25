@@ -62,6 +62,9 @@ int kpause(const char *ident, bool nlocked, int timo, kmutex_t *lock);
 int uimin(int a, int b);
 int uimax(int a, int b);
 
+/* subr_prf.c: bitmask formatting for the imported drivers' dumps */
+int snprintb(char *buf, size_t buflen, const char *bitfmt, uint64_t val);
+
 int copyin(const void *, void *, size_t);
 int copyout(const void *, void *, size_t);
 int copystr(const void *, void *, size_t, size_t *);

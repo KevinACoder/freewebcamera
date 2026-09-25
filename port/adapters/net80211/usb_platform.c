@@ -75,8 +75,9 @@ static void usb_udelay(uint32_t usec)
 
 /* PD_PIPE power island on + PHY reference clock gates + VBUS enable.
  * Bus island: request idle, wait for the ack, ungate the domain, wait
- * for the power-down status to clear (the standalone-line sequence). */
-static void usb_bus_domain_once(void)
+ * for the power-down status to clear (the standalone-line sequence).
+ * Shared: the xHCI line's USB3 domain sequence rides on it. */
+void usb_bus_domain_once(void)
 {
 	volatile uint32_t *pmu = (volatile uint32_t *)USBH_PMU_BASE;
 	volatile uint32_t *pmucru = (volatile uint32_t *)USBH_PMUCRU_BASE;
@@ -319,6 +320,10 @@ void usb_platform_dump(void)
 	uint32_t hcsparams, hccparams;
 	int i;
 
+	/* the xHCI section speaks for itself when ehci is not attached
+	 * (the diag build) */
+	usb_xhci_dump();
+
 	if (!s_usb_ehci_attached) {
 		printf("usb: platform not started\n");
 		return;
@@ -522,6 +527,18 @@ int usb_platform_init(void)
 	 * usb.c defers its whole attach (taskq threads + root hub) there */
 	config_deferred_run();
 
+	/* D50 ordering: the domain SRST pulses reset shared USB blocks,
+	 * so both domains run to completion before either HCD attaches -
+	 * the USB3 socket-group domain first (its con9/con14 pulse is
+	 * what makes the attach-time con14 pulse in the usb2phy1 domain
+	 * bounce nothing), then the usb2phy1 domain. */
+	usb_usb3_domain_init();
+	usb_usb2phy1_domain_init();
+
+	error = usb_xhci_attach(); /* the USB3 socket group (upper port) */
+	if (error != 0) {
+		return error;
+	}
 	error = usb_ehci_attach(1); /* the panel Type-A pair (CH334P hub) */
 	if (error != 0) {
 		return error;

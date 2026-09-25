@@ -16,6 +16,18 @@ void usb_platform_dump(void);
 void usb_platform_reg_dump(void);
 void usb_platform_qh_dump(void);
 
+/* the shared bus-domain helper (PD_PIPE + PHY reference clocks +
+ * VBUS): the USB3 domain sequence in usb_xhci_platform.c rides on it */
+void usb_bus_domain_once(void);
+
+/* the USB3 socket-group domain (CRU gates + SRST pulse + usb2phy0
+ * GRF) and the xHCI host on the upper port, fcc00000 - the
+ * dwc3_fdt.c role.  Both domains must run before any HCD attaches
+ * (D50: the SRST pulses reset shared USB blocks). */
+void usb_usb3_domain_init(void);
+int usb_xhci_attach(void);
+void usb_xhci_dump(void);
+
 /* the usb history ring: every state transition the imported core
  * logged, oldest first (max = 0 prints the whole ring) */
 void usb_platform_hist_dump(unsigned int max);

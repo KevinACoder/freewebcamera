@@ -6,7 +6,14 @@
 #ifndef _SYS_KERNEL_H_
 #define _SYS_KERNEL_H_
 
+#include <stddef.h>
+
 #include "types.h"
+
+/* cast a member of a structure out to the containing structure
+ * (xhci.c's pipe/slot back-pointing) */
+#define container_of(ptr, type, member) \
+	((type *) (void *) ((char *) (ptr) - offsetof(type, member)))
 
 extern int hz;
 
