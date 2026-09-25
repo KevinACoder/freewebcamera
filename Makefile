@@ -186,8 +186,8 @@ NET80211_INC := -Iinclude \
 	-Iport/adapters/net80211 \
 	-Ithird-party/tlsf
 
-NET80211_BSD_CFG := -D_KERNEL -D_KERNEL_OPT -D_COMPAT_SYS_SYSCTL_H_ \
-	-include stdarg.h \
+NET80211_BSD_CFG := -D_KERNEL -D_KERNEL_OPT -DDIAGNOSTIC \
+	-D_COMPAT_SYS_SYSCTL_H_ -include stdarg.h \
 	-DUSBHIST_SIZE=4096 -include port/adapters/net80211/compat/netbsd/opt_usb.h \
 	-include port/adapters/net80211/port_config_bsd.h
 # USBHIST_SIZE is usb.c's history ring (the imported default is 50000
@@ -203,6 +203,13 @@ NET80211_BSD_CFG := -D_KERNEL -D_KERNEL_OPT -D_COMPAT_SYS_SYSCTL_H_ \
 # NOTE: editing these flags does not invalidate $(OBJS); rm -rf
 # $(BUILD)/third-party/net80211 $(BUILD)/port/adapters/net80211 after a
 # change.  Same for adding a header an existing .d file does not list.
+# DIAGNOSTIC is on for the bring-up rounds: upstream makes the KASSERT
+# family (and the xfer state it inspects - ux_state, ex_isdone) live only
+# under DIAGNOSTIC, so without it the asserts this port prints are
+# checking state nobody maintains.  No panic() lives inside a DIAGNOSTIC
+# block anywhere in the compiled set (audited), and it also switches on
+# the DIAGNOSTIC-only prints (uhub's "port %d, device not enabled", the
+# ehci xfer dumps).
 # the pinned upstream sources compile with warnings silenced (-w): they are
 # frozen imports, edited only through patches/
 NET80211_SUB_CFG := -w $(NET80211_BSD_CFG)

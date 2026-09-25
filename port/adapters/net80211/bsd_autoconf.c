@@ -126,6 +126,10 @@ extern const struct cfattach uroothub_ca;
 extern const struct cfattach uhub_ca;
 extern const struct cfattach urtwn_ca;
 
+/* the port's post-attach hook (urtwn_reg.c): registers the driver with
+ * the shell-facing adapter table */
+void wlan_port_post_attach(device_t dev);
+
 /* the usb event-device selection shells (no device table here) */
 int root_is_mounted;
 
@@ -321,6 +325,16 @@ config_attach_internal(device_t parent, cfdata_t cf, void *aux,
 	}
 
 	ca->ca_attach(parent, dev, aux);
+
+	/*
+	 * The attach is the only place a driver becomes usable, so this is
+	 * where the port's adapter table learns about it (urtwn_reg.c's
+	 * wlan_port_post_attach registers the shell-facing adapter).  It was
+	 * declared but never called, which left every enumeration looking
+	 * healthy in the log while `wlan scan` answered "no adapter": the
+	 * device attached, nothing told the port core.
+	 */
+	wlan_port_post_attach(dev);
 	return dev;
 }
 
