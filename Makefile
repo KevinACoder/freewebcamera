@@ -216,13 +216,15 @@ NET80211_BSD_CFG := -D_KERNEL -D_KERNEL_OPT -DDIAGNOSTIC \
 # frozen imports, edited only through patches/
 NET80211_SUB_CFG := -w $(NET80211_BSD_CFG)
 
-# --- lwip + wlan netif bridge (feat/wpa_supplicant) -----------------------------
+# --- lwip + wlan netif bridge (feat/wpa_supplicant + feat/netutils) -------------
 # lwIP 2.2.1 (pinned submodule). The set follows upstream src/Filelists.mk for
 # the core/IPv4 groups plus the api files the NO_SYS=0 tcpip model needs
-# (tcpip.c, netifapi.c, err.c); netconn/sockets are switched off in
-# lwipopts.h and their files are not compiled - the iperf3 feat turns them on
-# together. acd.c is in because LWIP_ACD follows LWIP_DHCP by default and
-# etharp.c then calls into it; dns.c/autoip.c/igmp.c stay out. The sys_arch
+# (tcpip.c, netifapi.c, err.c). The netutils feat turned the sequential API
+# on: sockets.c/api_lib.c/api_msg.c joined (netconn is the layer sockets.c
+# sits on - the lwipopts switches and these files move together) and dns.c
+# rides in for ping/ntp name resolution (LWIP_DNS=1). acd.c is in because
+# LWIP_ACD follows LWIP_DHCP by default and etharp.c then calls into it;
+# autoip.c/igmp.c stay out. The sys_arch
 # is the CMSIS twin; lwipopts.h and
 # arch/*.h are the adapter's shadow copies and sit ahead of the vendored tree
 # on the include path. The wlan netif bridge (net80211/lwip/lwip_netif.c)
@@ -254,8 +256,13 @@ LWIP_SRCS := \
 	third-party/lwip/src/core/ipv4/ip4.c \
 	third-party/lwip/src/core/ipv4/ip4_addr.c \
 	third-party/lwip/src/core/ipv4/ip4_frag.c \
+	third-party/lwip/src/core/dns.c \
 	third-party/lwip/src/api/err.c \
+	third-party/lwip/src/api/api_lib.c \
+	third-party/lwip/src/api/api_msg.c \
+	third-party/lwip/src/api/netbuf.c \
 	third-party/lwip/src/api/netifapi.c \
+	third-party/lwip/src/api/sockets.c \
 	third-party/lwip/src/api/tcpip.c \
 	third-party/lwip/src/netif/ethernet.c \
 	port/adapters/net80211/lwip/lwip_netif.c \
