@@ -1,0 +1,171 @@
+diff --git a/sys/dev/pci/if_iwm.c b/sys/dev/pci/if_iwm.c
+index 361fe88..5c12248 100644
+--- a/sys/dev/pci/if_iwm.c
++++ b/sys/dev/pci/if_iwm.c
+@@ -172,6 +172,45 @@ unsigned iwm_dbg_tx_status, iwm_dbg_tx_failack_sum, iwm_dbg_tx_status_err;
+ int iwm_dbg_tx_last_failack = -1;
+ unsigned iwm_dbg_notif_garbage, iwm_dbg_notif_unhandled;
+ unsigned iwm_dbg_last_unhandled_code;
++/* Scan-lifecycle event ring: the 0x090A (UMAC scan family) fatal fires
++ * somewhere between a scan request, its completion notification and the
++ * state-machine resets around them - the ORDER is what the dump at the
++ * fatal label answers. Letters: N=newstate, F=force-init, J=join running
++ * scan, R=scan request (arg 1=umac 0=lmac), S=scanning set, C=scanning
++ * clear, D=scan completion notif (arg=kind), E=endscan, P=stop, I=init,
++ * H=init_hw. newstate packs (ostate<<4)|nstate. */
++struct iwm_scan_ev {
++	uint8_t ev;
++	uint8_t arg;
++};
++#define IWM_SCAN_EV_N 32
++static struct iwm_scan_ev iwm_scan_evs[IWM_SCAN_EV_N];
++static unsigned iwm_scan_ev_n;
++
++static void
++iwm_scan_ev(uint8_t ev, uint8_t arg)
++{
++	struct iwm_scan_ev *e = &iwm_scan_evs[iwm_scan_ev_n++ % IWM_SCAN_EV_N];
++
++	e->ev = ev;
++	e->arg = arg;
++}
++
++void
++iwm_scan_ev_dump(void)
++{
++	unsigned i;
++
++	printf("iwm scan-ev ring (n=%u):\n", iwm_scan_ev_n);
++	for (i = 0; i < IWM_SCAN_EV_N; i++) {
++		const struct iwm_scan_ev *e =
++		    &iwm_scan_evs[(iwm_scan_ev_n + i) % IWM_SCAN_EV_N];
++
++		if (e->ev == 0)
++			continue;
++		printf("  [%u] %c arg=%02x\n", i, e->ev, e->arg);
++	}
++}
+ unsigned iwm_dbg_rx_allocs, iwm_dbg_rx_nombuf, iwm_dbg_rx_noext,
+     iwm_dbg_rx_mapfail;
+ 
+@@ -5435,6 +5474,7 @@ iwm_fill_probe_req(struct iwm_softc *sc, struct iwm_scan_probe_req *preq)
+ static int
+ iwm_lmac_scan(struct iwm_softc *sc)
+ {
++	iwm_scan_ev('R', 0);
+ 	struct ieee80211com *ic = &sc->sc_ic;
+ 	struct iwm_host_cmd hcmd = {
+ 		.id = IWM_SCAN_OFFLOAD_REQUEST_CMD,
+@@ -5610,6 +5650,7 @@ iwm_config_umac_scan(struct iwm_softc *sc)
+ static int
+ iwm_umac_scan(struct iwm_softc *sc)
+ {
++	iwm_scan_ev('R', 1);
+ 	struct ieee80211com *ic = &sc->sc_ic;
+ 	struct iwm_host_cmd hcmd = {
+ 		.id = iwm_cmd_id(IWM_SCAN_REQ_UMAC, IWM_ALWAYS_LONG_GROUP, 0),
+@@ -6279,6 +6320,7 @@ iwm_do_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
+ 
+ 	DPRINTF(("switching state %s->%s\n", ieee80211_state_name[ostate],
+ 	    ieee80211_state_name[nstate]));
++	iwm_scan_ev('N', (ostate << 4) | nstate);
+ 
+ 	if (ostate == IEEE80211_S_SCAN && nstate != ostate)
+ 		iwm_led_blink_stop(sc);
+@@ -6296,6 +6338,7 @@ iwm_do_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
+ 		 */
+ 		if (nstate != IEEE80211_S_INIT) {
+ 			DPRINTF(("Force transition to INIT; MGT=%d\n", arg));
++			iwm_scan_ev('F', nstate);
+ 			/* Always pass arg as -1 since we can't Tx right now. */
+ 			sc->sc_newstate(ic, IEEE80211_S_INIT, -1);
+ 			iwm_stop(ifp, 0);
+@@ -6327,6 +6370,7 @@ iwm_do_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
+ 		 * needed to receive frames and deliver its completion.
+ 		 */
+ 		if (ISSET(sc->sc_flags, IWM_FLAG_SCANNING)) {
++			iwm_scan_ev('J', 0);
+ 			ic->ic_state = IEEE80211_S_SCAN;
+ 			return 0;
+ 		}
+@@ -6339,6 +6383,7 @@ iwm_do_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
+ 			    DEVNAME(sc), err));
+ 			return err;
+ 		}
++		iwm_scan_ev('S', 0);
+ 		SET(sc->sc_flags, IWM_FLAG_SCANNING);
+ 		ic->ic_state = nstate;
+ 		iwm_led_blink_start(sc);
+@@ -6481,6 +6526,7 @@ iwm_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
+ static void
+ iwm_endscan(struct iwm_softc *sc)
+ {
++	iwm_scan_ev('E', 0);
+ 	struct ieee80211com *ic = &sc->sc_ic;
+ 	int s;
+ 
+@@ -6709,6 +6755,7 @@ iwm_tt_tx_backoff(struct iwm_softc *sc, uint32_t backoff)
+ static int
+ iwm_init_hw(struct iwm_softc *sc)
+ {
++	iwm_scan_ev('H', 0);
+ 	struct ieee80211com *ic = &sc->sc_ic;
+ 	int err, i, ac;
+ 
+@@ -6875,6 +6922,8 @@ iwm_init(struct ifnet *ifp)
+ 	struct iwm_softc *sc = ifp->if_softc;
+ 	int err;
+ 
++	iwm_scan_ev('I', 0);
++
+ 	if (ISSET(sc->sc_flags, IWM_FLAG_HW_INITED))
+ 		return 0;
+ 
+@@ -6986,6 +7035,8 @@ static void
+ iwm_stop(struct ifnet *ifp, int disable)
+ {
+ 	struct iwm_softc *sc = ifp->if_softc;
++
++	iwm_scan_ev('P', disable);
+ 	struct ieee80211com *ic = &sc->sc_ic;
+ 	struct iwm_node *in = (struct iwm_node *)ic->ic_bss;
+ 
+@@ -7580,12 +7631,14 @@ iwm_notif_intr(struct iwm_softc *sc)
+ 
+ 		case IWM_SCAN_OFFLOAD_COMPLETE: {
+ 			struct iwm_periodic_scan_complete *notif;
++			iwm_scan_ev('D', 'P');
+ 			SYNC_RESP_STRUCT(notif, pkt);
+ 			break;
+ 		}
+ 
+ 		case IWM_SCAN_ITERATION_COMPLETE: {
+ 			struct iwm_lmac_scan_complete_notif *notif;
++			iwm_scan_ev('D', 'L');
+ 			SYNC_RESP_STRUCT(notif, pkt);
+ 			if (ISSET(sc->sc_flags, IWM_FLAG_SCANNING)) {
+ 				CLR(sc->sc_flags, IWM_FLAG_SCANNING);
+@@ -7596,6 +7649,7 @@ iwm_notif_intr(struct iwm_softc *sc)
+ 
+ 		case IWM_SCAN_COMPLETE_UMAC: {
+ 			struct iwm_umac_scan_complete *notif;
++			iwm_scan_ev('D', 'U');
+ 			SYNC_RESP_STRUCT(notif, pkt);
+ 			if (ISSET(sc->sc_flags, IWM_FLAG_SCANNING)) {
+ 				CLR(sc->sc_flags, IWM_FLAG_SCANNING);
+@@ -7606,6 +7660,7 @@ iwm_notif_intr(struct iwm_softc *sc)
+ 
+ 		case IWM_SCAN_ITERATION_COMPLETE_UMAC: {
+ 			struct iwm_umac_scan_iter_complete_notif *notif;
++			iwm_scan_ev('D', 'M');
+ 			SYNC_RESP_STRUCT(notif, pkt);
+ 			if (ISSET(sc->sc_flags, IWM_FLAG_SCANNING)) {
+ 				CLR(sc->sc_flags, IWM_FLAG_SCANNING);
+@@ -7772,6 +7827,7 @@ iwm_softintr(void *arg)
+ 
+ 		aprint_error_dev(sc->sc_dev, "fatal firmware error\n");
+  fatal:
++		iwm_scan_ev_dump();
+ 		s = splnet();
+ 		/*
+ 		 * Terminate an in-progress scan explicitly: the scan

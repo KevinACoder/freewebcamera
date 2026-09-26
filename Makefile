@@ -22,6 +22,23 @@
 # interrupt numbers, MMU windows) and the link script.
 BOARD ?= rk3568
 
+# Wireless line selection (build-time, not runtime): which stack this image
+# carries at all.
+#   make WLAN_NIC=iwm     PCIe line only: DW host + iwm + iwlwifi ucode
+#   make WLAN_NIC=urtwn   USB line only:  netbsd usb di/hcd + urtwn + rtl fw
+#   make WLAN_NIC=all     both (default)
+# A NIC that is not built contributes no code, no threads, no buffers and no
+# bring-up, so a driver being debugged is never coupled to the other one -
+# neither through the shared 4 MB heap (iwm's RX ring alone is ~1.1 MB) nor
+# through the bus bring-up order.  WLAN_NIC_USB/WLAN_NIC_PCIE reach the
+# sources as defines; the source lists below are the other half of the gate.
+WLAN_NIC ?= all
+ifeq ($(filter $(WLAN_NIC),iwm urtwn all),)
+$(error WLAN_NIC must be one of: iwm, urtwn, all)
+endif
+WLAN_HAVE_USB  := $(if $(filter $(WLAN_NIC),urtwn all),1,0)
+WLAN_HAVE_PCIE := $(if $(filter $(WLAN_NIC),iwm all),1,0)
+
 # Bare-metal toolchain, set explicitly (non-interactive shells do not source
 # ~/.bashrc - silently picking up a Linux-targeted compiler links against
 # glibc assumptions that cannot work here).
@@ -71,6 +88,7 @@ CFLAGS := $(UC_OPT) -g3 -std=c11 -Wall -Wextra \
 	-ffreestanding -nostdlib -fno-builtin -fno-stack-protector \
 	-march=armv8-a -mgeneral-regs-only -mstrict-align -mno-outline-atomics \
 	-DGUEST -DEL1 -DSMP_CORES=1 \
+	-DWLAN_NIC_USB=$(WLAN_HAVE_USB) -DWLAN_NIC_PCIE=$(WLAN_HAVE_PCIE) \
 	-DTHREADX_BUILD=1 -DTHREADX_UP_BUILD=1 \
 	-DTX_INCLUDE_USER_DEFINE_FILE \
 	-DWLAN_NIC_USB=$(WLAN_HAVE_USB) -DWLAN_NIC_PCIE=$(WLAN_HAVE_PCIE) \
@@ -284,9 +302,16 @@ NET80211_INC := -Iinclude \
 	-Ithird-party/tlsf
 
 NET80211_BSD_CFG := -D_KERNEL -D_KERNEL_OPT -DDIAGNOSTIC \
+	-DIWM_DEBUG \
 	-D_COMPAT_SYS_SYSCTL_H_ -include stdarg.h \
 	-DUSBHIST_SIZE=4096 -include port/adapters/net80211/compat/netbsd/opt_usb.h \
 	-include port/adapters/net80211/port_config_bsd.h
+# IWM_DEBUG compiles in iwm_nic_error()/iwm_nic_umac_error() and the
+# tx/rx-ring + 802.11-state dump that run on the fatal-firmware-error
+# interrupt (if_iwm.c iwm_softintr). Runtime traces behind it stay gated
+# by the iwm_debug variable (default 0), so the only new output is the
+# one-shot dump at the fatal moment - without it the SW_ERR branch
+# prints a single line and the error id is unrecoverable.
 # USBHIST_SIZE is usb.c's history ring (the imported default is 50000
 # records, which is ~3 MB of .bss here); 4096 x 64 B keeps a whole
 # enumeration trail with room to spare.
@@ -675,9 +700,20 @@ $(TARGET).bin: $(TARGET).elf
 # binary on the TFTP root and makes a failed rebuild look like a boot failure.
 .DEFAULT_GOAL := all
 
-.PHONY: all deploy modules sync gates clean
+.PHONY: all deploy modules sync gates clean FORCE
 
-all: $(TARGET).bin
+# WLAN_NIC rides the command line, so make cannot see a switch through
+# header dependencies: an incremental tree then links half iwm, half
+# urtwn objects and dies on undefined iwm_ca/usb_cd (2026-09-27). Make
+# the mismatch a hard, self-explaining error instead.
+build/.nic: FORCE
+	@mkdir -p $(BUILD); printf '%s' "$(WLAN_NIC)" > $@.new; \
+	if [ -f $@ ] && ! cmp -s $@ $@.new; then \
+		echo "ERROR: build tree holds WLAN_NIC=$$(cat $@) objects; run 'make clean' before switching to WLAN_NIC=$(WLAN_NIC)"; \
+		rm -f $@.new; exit 1; \
+	fi; mv -f $@.new $@
+
+all: build/.nic $(TARGET).bin
 
 # Copy to the TFTP root under the name the board's boot profile expects
 # (oslab `rtos` profile -> rtos.bin; the banner tells the images apart).
@@ -743,7 +779,22 @@ sync: modules
 	@for comp in $$(ls -d patches/*/ 2>/dev/null | xargs -n1 basename); do \
 		[ -d third-party/$$comp ] || { echo "skip    $$comp (no submodule)"; continue; }; \
 		if [ -n "$$(git -C third-party/$$comp status --porcelain)" ]; then \
-			pin=$$(git -C third-party/$$comp rev-parse --short HEAD); \
+			branch=$$(git -C third-party/$$comp rev-parse --abbrev-ref HEAD); \
+			if [ "$$branch" = "fwc/$$comp" ]; then \
+				pin=$$(git -C third-party/$$comp rev-list HEAD | while read c; do \
+					s=$$(git -C third-party/$$comp log --format=%s -1 $$c); \
+					case "$$s" in \
+					"fwc: materialize"*) ;; \
+					*) echo $$c; break ;; \
+					esac; done | head -1); \
+				echo "rebase   $$comp materialization onto pin $$(echo $$pin | cut -c1-10)"; \
+				git -C third-party/$$comp checkout -q -f --detach $$pin; \
+				for p in patches/$$comp/*.patch; do \
+					git -C third-party/$$comp apply "$$PWD/$$p" || exit 1; \
+				done; \
+			else \
+				pin=$$(git -C third-party/$$comp rev-parse --short HEAD); \
+			fi; \
 			git -C third-party/$$comp checkout -q -B fwc/$$comp; \
 			git -C third-party/$$comp add -A; \
 			git -C third-party/$$comp commit -q -m \

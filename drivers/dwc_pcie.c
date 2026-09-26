@@ -327,7 +327,7 @@ static void cfg_write16(uint32_t bus, uint32_t devfn, uint32_t where,
 
 uint32_t dwc_pcie_requester_id(const struct dwc_pcie_dev *dev)
 {
-	return (dev->busn << 8) | (dev->slot << 3) | dev->func;
+	return (dev->pf.busn << 8) | (dev->pf.slot << 3) | dev->pf.func;
 }
 
 /* Walk the capability list for MSI and MSI-X and record their offsets. */
@@ -337,7 +337,7 @@ static void scan_capabilities(struct dwc_pcie_dev *dev)
 	uint32_t guard;
 
 	next = 0;
-	(void)dwc_pcie_cfg_read(dev->busn, dev->devfn, PCI_CFG_CAP_PTR, 1, &next);
+	(void)dwc_pcie_cfg_read(dev->pf.busn, dev->pf.devfn, PCI_CFG_CAP_PTR, 1, &next);
 	next &= 0xfcu;
 
 	/* A malformed or absent list reads 0 repeatedly; the guard bound also
@@ -349,19 +349,19 @@ static void scan_capabilities(struct dwc_pcie_dev *dev)
 		if (next < 0x40u || next >= 0x100u) {
 			break;
 		}
-		if (dwc_pcie_cfg_read(dev->busn, dev->devfn, next, 1, &id)
+		if (dwc_pcie_cfg_read(dev->pf.busn, dev->pf.devfn, next, 1, &id)
 		    != ARM_DRIVER_OK) {
 			break;
 		}
-		if (dwc_pcie_cfg_read(dev->busn, dev->devfn, next + 1u, 1, &nxt)
+		if (dwc_pcie_cfg_read(dev->pf.busn, dev->pf.devfn, next + 1u, 1, &nxt)
 		    != ARM_DRIVER_OK) {
 			break;
 		}
 
 		if ((id & 0xffu) == PCI_CAP_ID_MSIX) {
-			dev->msix_cap = (uint8_t)next;
+			dev->pf.msix_cap = (uint8_t)next;
 		} else if ((id & 0xffu) == PCI_CAP_ID_MSI) {
-			dev->msi_cap = (uint8_t)next;
+			dev->pf.msi_cap = (uint8_t)next;
 		}
 
 		next = nxt & 0xfcu;
@@ -398,16 +398,16 @@ static void scan_bus(uint32_t bus)
 
 		dev = &devs[dev_count];
 		memset(dev, 0, sizeof(*dev));
-		dev->busn = bus;
-		dev->slot = 0;
-		dev->func = func;
-		dev->devfn = devfn;
-		dev->vendor = (uint16_t)(id & 0xffffu);
-		dev->device = (uint16_t)(id >> 16);
+		dev->pf.busn = bus;
+		dev->pf.slot = 0;
+		dev->pf.func = func;
+		dev->pf.devfn = devfn;
+		dev->pf.vendor = (uint16_t)(id & 0xffffu);
+		dev->pf.device = (uint16_t)(id >> 16);
 
 		(void)cfg_read32(bus, devfn, PCI_CFG_REVISION, &classrev);
-		dev->baseclass = (uint8_t)(classrev >> 24);
-		dev->subclass = (uint8_t)(classrev >> 16);
+		dev->pf.baseclass = (uint8_t)(classrev >> 24);
+		dev->pf.subclass = (uint8_t)(classrev >> 16);
 
 		(void)cfg_read32(bus, devfn, PCI_CFG_HEADER_TYPE, &header);
 		if (((header >> 16) & 0x7fu) == 0x00u) {	/* type 0: endpoint */
@@ -416,7 +416,7 @@ static void scan_bus(uint32_t bus)
 
 				if (cfg_read32(bus, devfn, PCI_CFG_BAR0 + 4u * i,
 					       &bar) == ARM_DRIVER_OK) {
-					dev->bar[i] = bar;
+					dev->pf.bar[i] = bar;
 				}
 			}
 			scan_capabilities(dev);
@@ -540,6 +540,18 @@ const struct dwc_pcie_dev *dwc_pcie_dev(uint32_t index)
 
 	return &devs[index];
 }
+
+const struct pci_func *dwc_pcie_pf(uint32_t index)
+{
+	return dwc_pcie_dev(index) != NULL ? &dwc_pcie_dev(index)->pf : NULL;
+}
+
+/* The config backend handed to generic PCI consumers (include/pci.h):
+ * forwarders over this driver's serialized config window. */
+const struct pci_cfg_backend dwc_pcie_cfg_backend = {
+	.read = dwc_pcie_cfg_read,
+	.write = dwc_pcie_cfg_write,
+};
 
 /* --- CMSIS ARM_DRIVER_PCIE (include/pcie.h) -------------------------------- */
 
@@ -709,7 +721,7 @@ static int32_t pcie_enumerate(uint32_t bus, uint32_t *function_count)
 	 * bus (the old backend compared the instance index against
 	 * busn and always answered zero). */
 	for (i = 0; i < dev_count; i++) {
-		if (devs[i].busn == c->plat->bus_base + 1u) {
+		if (devs[i].pf.busn == c->plat->bus_base + 1u) {
 			found++;
 		}
 	}

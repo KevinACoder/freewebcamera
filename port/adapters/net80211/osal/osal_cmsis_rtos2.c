@@ -446,11 +446,23 @@ static unsigned wlan_now_ms(void) {
 	return (unsigned) (wlan_cntvct() * 1000ULL / frq);
 }
 
+/* Callout bodies do NOT run in the System Timer Thread anymore: the
+ * 600 s soak caught iwm_calib_timeout's splnet there colliding with a
+ * driver hold and corrupting the serializer owner (panic: unlock by
+ * non-owner). The timer callback only enqueues; a dedicated worker runs
+ * the bodies - which also restores the NetBSD softcallout property that
+ * a callout body may tsleep. */
+#define WLAN_CALLOUT_QN 16
+static callout_t *wlan_callout_q[WLAN_CALLOUT_QN];
+static volatile unsigned wlan_callout_q_head, wlan_callout_q_tail;
+static volatile unsigned wlan_callout_q_drops;
+static osSemaphoreId_t wlan_callout_run_sem;
+static osThreadId_t wlan_callout_worker;
+
 static void host_callout_fire(void *arg) {
 	callout_t *c = (callout_t *) arg;
-	uint64_t t0, t1;
+	unsigned tail = wlan_callout_q_tail;
 
-	c->hc_invoking = 1;
 	c->hc_pending = 0;
 	if (!wlan_callout_enabled) {
 		wlan_callout_suppressed++;
@@ -459,25 +471,55 @@ static void host_callout_fire(void *arg) {
 	wlan_callout_fires++;
 	c->hc_fires++;
 	c->hc_last_fire_ms = wlan_now_ms();
-	if (c->hc_fn != NULL) {
-		t0 = wlan_cntvct();
-		c->hc_fn(c->hc_arg);
-		t1 = wlan_cntvct();
-		if (t1 - t0 > wlan_cntfrq() / 50) {
-			c->hc_long_fires++;
-			wlan_callout_long_fires++;
-			if (!wlan_callout_long_reported) {
-				wlan_callout_long_reported = 1;
-				printf("wlan: callout fn=%p ran >20ms in "
-					   "the timer thread (%lums)\n",
-				       (void *) c->hc_fn,
-				       (unsigned long)
-				           ((t1 - t0) * 1000ULL /
-				            wlan_cntfrq()));
+	if ((int) (tail - wlan_callout_q_head) >= WLAN_CALLOUT_QN) {
+		wlan_callout_q_drops++;
+		return;
+	}
+	c->hc_fire_gen = c->hc_gen;
+	wlan_callout_q[tail % WLAN_CALLOUT_QN] = c;
+	wlan_callout_q_tail = tail + 1;
+	osSemaphoreRelease(wlan_callout_run_sem);
+}
+
+static void wlan_callout_worker_fn(void *arg) {
+	(void) arg;
+
+	for (;;) {
+		osSemaphoreAcquire(wlan_callout_run_sem, osWaitForever);
+		while (wlan_callout_q_head != wlan_callout_q_tail) {
+			callout_t *c;
+			uint64_t t0, t1;
+
+			c = wlan_callout_q[wlan_callout_q_head % WLAN_CALLOUT_QN];
+			wlan_callout_q_head++;
+			if (c->hc_gen != c->hc_fire_gen) {
+				/* stopped/rescheduled between fire and run */
+				c->hc_stale_drops++;
+				continue;
 			}
+			if (c->hc_fn == NULL) {
+				continue;
+			}
+			c->hc_invoking = 1;
+			t0 = wlan_cntvct();
+			c->hc_fn(c->hc_arg);
+			t1 = wlan_cntvct();
+			if (t1 - t0 > wlan_cntfrq() / 50) {
+				c->hc_long_fires++;
+				wlan_callout_long_fires++;
+				if (!wlan_callout_long_reported) {
+					wlan_callout_long_reported = 1;
+					printf("wlan: callout fn=%p ran >20ms "
+						   "(%lums) - deferral backlog?\n",
+					       (void *) c->hc_fn,
+					       (unsigned long)
+					           ((t1 - t0) * 1000ULL /
+					            wlan_cntfrq()));
+				}
+			}
+			c->hc_invoking = 0;
 		}
 	}
-	c->hc_invoking = 0;
 }
 
 int callout_init(callout_t *c, int flags) {
@@ -502,6 +544,9 @@ int callout_init(callout_t *c, int flags) {
 	c->hc_fires = 0;
 	c->hc_long_fires = 0;
 	c->hc_last_fire_ms = 0;
+	c->hc_gen = 0;
+	c->hc_fire_gen = 0;
+	c->hc_stale_drops = 0;
 	c->hc_next = wlan_callout_registry;
 	wlan_callout_registry = c;
 	/* period is set at schedule time; osTimerStart starts it */
@@ -541,6 +586,8 @@ int callout_schedule(callout_t *c, int ticks) {
 		period = 1;
 	}
 	c->hc_pending = 1;
+	/* any new schedule invalidates fires still sitting in the queue */
+	c->hc_gen++;
 	/* osTimerStart starts a stopped (dormant) timer; only a real arm
 	 * counts as scheduled, otherwise the counter hides dead timers */
 	if (osTimerStart(hc_timer(c), period) != osOK) {
@@ -562,6 +609,8 @@ int callout_stop(callout_t *c) {
 	if (c->hc_timer != NULL) {
 		osTimerStop(hc_timer(c));
 	}
+	/* invalidate a fire already sitting in the callout-worker queue */
+	c->hc_gen++;
 	c->hc_pending = 0;
 	return 0;
 }
@@ -571,6 +620,12 @@ int callout_halt(callout_t *c, kmutex_t *lock) {
 
 	(void) lock;
 	callout_stop(c);
+	/* the body may still be running in the callout worker; wait it out
+	 * (halt from inside the worker itself cannot wait) */
+	while (c->hc_invoking &&
+	    wlan_callout_worker != osThreadGetId()) {
+		osDelay(1);
+	}
 	/* halt is terminal for this stack's callouts: usbd_free_xfer runs
 	 * it right before kmem_free, and nothing re-arms a halted callout
 	 * here.  Upstream can get away with keeping the (embedded) timer
@@ -778,11 +833,25 @@ ipl_t splsoftserial(void) {
 }
 
 ipl_t splnet(void) {
-	return 0;
+	/* NetBSD's splnet() is what serializes a driver's command,
+	 * state-machine and receive paths against each other, and the
+	 * imported drivers are written assuming it (the iwm command ring
+	 * bookkeeping in iwm_send_cmd/iwm_cmd_done is the case that
+	 * matters here: without it the submitter and the softint worker
+	 * interleave and completions go missing - "Some HCMDs skipped").
+	 * There is no IPL on this port, so splnet maps onto the port
+	 * serializer.  tsleep() drops it around its wait, which is what
+	 * lets a completion run while its submitter sleeps on it. */
+	wlan_port_serializer_lock();
+	return 1;
 }
 
 void splx(ipl_t ipl) {
-	(void) ipl;
+	/* splusb()/splraiseipl() still return 0, so splx(0) has to stay a
+	 * no-op: the USB line pairs splx() with splusb(). */
+	if (ipl != 0) {
+		wlan_port_serializer_unlock();
+	}
 }
 
 /* ------------------------------------------------------------------ */
@@ -798,29 +867,116 @@ static osMutexId_t wlan_ser_mtx;
 static osThreadId_t wlan_ser_owner;
 static int wlan_ser_depth;
 
+/* Operation ring: an unlock that does not match the owner is a locking
+ * bug in the port, and the only useful thing to print is who locked and
+ * unlocked last (with the caller's address) plus the live owner/depth.
+ * tsleep's silent suspend/resume of the serializer is recorded too
+ * ("tslp"/"tres", tagged with the sleep's wmesg), because the window it
+ * opens is exactly where owner confusion hides. */
+struct wlan_ser_op {
+	void *self;
+	void *owner;
+	const char *op;
+	const char *tag;
+	unsigned long ra;
+	int depth;
+};
+
+#define WLAN_SER_OPS 24
+static struct wlan_ser_op wlan_ser_ops[WLAN_SER_OPS];
+static unsigned wlan_ser_op_n;
+
+static void wlan_ser_opt(const char *op, const char *tag, void *self,
+    int depth) {
+	struct wlan_ser_op *e = &wlan_ser_ops[wlan_ser_op_n++ % WLAN_SER_OPS];
+
+	e->self = self;
+	e->owner = wlan_ser_owner;
+	e->op = op;
+	e->tag = tag;
+	e->ra = (unsigned long) __builtin_return_address(0);
+	e->depth = depth;
+}
+
+static void wlan_ser_op(const char *op, void *self, int depth) {
+	wlan_ser_opt(op, NULL, self, depth);
+}
+
+/* CMSIS thread ids are ThreadX TCBs; osThreadGetName (adapter-implemented)
+ * reads the TCB's name without pulling kernel headers in here. */
+static const char *wlan_ser_tname(void *t) {
+	const char *n = osThreadGetName(t);
+
+	return (n != NULL) ? n : "none";
+}
+
+void wlan_ser_dump(void) {
+	char msg[128];
+	unsigned i;
+
+	(void)snprintf(msg, sizeof(msg),
+		       "wlan ser: owner=%p depth=%d self=%p\n",
+		       (void *) wlan_ser_owner, wlan_ser_depth,
+		       (void *) osThreadGetId());
+	board_early_print(msg);
+	for (i = 0; i < WLAN_SER_OPS; i++) {
+		const struct wlan_ser_op *e =
+		    &wlan_ser_ops[(wlan_ser_op_n + i) % WLAN_SER_OPS];
+
+		if (e->op == NULL) {
+			continue;
+		}
+		(void)snprintf(msg, sizeof(msg),
+			       "wlan ser[%u] %s%s%s self=%p(%s) owner=%p d=%d ra=%08lx\n",
+			       i, e->op, e->tag ? "<" : "", e->tag ? e->tag : "",
+			       e->self, wlan_ser_tname(e->self), e->owner,
+			       e->depth, e->ra);
+		board_early_print(msg);
+	}
+}
+
 void wlan_port_serializer_lock(void) {
 	osThreadId_t self = osThreadGetId();
+	osStatus_t st;
 
 	if (wlan_ser_owner == self) {
 		wlan_ser_depth++;
+		wlan_ser_op("lock+", self, wlan_ser_depth);
 		return;
 	}
-	osMutexAcquire(wlan_ser_mtx, osWaitForever);
+	st = osMutexAcquire(wlan_ser_mtx, osWaitForever);
+	if (st != osOK) {
+		/* a failed acquire must NOT touch the owner - silently
+		 * overwriting it is how the timer-thread collision corrupted
+		 * the state in the 600 s soak */
+		wlan_ser_op("lockE", self, (int) st);
+		wlan_ser_dump();
+		panic("wlan serializer mutex acquire failed");
+	}
 	wlan_ser_owner = self;
 	wlan_ser_depth = 1;
+	wlan_ser_op("lock", self, 1);
 }
 
 void wlan_port_serializer_unlock(void) {
 	osThreadId_t self = osThreadGetId();
 
 	if (wlan_ser_owner != self || wlan_ser_depth <= 0) {
+		wlan_ser_op("unlock!", self, wlan_ser_depth);
+		wlan_ser_dump();
 		panic("wlan serializer unlock by non-owner");
 	}
 	if (--wlan_ser_depth > 0) {
+		wlan_ser_op("unlock-", self, wlan_ser_depth);
 		return;
 	}
+	if (osMutexRelease(wlan_ser_mtx) != osOK) {
+		wlan_ser_op("relE", self, 0);
+		wlan_ser_dump();
+		panic("wlan serializer mutex release failed");
+	}
+	wlan_ser_op("unlock", self, 0);
 	wlan_ser_owner = NULL;
-	osMutexRelease(wlan_ser_mtx);
 }
 
 void *wlan_port_serializer_owner(void) {
@@ -830,25 +986,34 @@ void *wlan_port_serializer_owner(void) {
 /* Fully release the lock around a sleep and return the saved hold
  * count (0 when the caller was not holding it). */
 int wlan_port_serializer_suspend(void) {
+	osThreadId_t self = osThreadGetId();
 	int depth;
 
-	if (wlan_ser_owner != osThreadGetId()) {
+	if (wlan_ser_owner != self) {
 		return 0;
 	}
 	depth = wlan_ser_depth;
 	wlan_ser_owner = NULL;
 	wlan_ser_depth = 0;
 	osMutexRelease(wlan_ser_mtx);
+	wlan_ser_op("susp", self, depth);
 	return depth;
 }
 
 void wlan_port_serializer_resume(int depth) {
+	osThreadId_t self = osThreadGetId();
+
 	if (depth <= 0) {
 		return;
 	}
-	osMutexAcquire(wlan_ser_mtx, osWaitForever);
-	wlan_ser_owner = osThreadGetId();
+	if (osMutexAcquire(wlan_ser_mtx, osWaitForever) != osOK) {
+		wlan_ser_op("resmE", self, depth);
+		wlan_ser_dump();
+		panic("wlan serializer resume acquire failed");
+	}
+	wlan_ser_owner = self;
 	wlan_ser_depth = depth;
+	wlan_ser_op("resm", self, depth);
 }
 
 /* ------------------------------------------------------------------ */
@@ -923,6 +1088,7 @@ int tsleep(void *ident, int pri, const char *wmesg, int timo) {
 	quantum = ms2ticks(20);
 
 	held = wlan_port_serializer_suspend();
+	wlan_ser_opt("tslp", wmesg, osThreadGetId(), held);
 
 	osMutexAcquire(wlan_tsleep_mtx, osWaitForever);
 	while (!w.fired) {
@@ -954,6 +1120,7 @@ int tsleep(void *ident, int pri, const char *wmesg, int timo) {
 	}
 	osMutexRelease(wlan_tsleep_mtx);
 
+	wlan_ser_opt("tres", wmesg, osThreadGetId(), held);
 	wlan_port_serializer_resume(held);
 	return rc;
 }
@@ -1051,10 +1218,27 @@ void kthread_exit(int code) {
 /* ------------------------------------------------------------------ */
 
 void wlan_osal_cmsis_init(void) {
+	osMutexAttr_t ser_attr;
+	static const osThreadAttr_t callout_thr = {
+		.name = "wlan-callout",
+		.priority = osPriorityBelowNormal,
+		.stack_size = 8192,
+	};
+
 	if (wlan_ser_mtx != NULL) {
 		return;
 	}
-	wlan_ser_mtx = osMutexNew(NULL);
+	/* priority inheritance: the holders are BelowNormal workers while
+	 * the claimers include the AboveNormal tcpip thread */
+	ser_attr = (osMutexAttr_t) { NULL, osMutexPrioInherit, NULL, 0 };
+	wlan_ser_mtx = osMutexNew(&ser_attr);
 	wlan_tsleep_mtx = osMutexNew(NULL);
 	wlan_tsleep_sem = osSemaphoreNew(0xffff, 0, NULL);
+	wlan_callout_run_sem = osSemaphoreNew(0xffff, 0, NULL);
+	wlan_callout_worker = osThreadNew(wlan_callout_worker_fn, NULL,
+	    &callout_thr);
+	if (wlan_callout_worker == NULL) {
+		printf("wlan: callout worker FAILED to start - callouts "
+			   "will never fire\n");
+	}
 }

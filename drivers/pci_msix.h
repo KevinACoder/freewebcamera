@@ -5,8 +5,10 @@
  * MSI-X is an endpoint capability (PCIe spec 7.7.2), not a property of the
  * host controller IP: this file knows how to program a function's table and
  * raise its ENABLE, and nothing about who enumerates it. The function record
- * it consumes (struct dwc_pcie_dev) is the host driver's scan output - BARs
- * and the capability offset are PCI facts that driver collected.
+ * it consumes (struct pci_func, include/pci.h) is the host driver's scan
+ * output - BARs and the capability offset are PCI facts that driver
+ * collected. Config-space access rides the pci_cfg_backend the enumerating
+ * driver hands in, so this file knows nothing about who enumerated.
  *
  * Internal to drivers/: an endpoint driver (dwc_nvme.c today, an 802.11 one
  * later) calls these two functions and gets back armed vectors; nothing above
@@ -43,7 +45,7 @@
 
 #include "msi.h"
 
-#include "dwc_pcie.h"
+#include "pci.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -77,11 +79,13 @@ extern "C" {
  * and enable MSI-X. Returns the number of vectors armed (>= 1), or a negative
  * ARM_DRIVER_ERROR*. On success the caller owns the vectors and must arm each
  * `intid` with IRQ_SetHandler + IRQ_Enable. */
-int32_t pci_msix_arm(const struct dwc_pcie_dev *dev, uint32_t nvec_max,
-		       MSI_VECTOR *vectors);
+int32_t pci_msix_arm(const struct pci_func *pf,
+		     const struct pci_cfg_backend *cfg, uint32_t nvec_max,
+		     MSI_VECTOR *vectors);
 
 /* Disable MSI-X on the function and withdraw its translations. */
-int32_t pci_msix_disarm(const struct dwc_pcie_dev *dev);
+int32_t pci_msix_disarm(const struct pci_func *pf,
+			const struct pci_cfg_backend *cfg);
 
 #ifdef __cplusplus
 }

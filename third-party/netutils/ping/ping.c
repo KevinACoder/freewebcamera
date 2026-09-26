@@ -91,6 +91,10 @@ static err_t ping_send(int s, ip_addr_t *addr, int size)
     iecho = rt_malloc(ping_size);
     if (iecho == RT_NULL)
     {
+        /* local: the port needs to tell the two failure families apart -
+         * heap exhaustion here versus the stack refusing the send below.
+         * See PROVENANCE.md. */
+        rt_kprintf("ping: rt_malloc(%d) failed\n", ping_size);
         return ERR_MEM;
     }
 
@@ -107,6 +111,15 @@ static err_t ping_send(int s, ip_addr_t *addr, int size)
 #endif
 
     err = lwip_sendto(s, iecho, ping_size, 0, (struct sockaddr*) &to, sizeof(to));
+    if (err != ping_size)
+    {
+        extern int errno;
+
+        /* local: lwip_sendto only reports -1; the errno value
+         * (ENOMEM/ENOBUFS/EHOSTUNREACH/...) is the diagnosis.
+         * See PROVENANCE.md. */
+        rt_kprintf("ping: sendto=%d errno=%d\n", err, errno);
+    }
     rt_free(iecho);
 
     return (err == ping_size ? ERR_OK : ERR_VAL);

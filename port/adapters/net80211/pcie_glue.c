@@ -66,28 +66,17 @@ extern bus_dma_tag_t wlan_bus_dma_tag;
 void wlan_port_post_attach_iwm(device_t dev);
 
 /* ------------------------------------------------------------------
- * board data: the controller instances, as the radio side sees them.
- * Kept in agreement with port/board/rk3568/rk3568_pcie.c - the driver
- * owns the coordinates; these are the three facts include/pcie.h does
- * not express and only the glue needs.
+ * board data: consumed from the board layer (port/board/rk3568/
+ * rk3568_pcie.c, dwc_pcie_plats[]) - the glue hardcodes no controller
+ * coordinates. The facts it needs per controller: the downstream bus
+ * (root bus + 1), the client APB base for INTx masking, and the
+ * aggregated INTx INTID - all live in the plat records.
  */
-static const struct pcie_glue_ctrl {
-	uint32_t downstream_bus;	/* root bus is downstream_bus - 1 */
-	uintptr_t apb_base;		/* client APB (legacy INTx block) */
-	uint32_t intx_intid;		/* GIC INTID of the aggregated line */
-} pcie_glue_ctrls[2] = {
-	{ 1, 0xfe260000UL, 104 },	/* pcie2x1 (M.2) */
-	{ 3, 0xfe280000UL, 194 },	/* pcie3x2 - the AC7260 slot */
-};
 
-#define PCIE_GLUE_CTRL_COUNT	2
+#define PCIE_GLUE_CTRL_COUNT	DWC_PCIE_CTRL_COUNT
 
-/* downstream bus of the AC7260 slot (pcie3x2) */
-#define PCIE_GLUE_RADIO_BUS	3u
-
-/* client APB legacy interrupt mask register (RK TRM: +0x1c); the four
- * INTx lines aggregate onto one GIC line per controller */
-#define PCIE_CLIENT_INT_MASK	0x1c
+/* downstream bus of the AC7260 slot (pcie3x2, controller instance 1) */
+#define PCIE_GLUE_RADIO_BUS	((uint32_t) dwc_pcie_plats[1].bus_base + 1u)
 
 /* ------------------------------------------------------------------
  * interrupt cookie: one handler context (one radio, one vector)
@@ -164,7 +153,7 @@ pcie_make_tag(void *v, int bus, int dev, int func)
 
 	if (bus < 0 || bus > 255 || dev < 0 || dev > 31 || func < 0 ||
 	    func > 7) {
-		printf("pcie_glue: bad tag %d:%d.%d\n", bus, dev, func);
+		board_log("pcie_glue: bad tag %d:%d.%d\n", bus, dev, func);
 		return (pcitag_t) -1;
 	}
 	/* the arm32 encoding */
@@ -307,14 +296,14 @@ pcie_msi_alloc_pa(const struct pci_attach_args *pa, pci_intr_handle_t *ihs,
 	}
 	domain = msi_domain_get();
 	if (domain == NULL) {
-		printf("pcie_glue: no MSI domain (ITS not up?)\n");
+		board_log("pcie_glue: no MSI domain (ITS not up?)\n");
 		return ENODEV;
 	}
 
 	rid = (pa->pa_bus << 8) | (pa->pa_device << 3) | pa->pa_function;
 	count = domain->Allocate(rid, 1, &pcie_msi_vector);
 	if (count < 1) {
-		printf("pcie_glue: rid %04x got no MSI vectors\n", rid);
+		board_log("pcie_glue: rid %04x got no MSI vectors\n", rid);
 		return ENOMEM;
 	}
 
@@ -335,10 +324,10 @@ pcie_intx_alloc_pa(const struct pci_attach_args *pa, pci_intr_handle_t *ihs)
 {
 	size_t i;
 
-	for (i = 0; i < PCIE_GLUE_CTRL_COUNT; i++) {
-		if (pcie_glue_ctrls[i].downstream_bus == pa->pa_bus) {
+	for (i = 0; i < DWC_PCIE_CTRL_COUNT; i++) {
+		if ((uint32_t) dwc_pcie_plats[i].bus_base + 1u == pa->pa_bus) {
 			ihs[0] = (pci_intr_handle_t)
-			    pcie_glue_ctrls[i].intx_intid;
+			    dwc_pcie_plats[i].intx_irq;
 			pcie_cookie.rid = (pa->pa_bus << 8) |
 			    (pa->pa_device << 3) | pa->pa_function;
 			pcie_cookie.pc_v = __UNCONST(pa->pa_pc);
@@ -346,61 +335,61 @@ pcie_intx_alloc_pa(const struct pci_attach_args *pa, pci_intr_handle_t *ihs)
 			return 0;
 		}
 	}
-	printf("pcie_glue: no INTx routing for bus %u\n", pa->pa_bus);
+	board_log("pcie_glue: no INTx routing for bus %u\n", pa->pa_bus);
 	return ENODEV;
 }
 
-/* the dwc device record behind a function, needed to program its MSI-X
- * table (pci_msix_arm addresses BARs and the cap offset itself) */
-static const struct dwc_pcie_dev *
+/* the generic function record behind a function, needed to program its
+ * MSI-X table (pci_msix_arm addresses BARs and the cap offset itself) */
+static const struct pci_func *
 pcie_dwc_dev(const struct pci_attach_args *pa)
 {
 	uint32_t devfn = (pa->pa_device << 3) | pa->pa_function;
 	uint32_t i;
 
 	for (i = 0; i < dwc_pcie_dev_count(); i++) {
-		const struct dwc_pcie_dev *dev = dwc_pcie_dev(i);
+		const struct pci_func *pf = dwc_pcie_pf(i);
 
-		if (dev != NULL && dev->busn == pa->pa_bus &&
-		    dev->devfn == devfn) {
-			return dev;
+		if (pf != NULL && pf->busn == pa->pa_bus &&
+		    pf->devfn == devfn) {
+			return pf;
 		}
 	}
 	return NULL;
 }
 
 /* the function whose MSI-X table this port armed (one radio) */
-static const struct dwc_pcie_dev *pcie_msix_dev;
+static const struct pci_func *pcie_msix_dev;
 
 int
 pci_msix_alloc(const struct pci_attach_args *pa, pci_intr_handle_t **ihsp,
 	int *countp)
 {
-	const struct dwc_pcie_dev *dev = pcie_dwc_dev(pa);
+	const struct pci_func *pf = pcie_dwc_dev(pa);
 	pci_intr_handle_t *ihs;
 	MSI_VECTOR vec;
 	int32_t count;
 
-	if (dev == NULL || dev->msix_cap == 0) {
+	if (pf == NULL || pf->msix_cap == 0) {
 		return ENODEV;
 	}
 
 	/* the board-proven MSI-X route: program the endpoint's table with
 	 * the vector the ITS domain hands out, raise ENABLE - the NVMe
 	 * line this code is ported from delivered real interrupts on it */
-	count = pci_msix_arm(dev, 1, &vec);
+	count = pci_msix_arm(pf, &dwc_pcie_cfg_backend, 1, &vec);
 	if (count < 1) {
 		return ENODEV;
 	}
 
 	ihs = kmem_zalloc(sizeof(*ihs), KM_SLEEP);
 	if (ihs == NULL) {
-		(void) pci_msix_disarm(dev);
+		(void) pci_msix_disarm(pf, &dwc_pcie_cfg_backend);
 		return ENOMEM;
 	}
 	ihs[0] = (pci_intr_handle_t) vec.intid | ARM_PCI_INTR_MSIX |
 	    ARM_PCI_INTR_MPSAFE;
-	pcie_msix_dev = dev;
+	pcie_msix_dev = pf;
 	*ihsp = ihs;
 	if (countp != NULL) {
 		*countp = 1;
@@ -505,7 +494,7 @@ pci_intr_release(pci_chipset_tag_t pc, pci_intr_handle_t *ihs, int count)
 	IRQ_Disable((IRQn_ID_t) (ihs[0] & ARM_PCI_INTR_IRQ));
 	if ((ihs[0] & ARM_PCI_INTR_MSIX) != 0) {
 		if (pcie_msix_dev != NULL) {
-			(void) pci_msix_disarm(pcie_msix_dev);
+			(void) pci_msix_disarm(pcie_msix_dev, &dwc_pcie_cfg_backend);
 			pcie_msix_dev = NULL;
 		}
 	} else if ((ihs[0] & ARM_PCI_INTR_MSI) != 0) {
@@ -633,7 +622,7 @@ pcie_arm_device_side(const struct pcie_intr_cookie *ck)
 		 * enable rises (same discipline the MSI-X table follows) */
 		pci_conf_write(pc, ck->tag, msi_off,
 		    hdr | PCI_MSI_CTL_MSI_ENABLE);
-		printf("pcie_glue: msi armed at %08llx data %u (intid %u)\n",
+		board_log("pcie_glue: msi armed at %08llx data %u (intid %u)\n",
 		    (unsigned long long) pcie_msi_vector.address,
 		    pcie_msi_vector.data, ck->intid);
 		return 0;
@@ -648,15 +637,16 @@ pcie_arm_device_side(const struct pcie_intr_cookie *ck)
 	{
 		size_t i;
 
-		for (i = 0; i < PCIE_GLUE_CTRL_COUNT; i++) {
-			if (pcie_glue_ctrls[i].intx_intid == ck->intid) {
+		for (i = 0; i < DWC_PCIE_CTRL_COUNT; i++) {
+			if ((uint32_t) dwc_pcie_plats[i].intx_irq ==
+			    ck->intid) {
 				*(volatile uint32_t *)
-				    (pcie_glue_ctrls[i].apb_base +
-				    PCIE_CLIENT_INT_MASK) =
+				    (dwc_pcie_plats[i].apb_base +
+				    DWC_PCIE_CLIENT_INT_MASK) =
 				    (0xfu << 16) | 0xfff0u;
-				printf("pcie_glue: client apb %08lx intx"
+				board_log("pcie_glue: client apb %08lx intx"
 				    " unmasked (intid %u)\n",
-				    (unsigned long) pcie_glue_ctrls[i].apb_base,
+				    (unsigned long) dwc_pcie_plats[i].apb_base,
 				    ck->intid);
 				return 0;
 			}
@@ -674,7 +664,7 @@ pcie_intr_establish_impl(void *v, pci_intr_handle_t ih, int ipl,
 	(void) v; (void) ipl;
 
 	if (pcie_cookie.func != NULL) {
-		printf("pcie_glue: %s: interrupt already owned\n", xname);
+		board_log("pcie_glue: %s: interrupt already owned\n", xname);
 		return NULL;
 	}
 
@@ -694,7 +684,7 @@ pcie_intr_establish_impl(void *v, pci_intr_handle_t ih, int ipl,
 		/* the endpoint table was programmed (and ENABLE raised) by
 		 * pci_msix_arm at allocation time - nothing left to arm
 		 * on the device side */
-		printf("pcie_glue: msi-x vector armed (intid %u)\n", intid);
+		board_log("pcie_glue: msi-x vector armed (intid %u)\n", intid);
 		return &pcie_cookie;
 	}
 
@@ -765,7 +755,7 @@ pci_mapreg_map(const struct pci_attach_args *pa, int reg, pcireg_t bus_mask,
 
 	rv = pci_conf_read(pa->pa_pc, pa->pa_tag, reg);
 	if ((rv & bus_mask) != bus_mask) {
-		printf("pcie_glue: BAR at %02x is not the expected type"
+		board_log("pcie_glue: BAR at %02x is not the expected type"
 		    " (bar %08x mask %08x)\n", reg, rv, bus_mask);
 		return EINVAL;
 	}
@@ -793,7 +783,7 @@ pci_mapreg_map(const struct pci_attach_args *pa, int reg, pcireg_t bus_mask,
 		*sizep = 0x2000000;	/* 32 MiB: honest upper bound */
 	}
 
-	printf("pcie_glue: BAR%d mapped at %08llx\n",
+	board_log("pcie_glue: BAR%d mapped at %08llx\n",
 	    PCI_MAPREG_NUM(reg), (unsigned long long) base);
 
 	/* the radio's register file, for the ISR-side cause forensics
@@ -885,7 +875,7 @@ pcie_glue_init(void)
 	for (size_t i = 0; i < PCIE_GLUE_CTRL_COUNT; i++) {
 		if (Driver_PCIe.Initialize((uint32_t) i, NULL) !=
 		    ARM_DRIVER_OK) {
-			printf("pcie_glue: pcie%zu: no firmware link,"
+			board_log("pcie_glue: pcie%zu: no firmware link,"
 			    " bus empty\n", i);
 		}
 	}
@@ -893,7 +883,7 @@ pcie_glue_init(void)
 	if (pcie_pci_dev == NULL) {
 		pcie_pci_dev = pcie_shell_dev("pci0");
 		if (pcie_pci_dev == NULL) {
-			printf("pcie_glue: no memory for the pci shell\n");
+			board_log("pcie_glue: no memory for the pci shell\n");
 			return -1;
 		}
 	}
@@ -902,8 +892,7 @@ pcie_glue_init(void)
 	 * iwm_match does the claiming - everything else prints and
 	 * passes. */
 	for (ci = 0; ci < PCIE_GLUE_CTRL_COUNT; ci++) {
-		const struct pcie_glue_ctrl *c = &pcie_glue_ctrls[ci];
-		uint32_t bus = c->downstream_bus;
+		uint32_t bus = (uint32_t) dwc_pcie_plats[ci].bus_base + 1u;
 
 		/* LinkUp takes the controller INSTANCE (0/1), not the
 		 * downstream bus number - the first board run skipped
@@ -946,13 +935,13 @@ pcie_glue_init(void)
 			pa.pa_intrline = 0;
 			pa.pa_rawintrpin = 1;
 
-			printf("pcie_glue: %02x:%02x.%u %04x:%04x\n",
+			board_log("pcie_glue: %02x:%02x.%u %04x:%04x\n",
 			    bus, 0u, func, PCI_VENDOR(id), PCI_PRODUCT(id));
 
 			dev = config_found(pcie_pci_dev, &pa, NULL,
 			    CFARGS(.iattr = "pci"));
 			if (dev != NULL) {
-				printf("pcie_glue: %s claimed it\n",
+				board_log("pcie_glue: %s claimed it\n",
 				    device_xname(dev));
 				wlan_port_post_attach_iwm(dev);
 				attached++;
@@ -961,7 +950,7 @@ pcie_glue_init(void)
 	}
 
 	if (attached == 0) {
-		printf("pcie_glue: no radio endpoint claimed\n");
+		board_log("pcie_glue: no radio endpoint claimed\n");
 		return -1;
 	}
 	return 0;

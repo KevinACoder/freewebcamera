@@ -40,6 +40,9 @@
 
 /* provided by wlan_adapter.c (the same primitive the osal uses) */
 extern void *wlan_port_thread_create(void (*run)(void *), void *arg);
+/* the port serializer (osal_cmsis_rtos2.c, declared in port.h) */
+extern void wlan_port_serializer_lock(void);
+extern void wlan_port_serializer_unlock(void);
 
 #ifndef __arraycount
 #define __arraycount(a) (sizeof(a) / sizeof((a)[0]))
@@ -615,7 +618,16 @@ static void softint_worker_run(void *arg)
 			void *a = q->sq_arg;
 
 			softint_q_head++;
+			/* On NetBSD a softint handler runs at its IPL, so the
+			 * driver's splnet() regions and its device softint are
+			 * mutually exclusive by construction.  Nothing raises an
+			 * IPL here, so the handler takes the port serializer:
+			 * without it the iwm command completion (this thread) and
+			 * iwm_send_cmd (shell/supplicant/state worker) interleave
+			 * on the command ring. */
+			wlan_port_serializer_lock();
 			fn(a);
+			wlan_port_serializer_unlock();
 		}
 	}
 }

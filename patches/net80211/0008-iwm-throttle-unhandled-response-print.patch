@@ -1,0 +1,34 @@
+--- a/sys/dev/pci/if_iwm.c
++++ b/sys/dev/pci/if_iwm.c
+@@ -7563,13 +7586,26 @@ iwm_notif_intr(struct iwm_softc *sc)
+ 			break;
+ 		}
+ 
+-		default:
+-			aprint_error_dev(sc->sc_dev,
+-			    "unhandled firmware response 0x%x 0x%x/0x%x "
+-			    "rx ring %d[%d]\n",
+-			    code, pkt->hdr.code, pkt->len_n_flags, qid, idx);
++		default: {
++			/*
++			 * A corrupted or stale RX ring entry lands here, and one
++			 * such entry is re-read on every ring wrap, so the
++			 * original unconditional print buried the console at
++			 * tens of lines per second.  Keep the first few for
++			 * diagnosis and then one per thousand.
++			 */
++			static unsigned unhandled;
++
++			if (unhandled++ < 8 || (unhandled % 1000) == 0) {
++				aprint_error_dev(sc->sc_dev,
++				    "unhandled firmware response 0x%x 0x%x/0x%x "
++				    "rx ring %d[%d] (n=%u)\n",
++				    code, pkt->hdr.code, pkt->len_n_flags, qid, idx,
++				    unhandled);
++			}
+ 			break;
+ 		}
++		}
+ 
+ 		/*
+ 		 * uCode sets bit 0x80 when it originates the notification,

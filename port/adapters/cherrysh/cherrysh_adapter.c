@@ -98,6 +98,10 @@ extern ARM_DRIVER_USART Driver_USART_Console;
 extern int its_dump_cmd(int argc, char **argv);
 extern int uart_console_irq_rebind(unsigned int intid);
 extern unsigned int uart_console_irq_id(void);
+
+/* the system heap (port/adapters/threadx/heap.c) */
+extern size_t xPortGetFreeHeapSize(void);
+extern void wlan_heap_census(void);
 extern int uart_console_rx_down(void);
 extern int uart_console_rx_kick(void);
 /* The gdb probe bodies (app/dbg_scenario.c), via externs like everything
@@ -496,6 +500,26 @@ static int cmd_dbg(int argc, char **argv)
 
 CSH_CMD_EXPORT_ALIAS_FULL(cmd_dbg, dbg, "dbg",
 			  "enter the gdb stub via the breakpoint probe");
+
+/* System heap census. The networking world (iwm's 256 x 4.4 KB RX ring,
+ * the USB pools) lives in the same 4 MB region, and it is the allocations
+ * that are still live that explain an "out of memory", not the free count:
+ * the census lists every live block >= 2 KB with its first words, which is
+ * enough to recognize a leaked mbuf. */
+static int cmd_heap(int argc, char **argv)
+{
+	chry_shell_t *csh = CSH_FROM_ARGV(argc, argv);
+
+	(void)argc;
+	(void)argv;
+	csh_printf(csh, "heap free=%lu B\r\n",
+		   (unsigned long) xPortGetFreeHeapSize());
+	wlan_heap_census();
+	return 0;
+}
+
+CSH_CMD_EXPORT_ALIAS_FULL(cmd_heap, heap, "heap",
+			  "system heap: free bytes + live blocks >= 2 KB");
 
 CSH_CMD_EXPORT_ALIAS_FULL(cmd_version, version, "version",
 			  "print build and target info");

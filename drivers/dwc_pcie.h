@@ -42,6 +42,8 @@
 
 #include <stdint.h>
 
+#include "pci.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -58,24 +60,21 @@ struct dwc_pcie_plat {
 	uint16_t intx_irq;
 };
 
+/* Client APB legacy interrupt mask register (RK TRM: +0x1c); the four INTx
+ * lines aggregate onto one GIC line per controller (plat intx_irq). */
+#define DWC_PCIE_CLIENT_INT_MASK	0x1c
+
 #define DWC_PCIE_CTRL_COUNT 2
 
 extern const struct dwc_pcie_plat dwc_pcie_plats[DWC_PCIE_CTRL_COUNT];
 
 /* One enumerated function. BARs hold what the firmware assigned; this driver
- * never writes a BAR (sizing a BAR would have to overwrite it). */
+ * never writes a BAR (sizing a BAR would have to overwrite it). The generic
+ * half (include/pci.h) travels with the function: consumers that only speak
+ * "PCI function" - the MSI-X programmer - take pf + the config backend, not
+ * this driver's record. */
 struct dwc_pcie_dev {
-	uint32_t busn;
-	uint32_t slot;
-	uint32_t func;
-	uint32_t devfn;
-	uint16_t vendor;
-	uint16_t device;
-	uint8_t baseclass;
-	uint8_t subclass;
-	uint8_t msix_cap;	/* config offset of the MSI-X capability, 0 = none */
-	uint8_t msi_cap;	/* config offset of the MSI capability, 0 = none */
-	uint32_t bar[6];
+	struct pci_func pf;
 };
 
 #define DWC_PCIE_DEV_MAX 8
@@ -99,6 +98,14 @@ int32_t dwc_pcie_cfg_write(uint32_t bus, uint32_t devfn, uint32_t where,
 /* Flat device list filled by dwc_pcie_init(). */
 uint32_t dwc_pcie_dev_count(void);
 const struct dwc_pcie_dev *dwc_pcie_dev(uint32_t index);
+
+/* The generic half of a function, for consumers that speak "PCI function"
+ * (drivers/pci_msix.c) and must not see this driver's record. */
+const struct pci_func *dwc_pcie_pf(uint32_t index);
+
+/* This controller driver's config backend, handed to the generic consumers
+ * alongside the pci_func record. */
+extern const struct pci_cfg_backend dwc_pcie_cfg_backend;
 
 /* The function's PCIe Requester ID (bus << 8 | slot << 3 | func), which is
  * the ITS DeviceID used for its message interrupts. */

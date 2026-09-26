@@ -36,25 +36,15 @@ extern void usb_xhci_reg_dump(void);
 extern int wlan_urtwn_reg_read(unsigned addr, unsigned *val);
 extern int wlan_urtwn_reg_write(unsigned addr, unsigned val);
 extern void wlan_urtwn_txq_dump(void);
-extern void wlan_urtwn_chanmap_dump(void);
-#endif /* WLAN_NIC_USB */
-
-#if WLAN_NIC_SDIO
-/* register-level debug access (rtw8189f adapter; "wlan reg" falls back
- * to it when no urtwn adapter is compiled in) */
-extern int rtw8189f_data_rate_set(unsigned mbps);
-extern unsigned rtw8189f_data_rate_get(void);
-extern int wlan_rtw8189f_reg_read(unsigned addr, unsigned *val);
-extern int wlan_rtw8189f_reg_write(unsigned addr, unsigned val);
-extern void wlan_rtw8189f_txq_dump(void);
-extern void wlan_rtw8189f_icstats_dump(void);
-extern void wlan_rtw8189f_sdreg_dump(void);
 #endif
 
 /* callout diagnostic gate (osal layer, see "wlan calib") */
 extern volatile unsigned wlan_callout_fires;
 extern volatile unsigned wlan_callout_sched;
 extern volatile unsigned wlan_callout_suppressed;
+
+/* system heap free bytes (port/adapters/threadx/heap.c) */
+extern size_t xPortGetFreeHeapSize(void);
 extern unsigned wlan_callout_get_enabled(void);
 extern void wlan_callout_set_enabled(unsigned on);
 
@@ -114,6 +104,14 @@ static int cmd_wlan(int argc, char **argv)
 		return 0;
 	}
 
+	if (argc >= 2 && strcmp(argv[1], "ser") == 0) {
+		/* live view of the serializer: owner/depth plus the recent
+		 * lock/unlock ring with caller addresses (nm the ELF to name
+		 * them); the same dump the unlock-by-non-owner panic prints */
+		wlan_ser_dump();
+		return 0;
+	}
+
 	if (argc >= 2 && strcmp(argv[1], "status") == 0) {
 		const char *name = wlan_port_active_name();
 		uint8_t mac[6];
@@ -125,6 +123,12 @@ static int cmd_wlan(int argc, char **argv)
 			csh_printf(csh, "wlan: no adapter registered yet "
 				   "(run: wlan start)\r\n");
 		}
+		/* The wireless RX rings are the largest single consumer of the
+		 * system heap (iwm's 256 mbuf+cluster slots are ~1.1 MB of 4 MB),
+		 * so a driver that leaks a buffer per event shows up here first:
+		 * free bytes only ever drops. */
+		csh_printf(csh, "heap free=%lu B\r\n",
+		    (unsigned long) xPortGetFreeHeapSize());
 		wlan_port_status_dump();
 #if WLAN_NIC_USB
 		usb_platform_dump();
@@ -342,10 +346,17 @@ static int cmd_wlan(int argc, char **argv)
 	}
 #endif
 
+#if WLAN_NIC_USB
+#define WLAN_CMD_TAIL \
+	" | dump | hist [n] | delaytest | reg read|write|txq | calib [0|1]" \
+	" | callouts | chanmap | cv | usbdebug <n>"
+#else
+#define WLAN_CMD_TAIL ""
+#endif
+
 	csh_printf(csh,
-		   "usage: wlan start | scan [seconds] | status | dump | "
-		   "hist [n] | delaytest | reg read|write|txq | calib [0|1] | "
-		   "callouts | chanmap | cv | usbdebug <n>\r\n");
+		   "usage: wlan start | scan [seconds] | status | nic <name>"
+		   WLAN_CMD_TAIL "\r\n");
 	return 0;
 }
 

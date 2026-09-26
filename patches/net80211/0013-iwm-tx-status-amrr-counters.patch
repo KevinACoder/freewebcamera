@@ -1,0 +1,76 @@
+diff --git a/sys/dev/pci/if_iwm.c b/sys/dev/pci/if_iwm.c
+index 085b4c9..361fe88 100644
+--- a/sys/dev/pci/if_iwm.c
++++ b/sys/dev/pci/if_iwm.c
+@@ -164,6 +164,14 @@ int iwm_debug = 0;
+  * interrupt keeps arriving but nothing reaches net80211". */
+ unsigned iwm_dbg_rx_entries, iwm_dbg_rx_phy_bad, iwm_dbg_rx_crc_bad,
+     iwm_dbg_rx_rearm_fail, iwm_dbg_rx_delivered, iwm_dbg_notif_calls;
++/* AMRR feedback / notif-dispatch forensics (read by wlan status): the
++ * rate stays pinned at the lowest entry when completions never reach
++ * iwm_rx_tx_cmd_single or every completion reads as a retry. */
++unsigned iwm_dbg_calib_ticks, iwm_dbg_calib_choose;
++unsigned iwm_dbg_tx_status, iwm_dbg_tx_failack_sum, iwm_dbg_tx_status_err;
++int iwm_dbg_tx_last_failack = -1;
++unsigned iwm_dbg_notif_garbage, iwm_dbg_notif_unhandled;
++unsigned iwm_dbg_last_unhandled_code;
+ unsigned iwm_dbg_rx_allocs, iwm_dbg_rx_nombuf, iwm_dbg_rx_noext,
+     iwm_dbg_rx_mapfail;
+ 
+@@ -4084,6 +4092,12 @@ iwm_rx_tx_cmd_single(struct iwm_softc *sc, struct iwm_rx_packet *pkt,
+ 	KASSERT(tx_resp->frame_count == 1);
+ 
+ 	/* Update rate control statistics. */
++	iwm_dbg_tx_status++;
++	iwm_dbg_tx_failack_sum += failack;
++	iwm_dbg_tx_last_failack = failack;
++	if (status != IWM_TX_STATUS_SUCCESS &&
++	    status != IWM_TX_STATUS_DIRECT_DONE)
++		iwm_dbg_tx_status_err++;
+ 	in->in_amn.amn_txcnt++;
+ 	if (failack > 0) {
+ 		in->in_amn.amn_retrycnt++;
+@@ -6072,6 +6086,7 @@ iwm_calib_timeout(void *arg)
+ 	int otxrate;
+ 	int s;
+ 
++	iwm_dbg_calib_ticks++;
+ 	s = splnet();
+ 	if ((ic->ic_fixed_rate == -1
+ #ifndef IEEE80211_NO_HT
+@@ -6085,6 +6100,7 @@ iwm_calib_timeout(void *arg)
+ 		else
+ #endif
+ 			otxrate = ni->ni_txrate;
++		iwm_dbg_calib_choose++;
+ 		ieee80211_amrr_choose(&sc->sc_amrr, &in->in_ni, &in->in_amn);
+ 
+ 		/*
+@@ -7385,6 +7401,7 @@ iwm_notif_intr(struct iwm_softc *sc)
+ 		 */
+ 		if (__predict_false((pkt->hdr.code == 0 && qid == 0 && idx == 0)
+ 		    || pkt->len_n_flags == htole32(0x55550000))) {
++			iwm_dbg_notif_garbage++;
+ 			ADVANCE_RXQ(sc);
+ 			continue;
+ 		}
+@@ -7632,14 +7649,15 @@ iwm_notif_intr(struct iwm_softc *sc)
+ 			 * tens of lines per second.  Keep the first few for
+ 			 * diagnosis and then one per thousand.
+ 			 */
+-			static unsigned unhandled;
+-
+-			if (unhandled++ < 8 || (unhandled % 1000) == 0) {
++			iwm_dbg_notif_unhandled++;
++			iwm_dbg_last_unhandled_code = code;
++			if (iwm_dbg_notif_unhandled < 8 ||
++			    (iwm_dbg_notif_unhandled % 1000) == 0) {
+ 				aprint_error_dev(sc->sc_dev,
+ 				    "unhandled firmware response 0x%x 0x%x/0x%x "
+ 				    "rx ring %d[%d] (n=%u)\n",
+ 				    code, pkt->hdr.code, pkt->len_n_flags, qid, idx,
+-				    unhandled);
++				    iwm_dbg_notif_unhandled);
+ 			}
+ 			break;
+ 		}

@@ -1,0 +1,59 @@
+--- a/sys/dev/pci/if_iwm.c
++++ b/sys/dev/pci/if_iwm.c
+@@ -159,6 +159,12 @@ int iwm_debug = 0;
+ #define DPRINTFN(n, x)	do { ; } while (0)
+ #endif
+ 
++/* Port forensics counters (read by the port's shell `wlan status`): a
++ * port-side DMA/descriptor or ring mistake shows up here as "the
++ * interrupt keeps arriving but nothing reaches net80211". */
++unsigned iwm_dbg_rx_entries, iwm_dbg_rx_phy_bad, iwm_dbg_rx_crc_bad,
++    iwm_dbg_rx_rearm_fail, iwm_dbg_rx_delivered, iwm_dbg_notif_calls;
++
+ #include <dev/pci/if_iwmreg.h>
+ #include <dev/pci/if_iwmvar.h>
+ 
+@@ -3923,6 +3929,7 @@ iwm_rx_rx_mpdu(struct iwm_softc *sc, struct iwm_rx_packet *pkt,
+ 	int rssi;
+ 	int s;
+ 
++	iwm_dbg_rx_entries++;
+ 	bus_dmamap_sync(sc->sc_dmat, data->map, 0, IWM_RBUF_SIZE,
+ 	    BUS_DMASYNC_POSTREAD);
+ 
+@@ -3960,21 +3967,26 @@ iwm_rx_rx_mpdu(struct iwm_softc *sc, struct iwm_rx_packet *pkt,
+ 		 */
+ 		m->m_data = (char *)(uintptr_t)data->map->dm_segs[0].ds_addr;
+ 		m->m_len = m->m_pkthdr.len = IWM_RBUF_SIZE;
++		iwm_dbg_rx_rearm_fail++;
+ 		return;
+ 	}
+ 
+ 	if (__predict_false(phy_info->cfg_phy_cnt > 20)) {
+ 		DPRINTF(("dsp size out of range [0,20]: %d\n",
+ 		    phy_info->cfg_phy_cnt));
++		iwm_dbg_rx_phy_bad++;
+ 		return;
+ 	}
+ 
+ 	if (!(rx_pkt_status & IWM_RX_MPDU_RES_STATUS_CRC_OK) ||
+ 	    !(rx_pkt_status & IWM_RX_MPDU_RES_STATUS_OVERRUN_OK)) {
+ 		DPRINTF(("Bad CRC or FIFO: 0x%08X.\n", rx_pkt_status));
++		iwm_dbg_rx_crc_bad++;
+ 		return; /* drop */
+ 	}
+ 
++	iwm_dbg_rx_delivered++;
++
+ 	device_timestamp = le32toh(phy_info->system_timestamp);
+ 
+ 	if (sc->sc_capaflags & IWM_UCODE_TLV_FLAGS_RX_ENERGY_API) {
+@@ -7337,6 +7349,8 @@ iwm_notif_intr(struct iwm_softc *sc)
+ {
+ 	uint16_t hw;
+ 
++	iwm_dbg_notif_calls++;
++
+ 	bus_dmamap_sync(sc->sc_dmat, sc->rxq.stat_dma.map,
+ 	    0, sc->rxq.stat_dma.size, BUS_DMASYNC_POSTREAD);
+ 

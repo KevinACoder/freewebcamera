@@ -57,5 +57,65 @@ Current state:
     `XHCI_DEBUG_DEFAULT` (same treatment as ehci's debug level) instead of
     a hard 0, so the xHCI debug verbosity is compile-time configurable via
     the compat `opt_usb.h` (introduced with the xHCI line).
+  - `0007-iwm-rx-rearm-slot-before-early-returns.patch` — `iwm_rx_rx_mpdu()`
+    re-points the ring slot's mbuf at the frame *before* its two early
+    returns (bad phy-info, bad CRC/overrun), so any dropped frame used to
+    leave the slot poisoned: the RBD keeps the buffer's original address
+    (the device rebuilds it as `rbd << 8`) while the driver reads from the
+    moved `m_data` — a 12-byte shift that turns every later DMA into that
+    slot into a garbage packet.  The garbage is dropped (the slot never
+    recovers) and, when it looks like a TX response, walks `txd->in ==
+    NULL` into a null dereference; the same stream feeds bogus indices to
+    the command ring, which is how the trunk image flooded the console and
+    then crashed.  The re-arm now happens before both returns, and a failed
+    re-arm restores the slot's DMA view before dropping the frame.  Board
+    evidence: flood gone, no KASSERT/crash, WPA2 association succeeds
+    (evidence 20260926-feat-net80211_refine).
+  - `0008-iwm-throttle-unhandled-response-print.patch` — the `default:` of
+    `iwm_notif_intr()`'s response switch printed unconditionally; one
+    corrupted ring slot is re-read on every wrap, so it buried the console
+    at tens of lines per second.  First 8 lines, then one per thousand,
+    each carrying an `n=` counter (same intent as 0003: keep the
+    diagnostic, lose the flood).
+  - `0009-iwm-throttle-hcmd-ring-race-prints.patch` — `iwm_cmd_done()`'s
+    two ring-bookkeeping complaints (`Some HCMDs skipped?`, `cmd_done with
+    empty ring`) print once per affected completion, i.e. per frame while a
+    submitter and the completion path interleave on `ring->cur/queued`.
+    They keep the first 8 lines and then one per thousand, each with an
+    `n=` counter: the counter is the measurement (the race is a port-side
+    serialization defect — splnet is wired to the port serializer and the
+    softint worker runs its handlers under it — so the count going to zero
+    is the acceptance signal).
+  - `0010-iwm-rx-pipeline-counters.patch` — the RX pipeline is only
+    observable through counters (the interrupt can keep arriving while
+    nothing reaches net80211): notif calls, ring entries, delivered
+    frames, PHY/CRC rejects, and the rearm failures that ate the first
+    data-plane round.
+  - `0011-iwm-rx-rearm-reason-counters.patch` — `iwm_rx_addbuf()`'s
+    failure paths (nombuf/noext/mapfail) counted separately so a refill
+    starvation names its own reason instead of a silent rearm failure.
+  - `0012-iwm-legacy-rate-lq.patch` — this port's `IEEE80211_NO_HT`
+    build compiled out the whole `iwm_setrates()` legacy-rate path, so
+    the firmware's rate table was never installed and data frames crawled
+    at the ucode default while AMRR's chosen rate went nowhere. Re-wires
+    the legacy LQ plumbing (install at association, re-install on AMRR
+    change via this port's softint backend instead of the upstream
+    workqueue).
+  - `0013-iwm-tx-status-amrr-counters.patch` — cumulative counters that
+    decide whether the AMRR feedback loop runs: calib-callout liveness,
+    REPLY_TX completions reaching the rate-control statistics, per-frame
+    retry sums, and where unread notifications land (garbage filter vs
+    unhandled code).
+  - `0014-iwm-scan-event-trace.patch` — a 32-entry scan-lifecycle event
+    ring (newstate/force-init/scan request/completion/SCANNING
+    transitions/stop/init) dumped at the `fatal:` label and from
+    `wlan status`; this is what pinned the 0x090A fatal to the
+    assoc-failure INIT downgrade feeding a scan command after a soft
+    reset.
+  - `0015-iwm-init-downgrade-full-reset.patch` — every downgrade into
+    INIT now takes the full stop+init road the forced-INIT transition
+    used; the soft reset (stop_device + init_hw) left the firmware's
+    scan engine unready and the supplicant's immediate rescan asserted
+    0x090A there.
 - `threadx/`, `cherrysh/`, `cherryrb/`, `lwip/` — no patches; used
   byte-identical to their pins.
