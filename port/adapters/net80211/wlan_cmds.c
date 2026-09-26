@@ -23,6 +23,7 @@
 
 #include "wlan_adapter.h"
 
+#if WLAN_NIC_USB
 extern void usb_platform_dump(void);
 extern void usb_platform_qh_dump(void);
 extern void usb_platform_reg_dump(void);
@@ -35,6 +36,7 @@ extern void usb_xhci_reg_dump(void);
 extern int wlan_urtwn_reg_read(unsigned addr, unsigned *val);
 extern int wlan_urtwn_reg_write(unsigned addr, unsigned val);
 extern void wlan_urtwn_txq_dump(void);
+#endif
 
 /* callout diagnostic gate (osal layer, see "wlan calib") */
 extern volatile unsigned wlan_callout_fires;
@@ -123,7 +125,9 @@ static int cmd_wlan(int argc, char **argv)
 		csh_printf(csh, "heap free=%lu B\r\n",
 		    (unsigned long) xPortGetFreeHeapSize());
 		wlan_port_status_dump();
+#if WLAN_NIC_USB
 		usb_platform_dump();
+#endif
 		return 0;
 	}
 
@@ -179,6 +183,8 @@ static int cmd_wlan(int argc, char **argv)
 		return 0;
 	}
 
+	#if WLAN_NIC_USB
+	/* USB-only subcommands (the stack is not even linked without it) */
 	if (argc >= 2 && strcmp(argv[1], "dump") == 0) {
 		usb_platform_dump();
 		usb_platform_qh_dump();
@@ -301,11 +307,19 @@ static int cmd_wlan(int argc, char **argv)
 		csh_printf(csh, "wlan: usbdebug=%d\r\n", usbdebug);
 		return 0;
 	}
+#endif /* WLAN_NIC_USB */
+
+#if WLAN_NIC_USB
+#define WLAN_CMD_TAIL \
+	" | dump | hist [n] | delaytest | reg read|write|txq | calib [0|1]" \
+	" | callouts | chanmap | cv | usbdebug <n>"
+#else
+#define WLAN_CMD_TAIL ""
+#endif
 
 	csh_printf(csh,
-		   "usage: wlan start | scan [seconds] | status | dump | "
-		   "hist [n] | delaytest | reg read|write|txq | calib [0|1] | "
-		   "callouts | chanmap | cv | usbdebug <n>\r\n");
+		   "usage: wlan start | scan [seconds] | status | nic <name>"
+		   WLAN_CMD_TAIL "\r\n");
 	return 0;
 }
 

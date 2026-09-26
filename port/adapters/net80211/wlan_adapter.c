@@ -63,10 +63,14 @@ void *wlan_port_thread_create(void (*run)(void *), void *arg) {
  * net80211 submodule's realtek dist by tools/gen_firmware_array.py,
  * and the Intel 7260 ucode carried alongside them) */
 
+#if WLAN_NIC_USB
 extern const uint8_t rtl8188eufw_data[];
 extern const size_t rtl8188eufw_size;
+#endif
 
+#if WLAN_NIC_PCIE
 extern int pcie_glue_init(void);
+#endif
 
 /* adapter registry state (the port-core section at the bottom of the file
  * owns the logic; wlan_start reads the preference) */
@@ -92,6 +96,7 @@ int wlan_start(void) {
 	}
 	wlan_osal_cmsis_init();
 	wlan_console_ready();
+#if WLAN_NIC_USB
 		/* the netbsd usb history log level for the bring-up rounds
 		 * (ehci's level comes from EHCI_DEBUG_DEFAULT) */
 		{
@@ -104,6 +109,8 @@ int wlan_start(void) {
 		printf("wlan: firmware registration failed\n");
 		return -1;
 	}
+#endif
+#if WLAN_NIC_PCIE
 	{
 		extern const uint8_t iwlwifi7260_17_ucode_data[];
 		extern const size_t iwlwifi7260_17_ucode_size;
@@ -115,17 +122,18 @@ int wlan_start(void) {
 			return -1;
 		}
 	}
+#endif
 
 	/* platform power-up + ehci_init + config_found: the enumeration,
 	 * hub exploration and urtwn attach (with its firmware load) run
 	 * on the calling thread and the threads the chain spawns.
 	 *
-	 * The two bus lines are brought up independently so one NIC can be
-	 * exercised alone: `wlan nic urtwn` skips the PCIe line, `wlan nic iwm`
-	 * skips the USB platform.  That is not only about who owns the active
-	 * slot - the 4 MB system heap carries both worlds, and a NIC under test
-	 * must not be starved by the other's buffers (iwm's RX ring alone is
-	 * ~1.1 MB). */
+	 * Each line is brought up only if the image carries it (WLAN_NIC at build
+	 * time); in a both-lines image the `wlan nic` preference can skip one of
+	 * them, which is a convenience, not the mechanism - a debug image is
+	 * built for exactly one line, so neither the 4 MB heap (iwm's RX ring
+	 * alone is ~1.1 MB) nor the bring-up order couples the two. */
+#if WLAN_NIC_USB
 	if (wlan_nic_pref != NULL && strcmp(wlan_nic_pref, "iwm") == 0) {
 		printf("wlan: usb line skipped (preference: %s)\n",
 		    wlan_nic_pref);
@@ -133,9 +141,11 @@ int wlan_start(void) {
 		printf("wlan: usb platform init failed\n");
 		return -1;
 	}
+#endif
 	/* The pcie world runs after the usb line: usb keeps its proven boot
 	 * order.  A pcie failure must not flip the started flag back - the usb
 	 * world is already up and a re-run would re-init the EHCI/xHCI hosts. */
+#if WLAN_NIC_PCIE
 	if (wlan_nic_pref != NULL && strcmp(wlan_nic_pref, "urtwn") == 0) {
 		printf("wlan: pcie line skipped (preference: %s)\n",
 		    wlan_nic_pref);
@@ -143,6 +153,7 @@ int wlan_start(void) {
 		printf("wlan: pcie glue init failed (usb line stays up;"
 		    " reboot to retry pcie)\n");
 	}
+#endif
 	wlan_started = 1;
 	return 0;
 }

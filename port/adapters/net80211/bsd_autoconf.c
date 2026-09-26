@@ -89,13 +89,16 @@ struct usb_subr_copy_30_hook_t usb_subr_copy_30_hook = { .hooked = false };
 
 /* usb shells: ehci1's usbus + the xHCI's two buses (USB3 + USB2);
  * roothub shells: one per usbus, same count */
+#if WLAN_NIC_USB
 static device_t usb_devs[4];
 static device_t uroothub_devs[4];
 static device_t uhub_devs[4];
 static device_t ehci_devs[2];
 static device_t xhci_devs[2];
 static device_t urtwn_devs[2];
+#endif
 
+#if WLAN_NIC_USB
 struct cfdriver usb_cd = {
 	.cd_devs = usb_devs,
 	.cd_name = "usb",
@@ -141,14 +144,20 @@ struct cfdriver urtwn_cd = {
 	.cd_ndevs = 2,
 };
 
+#endif /* WLAN_NIC_USB */
+
+#if WLAN_NIC_USB
 extern const struct cfattach usb_ca;
 extern const struct cfattach uroothub_ca;
 extern const struct cfattach uhub_ca;
 extern const struct cfattach urtwn_ca;
+#endif
 
 /* the port's post-attach hook (urtwn_reg.c): registers the driver with
- * the shell-facing adapter table */
+ * the shell-facing adapter table.  Only the USB line defines it. */
+#if WLAN_NIC_USB
 void wlan_port_post_attach(device_t dev);
+#endif
 
 /* the usb event-device selection shells (no device table here) */
 int root_is_mounted;
@@ -232,6 +241,7 @@ struct cfentry {
 
 static int dlocs_zero[1] = { -1 };
 
+#if WLAN_NIC_USB
 static struct cfdata cfdata_usb = {
 	.cf_name = "usb", .cf_atname = "usb",
 	.cf_fstate = FSTATE_STAR, .cf_loc = dlocs_zero,
@@ -251,7 +261,9 @@ static struct cfdata cfdata_urtwn = {
 	.cf_name = "urtwn", .cf_atname = "urtwn",
 	.cf_fstate = FSTATE_STAR, .cf_loc = dlocs_zero,
 };
+#endif /* WLAN_NIC_USB */
 
+#if WLAN_NIC_PCIE
 /* the pcie endpoint: the native glue (pcie_glue.c) drives the DesignWare
  * host directly through include/pcie.h and config_founds only the radio
  * driver - no fdt world, no pci bus core, no ppb descent */
@@ -267,13 +279,18 @@ static struct cfdata cfdata_iwm = {
 	.cf_name = "iwm", .cf_atname = "iwm",
 	.cf_fstate = FSTATE_STAR, .cf_loc = dlocs_zero,
 };
+#endif /* WLAN_NIC_PCIE */
 
 static struct cfentry cfentries[] = {
+#if WLAN_NIC_USB
 	{ "usbus", &cfdata_usb, &usb_cd },
 	{ "usbroothubif", &cfdata_uroothub, &uroothub_cd },
 	{ "usbdevif", &cfdata_uhub, &uhub_cd },
 	{ "usbdevif", &cfdata_urtwn, &urtwn_cd },
+#endif
+#if WLAN_NIC_PCIE
 	{ "pci", &cfdata_iwm, &iwm_cd },
+#endif
 };
 
 /* ------------------------------------------------------------------
@@ -312,6 +329,7 @@ dev_alloc(struct cfdriver *cd, cfdata_t cf)
 static struct cfattach *
 cfattach_lookup(const char *atname)
 {
+#if WLAN_NIC_USB
 	if (strcmp(atname, "usb") == 0) {
 		return __DECONST(struct cfattach *, &usb_ca);
 	}
@@ -324,6 +342,8 @@ cfattach_lookup(const char *atname)
 	if (strcmp(atname, "urtwn") == 0) {
 		return __DECONST(struct cfattach *, &urtwn_ca);
 	}
+#endif
+#if WLAN_NIC_PCIE
 	if (strcmp(atname, "iwm") == 0) {
 		/* CFATTACH_DECL_NEW(iwm, ...) inside iwm_reg.c's compiled
 		 * import of if_iwm.c */
@@ -331,6 +351,7 @@ cfattach_lookup(const char *atname)
 
 		return __DECONST(struct cfattach *, &iwm_ca);
 	}
+#endif
 	return NULL;
 }
 
@@ -377,8 +398,12 @@ config_attach_internal(device_t parent, cfdata_t cf, void *aux,
 	 * declared but never called, which left every enumeration looking
 	 * healthy in the log while `wlan scan` answered "no adapter": the
 	 * device attached, nothing told the port core.
-	 */
+	 *
+	 * The hook lives with the USB line's adapter TU; the PCIe line's glue
+	 * calls its own registration directly (pcie_glue.c). */
+#if WLAN_NIC_USB
 	wlan_port_post_attach(dev);
+#endif
 	return dev;
 }
 

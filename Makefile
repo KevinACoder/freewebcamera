@@ -22,6 +22,23 @@
 # interrupt numbers, MMU windows) and the link script.
 BOARD ?= rk3568
 
+# Wireless line selection (build-time, not runtime): which stack this image
+# carries at all.
+#   make WLAN_NIC=iwm     PCIe line only: DW host + iwm + iwlwifi ucode
+#   make WLAN_NIC=urtwn   USB line only:  netbsd usb di/hcd + urtwn + rtl fw
+#   make WLAN_NIC=all     both (default)
+# A NIC that is not built contributes no code, no threads, no buffers and no
+# bring-up, so a driver being debugged is never coupled to the other one -
+# neither through the shared 4 MB heap (iwm's RX ring alone is ~1.1 MB) nor
+# through the bus bring-up order.  WLAN_NIC_USB/WLAN_NIC_PCIE reach the
+# sources as defines; the source lists below are the other half of the gate.
+WLAN_NIC ?= all
+ifeq ($(filter $(WLAN_NIC),iwm urtwn all),)
+$(error WLAN_NIC must be one of: iwm, urtwn, all)
+endif
+WLAN_HAVE_USB  := $(if $(filter $(WLAN_NIC),urtwn all),1,0)
+WLAN_HAVE_PCIE := $(if $(filter $(WLAN_NIC),iwm all),1,0)
+
 # Bare-metal toolchain, set explicitly (non-interactive shells do not source
 # ~/.bashrc - silently picking up a Linux-targeted compiler links against
 # glibc assumptions that cannot work here).
@@ -50,6 +67,7 @@ CFLAGS := $(UC_OPT) -g3 -std=c11 -Wall -Wextra \
 	-ffreestanding -nostdlib -fno-builtin -fno-stack-protector \
 	-march=armv8-a -mgeneral-regs-only -mstrict-align -mno-outline-atomics \
 	-DGUEST -DEL1 -DSMP_CORES=1 \
+	-DWLAN_NIC_USB=$(WLAN_HAVE_USB) -DWLAN_NIC_PCIE=$(WLAN_HAVE_PCIE) \
 	-DTHREADX_BUILD=1 -DTHREADX_UP_BUILD=1 \
 	-DTX_INCLUDE_USER_DEFINE_FILE
 
@@ -125,16 +143,24 @@ ADAPTER_SRCS := \
 	port/adapters/netutils/iperf3_port.c \
 	port/adapters/netutils/iperf3_cmd.c \
 	port/adapters/netutils/ntp_port.c \
-	port/adapters/netutils/telnet_port.c \
-	port/adapters/pcie/pcie_cmds.c \
+	port/adapters/netutils/telnet_port.c
 
-DRIVER_SRCS := drivers/uart_ns16550.c \
-	drivers/dwc_pcie.c \
-	drivers/pci_msix.c
+# The PCIe shell command only makes sense in an image that carries the host
+# driver; the USB ones (below, with the usb line) follow the same rule.
+ADAPTER_PCIE_SRCS := port/adapters/pcie/pcie_cmds.c
+
+DRIVER_SRCS := drivers/uart_ns16550.c
+DRIVER_PCIE_SRCS := drivers/dwc_pcie.c drivers/pci_msix.c
 
 # Board data for the PCIe controllers (D45 shape: drivers/ keeps the
 # platform-agnostic IP, the coordinates live with the board).
-BOARD_SRCS := port/board/$(BOARD)/rk3568_pcie.c
+BOARD_PCIE_SRCS := port/board/$(BOARD)/rk3568_pcie.c
+
+ifeq ($(WLAN_HAVE_PCIE),1)
+ADAPTER_SRCS += $(ADAPTER_PCIE_SRCS)
+DRIVER_SRCS  += $(DRIVER_PCIE_SRCS)
+BOARD_SRCS   += $(BOARD_PCIE_SRCS)
+endif
 
 APP_SRCS := app/main.c app/dbg_scenario.c
 
@@ -164,7 +190,10 @@ NET80211_BSD_SRCS := \
 	third-party/net80211/sys/crypto/aes/aes_ccm_mbuf.c \
 	third-party/net80211/sys/crypto/aes/aes_ct.c \
 	third-party/net80211/sys/crypto/aes/aes_ct_dec.c \
-	third-party/net80211/sys/crypto/aes/aes_ct_enc.c \
+	third-party/net80211/sys/crypto/aes/aes_ct_enc.c
+
+# The USB host stack (usbdi + hub + ehci/xhci) and the urtwn driver.
+NET80211_USB_SRCS := \
 	third-party/net80211/sys/dev/usb/usbdi.c \
 	third-party/net80211/sys/dev/usb/usbdi_util.c \
 	third-party/net80211/sys/dev/usb/usb_mem.c \
@@ -176,6 +205,10 @@ NET80211_BSD_SRCS := \
 	third-party/net80211/sys/dev/usb/ehci.c \
 	third-party/net80211/sys/dev/usb/xhci.c
 
+ifeq ($(WLAN_HAVE_USB),1)
+NET80211_BSD_SRCS += $(NET80211_USB_SRCS)
+endif
+
 NET80211_IMPL_SRCS := \
 	port/adapters/net80211/aes_impl_compat.c \
 	port/adapters/net80211/bsd_bus.c \
@@ -185,19 +218,32 @@ NET80211_IMPL_SRCS := \
 	port/adapters/net80211/osal/osal_cmsis_rtos2.c \
 	port/adapters/net80211/osal/firmware_cmsis.c \
 	port/adapters/net80211/net/bsd_mbuf.c \
-	port/adapters/net80211/net/bsd_ifnet.c \
-	port/adapters/net80211/urtwn_reg.c
+	port/adapters/net80211/net/bsd_ifnet.c
 
 NET80211_ADAPTER_SRCS := \
 	port/adapters/net80211/wlan_adapter.c \
 	port/adapters/net80211/wlan_console.c \
-	port/adapters/net80211/wlan_cmds.c \
+	port/adapters/net80211/wlan_cmds.c
+
+# One line, one adapter TU plus its platform glue and firmware blob: the USB
+# side of the wlan line, and the PCIe side (native DW host + iwm).
+NET80211_USB_ADAPTER_SRCS := \
 	port/adapters/net80211/usb_platform.c \
 	port/adapters/net80211/usb_xhci_platform.c \
-	port/adapters/net80211/fw_rtl8188eufw.c \
+	port/adapters/net80211/fw_rtl8188eufw.c
+
+NET80211_PCIE_ADAPTER_SRCS := \
 	port/adapters/net80211/fw_iwlwifi7260.c \
 	port/adapters/net80211/iwm_reg.c \
 	port/adapters/net80211/pcie_glue.c
+
+ifeq ($(WLAN_HAVE_USB),1)
+NET80211_IMPL_SRCS    += port/adapters/net80211/urtwn_reg.c
+NET80211_ADAPTER_SRCS += $(NET80211_USB_ADAPTER_SRCS)
+endif
+ifeq ($(WLAN_HAVE_PCIE),1)
+NET80211_ADAPTER_SRCS += $(NET80211_PCIE_ADAPTER_SRCS)
+endif
 
 NET80211_INC := -Iinclude \
 	-Iport/adapters/net80211/compat/netbsd \
