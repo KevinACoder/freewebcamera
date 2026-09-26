@@ -330,6 +330,11 @@ void wlan_iwm_dump(void) {
 			    iwm_dbg_notif_unhandled,
 			    iwm_dbg_last_unhandled_code);
 		}
+		{
+			extern void iwm_scan_ev_dump(void);
+
+			iwm_scan_ev_dump();
+		}
 	}
 }
 

@@ -654,9 +654,14 @@ sync: modules
 		[ -d third-party/$$comp ] || { echo "skip    $$comp (no submodule)"; continue; }; \
 		if [ -n "$$(git -C third-party/$$comp status --porcelain)" ]; then \
 			branch=$$(git -C third-party/$$comp rev-parse --abbrev-ref HEAD); \
-			if [ "$$branch" = "fwc/$$comp" ] && [ "$$(git -C third-party/$$comp rev-list --count fwc/$$comp^ 2>/dev/null)" = "1" ]; then \
-				pin=$$(git -C third-party/$$comp rev-parse --short fwc/$$comp^); \
-				echo "rebase   $$comp materialization onto pin $$pin"; \
+			if [ "$$branch" = "fwc/$$comp" ]; then \
+				pin=$$(git -C third-party/$$comp rev-list HEAD | while read c; do \
+					s=$$(git -C third-party/$$comp log --format=%s -1 $$c); \
+					case "$$s" in \
+					"fwc: materialize"*) ;; \
+					*) echo $$c; break ;; \
+					esac; done | head -1); \
+				echo "rebase   $$comp materialization onto pin $$(echo $$pin | cut -c1-10)"; \
 				git -C third-party/$$comp checkout -q -f --detach $$pin; \
 				for p in patches/$$comp/*.patch; do \
 					git -C third-party/$$comp apply "$$PWD/$$p" || exit 1; \
