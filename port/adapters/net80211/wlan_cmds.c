@@ -114,7 +114,9 @@ static int cmd_wlan(int argc, char **argv)
 				   "(run: wlan start)\r\n");
 		}
 		wlan_port_status_dump();
+#if WLAN_NIC_USB
 		usb_platform_dump();
+#endif
 		return 0;
 	}
 
@@ -139,6 +141,7 @@ static int cmd_wlan(int argc, char **argv)
 		return 0;
 	}
 
+#if WLAN_NIC_USB
 	if (argc >= 2 && strcmp(argv[1], "dump") == 0) {
 		usb_platform_dump();
 		usb_platform_qh_dump();
@@ -181,6 +184,7 @@ static int cmd_wlan(int argc, char **argv)
 		return 0;
 	}
 
+	/* the urtwn driver's register windows */
 	if (argc >= 2 && strcmp(argv[1], "reg") == 0) {
 		unsigned long addr;
 		unsigned val;
@@ -213,6 +217,7 @@ static int cmd_wlan(int argc, char **argv)
 			   "wlan reg write <hexaddr> <hexval> | wlan reg txq\r\n");
 		return 0;
 	}
+#endif /* WLAN_NIC_USB */
 
 	if (argc >= 2 && strcmp(argv[1], "calib") == 0) {
 		if (argc > 2) {
@@ -237,10 +242,12 @@ static int cmd_wlan(int argc, char **argv)
 
 	/* scan state machine + channel bitmap + host cmd ring: the
 	 * parked-first-scan state in one screen */
+#if WLAN_NIC_USB
 	if (argc >= 2 && strcmp(argv[1], "chanmap") == 0) {
 		wlan_urtwn_chanmap_dump();
 		return 0;
 	}
+#endif
 
 	if (argc >= 2 && strcmp(argv[1], "cv") == 0) {
 		csh_printf(csh, "wlan cv: signals=%u dropped=%u "
@@ -252,6 +259,7 @@ static int cmd_wlan(int argc, char **argv)
 
 	/* runtime usb history level (wlan_start pins it to 10; the full
 	 * ring flood drowns the interesting records) */
+#if WLAN_NIC_USB
 	if (argc >= 2 && strcmp(argv[1], "usbdebug") == 0) {
 		extern int usbdebug;
 
@@ -261,6 +269,7 @@ static int cmd_wlan(int argc, char **argv)
 		csh_printf(csh, "wlan: usbdebug=%d\r\n", usbdebug);
 		return 0;
 	}
+#endif
 
 	csh_printf(csh,
 		   "usage: wlan start | scan [seconds] | status | dump | "

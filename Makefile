@@ -34,6 +34,27 @@ SIZE    := $(CROSS_COMPILE)size
 BUILD   := build/$(BOARD)-threadx-uc
 TARGET  := $(BUILD)/threadx-uc
 
+# Wireless NIC line selection (build-time, not runtime): which wireless
+# stacks this image carries at all.  A NIC that is not built contributes no
+# code, no threads, no buffers and no bring-up, so a driver being debugged
+# is never coupled to the other one - neither through the shared 4 MB heap
+# (iwm's RX ring alone is ~1.1 MB) nor through the bus bring-up order.
+#   make WLAN_NIC=iwm      PCIe line only:  DW host + iwm + iwlwifi ucode
+#   make WLAN_NIC=urtwn    USB line only:   netbsd usb di/hcd + urtwn + rtl fw
+#   make WLAN_NIC=rtw8189f SDIO line only:  dw-mmc host + fsl sdmmc + rtw8189f
+#   make WLAN_NIC=all      all three (default)
+# WLAN_NIC_USB/WLAN_NIC_PCIE/WLAN_NIC_SDIO reach the sources as defines; the
+# gated source lists below are the other half of the mechanism.  Switching
+# WLAN_NIC needs `make clean` first: the -D defines are not tracked in the
+# dependency files, so stale objects from the previous selection survive.
+WLAN_NIC ?= all
+ifeq ($(filter $(WLAN_NIC),iwm urtwn rtw8189f all),)
+$(error WLAN_NIC must be one of: iwm, urtwn, rtw8189f, all)
+endif
+WLAN_HAVE_USB  := $(if $(filter $(WLAN_NIC),urtwn all),1,0)
+WLAN_HAVE_PCIE := $(if $(filter $(WLAN_NIC),iwm all),1,0)
+WLAN_HAVE_SDIO := $(if $(filter $(WLAN_NIC),rtw8189f all),1,0)
+
 # Debug-carrier optimization profile (D57): symbols plus near-no optimization,
 # so gdb's line table places breakpoints on addresses code actually reaches.
 # UC_OPT=-O0 reproduces the reference SDK's CONFIG_DEBUG_NOOPT exact-noopt shape.
@@ -51,7 +72,9 @@ CFLAGS := $(UC_OPT) -g3 -std=c11 -Wall -Wextra \
 	-march=armv8-a -mgeneral-regs-only -mstrict-align -mno-outline-atomics \
 	-DGUEST -DEL1 -DSMP_CORES=1 \
 	-DTHREADX_BUILD=1 -DTHREADX_UP_BUILD=1 \
-	-DTX_INCLUDE_USER_DEFINE_FILE
+	-DTX_INCLUDE_USER_DEFINE_FILE \
+	-DWLAN_NIC_USB=$(WLAN_HAVE_USB) -DWLAN_NIC_PCIE=$(WLAN_HAVE_PCIE) \
+	-DWLAN_NIC_SDIO=$(WLAN_HAVE_SDIO)
 
 LDFLAGS = -nostdlib -static -T port/board/$(BOARD)/$(BOARD).ld \
 	-Wl,--build-id=none -Wl,--no-warn-rwx-segments -Wl,-Map=$(TARGET).map
@@ -125,16 +148,24 @@ ADAPTER_SRCS := \
 	port/adapters/netutils/iperf3_port.c \
 	port/adapters/netutils/iperf3_cmd.c \
 	port/adapters/netutils/ntp_port.c \
-	port/adapters/netutils/telnet_port.c \
-	port/adapters/pcie/pcie_cmds.c \
+	port/adapters/netutils/telnet_port.c
 
-DRIVER_SRCS := drivers/uart_ns16550.c \
-	drivers/dwc_pcie.c \
-	drivers/pci_msix.c
+DRIVER_SRCS := drivers/uart_ns16550.c
 
-# Board data for the PCIe controllers (D45 shape: drivers/ keeps the
-# platform-agnostic IP, the coordinates live with the board).
-BOARD_SRCS := port/board/$(BOARD)/rk3568_pcie.c
+# Board data, per line (D45 shape: drivers/ keeps the platform-agnostic IP,
+# the coordinates live with the board).
+BOARD_SRCS :=
+BOARD_PCIE_SRCS := port/board/$(BOARD)/rk3568_pcie.c
+
+ifeq ($(WLAN_HAVE_PCIE),1)
+ADAPTER_SRCS += port/adapters/pcie/pcie_cmds.c
+DRIVER_SRCS  += drivers/dwc_pcie.c drivers/pci_msix.c
+BOARD_SRCS   += $(BOARD_PCIE_SRCS)
+endif
+ifeq ($(WLAN_HAVE_SDIO),1)
+DRIVER_SRCS  += drivers/dwc_mmc.c
+BOARD_SRCS   += port/board/$(BOARD)/rk3568_sdmmc.c
+endif
 
 APP_SRCS := app/main.c app/dbg_scenario.c
 
@@ -164,7 +195,10 @@ NET80211_BSD_SRCS := \
 	third-party/net80211/sys/crypto/aes/aes_ccm_mbuf.c \
 	third-party/net80211/sys/crypto/aes/aes_ct.c \
 	third-party/net80211/sys/crypto/aes/aes_ct_dec.c \
-	third-party/net80211/sys/crypto/aes/aes_ct_enc.c \
+	third-party/net80211/sys/crypto/aes/aes_ct_enc.c
+
+# The USB host stack (usbdi + hub + ehci/xhci): the urtwn line's bus.
+NET80211_USB_SRCS := \
 	third-party/net80211/sys/dev/usb/usbdi.c \
 	third-party/net80211/sys/dev/usb/usbdi_util.c \
 	third-party/net80211/sys/dev/usb/usb_mem.c \
@@ -176,6 +210,10 @@ NET80211_BSD_SRCS := \
 	third-party/net80211/sys/dev/usb/ehci.c \
 	third-party/net80211/sys/dev/usb/xhci.c
 
+ifeq ($(WLAN_HAVE_USB),1)
+NET80211_BSD_SRCS += $(NET80211_USB_SRCS)
+endif
+
 NET80211_IMPL_SRCS := \
 	port/adapters/net80211/aes_impl_compat.c \
 	port/adapters/net80211/bsd_bus.c \
@@ -185,19 +223,40 @@ NET80211_IMPL_SRCS := \
 	port/adapters/net80211/osal/osal_cmsis_rtos2.c \
 	port/adapters/net80211/osal/firmware_cmsis.c \
 	port/adapters/net80211/net/bsd_mbuf.c \
-	port/adapters/net80211/net/bsd_ifnet.c \
-	port/adapters/net80211/urtwn_reg.c
+	port/adapters/net80211/net/bsd_ifnet.c
 
 NET80211_ADAPTER_SRCS := \
 	port/adapters/net80211/wlan_adapter.c \
 	port/adapters/net80211/wlan_console.c \
-	port/adapters/net80211/wlan_cmds.c \
+	port/adapters/net80211/wlan_cmds.c
+
+# One line, one driver TU set: the bus glue + platform + firmware blob of
+# each wireless line (the driver .c compiles inside the *_reg.c wrapper so
+# its static CFATTACH glue stays intact).
+NET80211_USB_ADAPTER_SRCS := \
 	port/adapters/net80211/usb_platform.c \
 	port/adapters/net80211/usb_xhci_platform.c \
-	port/adapters/net80211/fw_rtl8188eufw.c \
+	port/adapters/net80211/fw_rtl8188eufw.c
+
+NET80211_PCIE_ADAPTER_SRCS := \
 	port/adapters/net80211/fw_iwlwifi7260.c \
 	port/adapters/net80211/iwm_reg.c \
 	port/adapters/net80211/pcie_glue.c
+
+# The SDIO line (feat/net80211_sdio): the bus claim layer + rtw8189f + the
+# firmware blob, filled in by that line.
+NET80211_SDIO_ADAPTER_SRCS :=
+
+ifeq ($(WLAN_HAVE_USB),1)
+NET80211_IMPL_SRCS    += port/adapters/net80211/urtwn_reg.c
+NET80211_ADAPTER_SRCS += $(NET80211_USB_ADAPTER_SRCS)
+endif
+ifeq ($(WLAN_HAVE_PCIE),1)
+NET80211_ADAPTER_SRCS += $(NET80211_PCIE_ADAPTER_SRCS)
+endif
+ifeq ($(WLAN_HAVE_SDIO),1)
+NET80211_ADAPTER_SRCS += $(NET80211_SDIO_ADAPTER_SRCS)
+endif
 
 NET80211_INC := -Iinclude \
 	-Iport/adapters/net80211/compat/netbsd \
@@ -402,6 +461,44 @@ WPA_INC := -Iport/adapters/wpa_supplicant/shim \
 WPA_CFG := -w -include stdarg.h \
 	-include port/adapters/wpa_supplicant/wpa_port_config.h
 
+# --- fsl_sdmmc + dw-mmc world (feat/net80211_sdio) ------------------------------
+# The NXP fsl_sdmmc protocol layer (submodule third-party/sdmmc, see
+# IMPORT-INFO.md) compiles as a frozen import; the SDK headers it expects
+# (fsl_common.h / fsl_os_abstraction.h / fsl_sdmmc_host.h) come from the
+# adapter's shadow directory, which the include order places ahead of the
+# vendored tree. The SD/eMMC card modules ride along exactly as the frozen
+# workspace compiled them - SDIO_Init is the only card entry the adapter
+# takes, hostType picks the controller, and the unmoved modules stay dead
+# code rather than a fidelity risk. The host controller is first-party
+# (drivers/dwc_mmc.c behind include/dwmmc.h); the SDMMCHOST_* surface over
+# it is the adapter's sdmmc_host_dwmmc.c.
+SDMMC_SRCS := \
+	third-party/sdmmc/common/fsl_sdmmc_common.c \
+	third-party/sdmmc/mmc/fsl_mmc.c \
+	third-party/sdmmc/sd/fsl_sd.c \
+	third-party/sdmmc/sdio/fsl_sdio.c
+
+SDMMC_ADAPTER_SRCS := \
+	port/adapters/sdmmc/sdmmc_osa.c \
+	port/adapters/sdmmc/sdmmc_dispatch.c \
+	port/adapters/sdmmc/sdmmc_adapter.c \
+	port/adapters/sdmmc/sdmmc_host_dwmmc.c \
+	port/adapters/sdmmc/sdmmc_glue_irq.c \
+	port/adapters/sdmmc/sdmmc_cmds.c
+
+SDMMC_INC := -Iport/adapters/sdmmc/shadow \
+	-Iport/adapters/sdmmc \
+	-Ithird-party/sdmmc/common \
+	-Ithird-party/sdmmc/sd \
+	-Ithird-party/sdmmc/osa \
+	-Ithird-party/sdmmc/mmc \
+	-Ithird-party/sdmmc/sdio
+
+ifeq ($(WLAN_HAVE_SDIO),1)
+SDMMC_OBJS := $(addprefix $(BUILD)/,$(SDMMC_SRCS:.c=.o)) \
+	$(addprefix $(BUILD)/,$(SDMMC_ADAPTER_SRCS:.c=.o))
+endif
+
 # Board assembly is shared; the kernel-side assembly is the seam itself:
 # tx_vectors.S (runtime vector table + SPSel entry stubs) plus the kernel
 # port's own assembly.
@@ -422,7 +519,7 @@ WPA_OBJS := $(addprefix $(BUILD)/,$(WPA_CORE_SRCS:.c=.o) $(WPA_PORT_SRCS:.c=.o))
 OBJS := $(addprefix $(BUILD)/,$(C_SRCS:.c=.o)) $(addprefix $(BUILD)/,$(ASM_SRCS:.S=.o)) \
 	$(addprefix $(BUILD)/,$(NET80211_BSD_SRCS:.c=.o)) \
 	$(NET80211_IMPL_OBJS) $(NET80211_ADAPTER_OBJS) \
-	$(LWIP_OBJS) $(WPA_OBJS) $(NETUTILS_OBJS)
+	$(LWIP_OBJS) $(WPA_OBJS) $(NETUTILS_OBJS) $(SDMMC_OBJS)
 DEPS := $(OBJS:.o=.d)
 
 # Kernel and adapters see the vendored trees; board, drivers and app do not.
@@ -445,6 +542,18 @@ $(NET80211_ADAPTER_OBJS): $(BUILD)/port/adapters/net80211/%.o: port/adapters/net
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(NET80211_INC) \
 		$(NET80211_BSD_CFG) -MMD -MP -c $< -o $@
+
+# fsl_sdmmc protocol layer: frozen NXP import, warnings silenced (-w); the
+# shadow SDK headers come first so they win over anything vendored.
+$(BUILD)/third-party/sdmmc/%.o: third-party/sdmmc/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(SDMMC_INC) -w -MMD -MP -c $< -o $@
+
+# The sdmmc adapter: board primitives + the dw-mmc driver interface
+# (include/dwmmc.h) + the shadow/vendored fsl headers.
+$(BUILD)/port/adapters/sdmmc/%.o: port/adapters/sdmmc/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(SDMMC_INC) -MMD -MP -c $< -o $@
 
 # lwIP world: the pinned upstream core compiles in its own include world
 # (adapter shadows first, so lwipopts.h/arch/*.h win), warnings silenced.
@@ -579,6 +688,16 @@ modules:
 	git -C third-party/wpa_supplicant sparse-checkout set \
 		src wpa_supplicant || \
 		echo 'note: wpa_supplicant sparse-checkout not set (kept full checkout)'
+	# Non-cone patterns: the full fsl_sdmmc tree carries the standalone
+	# SDK's common/fsl_common.h and osa/fsl_os_abstraction.h, whose
+	# relative-quote lookup (from a same-directory includer) beats the
+	# shadow include path (the frozen workspace vendored the tree WITHOUT
+	# those two files for exactly this reason). The shadow copies are what
+	# this integration compiles against; the vendored files stay in the
+	# submodule, just not in the working tree.
+	git -C third-party/sdmmc sparse-checkout set --no-cone \
+		'/*' '!/common/fsl_common.h' '!/osa/fsl_os_abstraction.h' || \
+		echo 'note: sdmmc sparse-checkout not set (kept full checkout)'
 	@for p in patches/*/*.patch; do \
 		[ -e "$$p" ] || continue; \
 		comp=$$(printf '%s' "$$p" | cut -d/ -f2); \

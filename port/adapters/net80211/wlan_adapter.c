@@ -61,12 +61,18 @@ void *wlan_port_thread_create(void (*run)(void *), void *arg) {
 /* ------------------------------------------------------------------ */
 /* firmware: the blobs embedded at build time (generated from the
  * net80211 submodule's realtek dist by tools/gen_firmware_array.py,
- * and the Intel 7260 ucode carried alongside them) */
+ * and the Intel 7260 ucode carried alongside them). Each line's
+ * bring-up compiles only when the image carries it (WLAN_NIC at
+ * build time - see the Makefile block). */
 
+#if WLAN_NIC_USB
 extern const uint8_t rtl8188eufw_data[];
 extern const size_t rtl8188eufw_size;
+#endif
 
+#if WLAN_NIC_PCIE
 extern int pcie_glue_init(void);
+#endif
 
 /* ------------------------------------------------------------------ */
 
@@ -84,6 +90,7 @@ int wlan_start(void) {
 	}
 	wlan_osal_cmsis_init();
 	wlan_console_ready();
+#if WLAN_NIC_USB
 		/* the netbsd usb history log level for the bring-up rounds
 		 * (ehci's level comes from EHCI_DEBUG_DEFAULT) */
 		{
@@ -96,6 +103,8 @@ int wlan_start(void) {
 		printf("wlan: firmware registration failed\n");
 		return -1;
 	}
+#endif
+#if WLAN_NIC_PCIE
 	{
 		extern const uint8_t iwlwifi7260_17_ucode_data[];
 		extern const size_t iwlwifi7260_17_ucode_size;
@@ -107,24 +116,31 @@ int wlan_start(void) {
 			return -1;
 		}
 	}
+#endif
 
 	/* platform power-up + ehci_init + config_found: the enumeration,
 	 * hub exploration and urtwn attach (with its firmware load) run
 	 * on the calling thread and the threads the chain spawns. */
+#if WLAN_NIC_USB
 	if (usb_platform_init() != 0) {
 		printf("wlan: usb platform init failed\n");
 		return -1;
 	}
+#endif
 	/* the pcie world runs after the usb line: usb keeps its proven
 	 * boot order, and the adapter registry simply prefers whichever
 	 * chip attached first (unplug the USB dongle to make the PCIe
 	 * line the active one).  A pcie failure must not flip the
 	 * started flag back - the usb world is already up and a re-run
 	 * would re-init the EHCI/xHCI hosts. */
+#if WLAN_NIC_PCIE
 	if (pcie_glue_init() != 0) {
 		printf("wlan: pcie glue init failed (usb line stays up;"
 		    " reboot to retry pcie)\n");
 	}
+#endif
+	/* the SDIO line (rtw8189f over dw-mmc/fsl_sdmmc) plugs in here in
+	 * its own feat branch (feat/net80211_sdio). */
 	wlan_started = 1;
 	return 0;
 }
