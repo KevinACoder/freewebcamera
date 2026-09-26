@@ -11,7 +11,7 @@
 
 | File | Deviations from upstream |
 |---|---|
-| `ping/ping.c` | none |
+| `ping/ping.c` | one fix: `cmd_ping` now honors the optional count argument (`ping <host> 20`); upstream hardcoded 4 and ignored `argv[2]`. The wireless acceptance runs use the count form as their ping budget. Board-proven 2026-09-26 (SDIO line). |
 | `tftp/tftp.h` | none |
 | `tftp/tftp_client.c` | none |
 | `tftp/tftp_server.c` | none |

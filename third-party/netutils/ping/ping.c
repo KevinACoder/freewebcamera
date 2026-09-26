@@ -229,7 +229,14 @@ int cmd_ping(int argc, char **argv)
 {
     if (argc == 1)
     {
-        rt_kprintf("Please input: ping <host address>\n");
+        rt_kprintf("Please input: ping <host address> [count]\n");
+    }
+    else if (argc == 3)
+    {
+        /* PROVENANCE deviation: the acceptance runs need the count form
+         * ("ping <host> 20", the old workspace's ping budget); upstream
+         * hardcoded 4 and ignored argv[2]. */
+        ping(argv[1], (rt_uint32_t) atoi(argv[2]), 0);
     }
     else
     {
@@ -238,6 +245,6 @@ int cmd_ping(int argc, char **argv)
 
     return 0;
 }
-MSH_CMD_EXPORT_ALIAS(cmd_ping, ping, ping network host);
+MSH_CMD_EXPORT_ALIAS(cmd_ping, ping, ping network host [count]);
 #endif
 #endif /* PKG_NETUTILS_PING */
