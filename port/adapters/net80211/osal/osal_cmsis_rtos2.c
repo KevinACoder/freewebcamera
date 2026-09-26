@@ -804,27 +804,81 @@ static osMutexId_t wlan_ser_mtx;
 static osThreadId_t wlan_ser_owner;
 static int wlan_ser_depth;
 
+/* Operation ring: an unlock that does not match the owner is a locking
+ * bug in the port, and the only useful thing to print is who locked and
+ * unlocked last (with the caller's address) plus the live owner/depth. */
+struct wlan_ser_op {
+	void *self;
+	void *owner;
+	const char *op;
+	unsigned long ra;
+	int depth;
+};
+
+#define WLAN_SER_OPS 12
+static struct wlan_ser_op wlan_ser_ops[WLAN_SER_OPS];
+static unsigned wlan_ser_op_n;
+
+static void wlan_ser_op(const char *op, void *self, int depth) {
+	struct wlan_ser_op *e = &wlan_ser_ops[wlan_ser_op_n++ % WLAN_SER_OPS];
+
+	e->self = self;
+	e->owner = wlan_ser_owner;
+	e->op = op;
+	e->ra = (unsigned long) __builtin_return_address(0);
+	e->depth = depth;
+}
+
+static void wlan_ser_dump(void) {
+	char msg[128];
+	unsigned i;
+
+	(void)snprintf(msg, sizeof(msg),
+		       "wlan ser: owner=%p depth=%d self=%p\n",
+		       (void *) wlan_ser_owner, wlan_ser_depth,
+		       (void *) osThreadGetId());
+	board_early_print(msg);
+	for (i = 0; i < WLAN_SER_OPS; i++) {
+		const struct wlan_ser_op *e =
+		    &wlan_ser_ops[(wlan_ser_op_n + i) % WLAN_SER_OPS];
+
+		if (e->op == NULL) {
+			continue;
+		}
+		(void)snprintf(msg, sizeof(msg),
+			       "wlan ser[%u] %s self=%p owner=%p d=%d ra=%08lx\n",
+			       i, e->op, e->self, e->owner, e->depth, e->ra);
+		board_early_print(msg);
+	}
+}
+
 void wlan_port_serializer_lock(void) {
 	osThreadId_t self = osThreadGetId();
 
 	if (wlan_ser_owner == self) {
 		wlan_ser_depth++;
+		wlan_ser_op("lock+", self, wlan_ser_depth);
 		return;
 	}
 	osMutexAcquire(wlan_ser_mtx, osWaitForever);
 	wlan_ser_owner = self;
 	wlan_ser_depth = 1;
+	wlan_ser_op("lock", self, 1);
 }
 
 void wlan_port_serializer_unlock(void) {
 	osThreadId_t self = osThreadGetId();
 
 	if (wlan_ser_owner != self || wlan_ser_depth <= 0) {
+		wlan_ser_op("unlock!", self, wlan_ser_depth);
+		wlan_ser_dump();
 		panic("wlan serializer unlock by non-owner");
 	}
 	if (--wlan_ser_depth > 0) {
+		wlan_ser_op("unlock-", self, wlan_ser_depth);
 		return;
 	}
+	wlan_ser_op("unlock", self, 0);
 	wlan_ser_owner = NULL;
 	osMutexRelease(wlan_ser_mtx);
 }
