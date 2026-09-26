@@ -596,9 +596,20 @@ $(TARGET).bin: $(TARGET).elf
 # binary on the TFTP root and makes a failed rebuild look like a boot failure.
 .DEFAULT_GOAL := all
 
-.PHONY: all deploy modules sync gates clean
+.PHONY: all deploy modules sync gates clean FORCE
 
-all: $(TARGET).bin
+# WLAN_NIC rides the command line, so make cannot see a switch through
+# header dependencies: an incremental tree then links half iwm, half
+# urtwn objects and dies on undefined iwm_ca/usb_cd (2026-09-27). Make
+# the mismatch a hard, self-explaining error instead.
+build/.nic: FORCE
+	@mkdir -p $(BUILD); printf '%s' "$(WLAN_NIC)" > $@.new; \
+	if [ -f $@ ] && ! cmp -s $@ $@.new; then \
+		echo "ERROR: build tree holds WLAN_NIC=$$(cat $@) objects; run 'make clean' before switching to WLAN_NIC=$(WLAN_NIC)"; \
+		rm -f $@.new; exit 1; \
+	fi; mv -f $@.new $@
+
+all: build/.nic $(TARGET).bin
 
 # Copy to the TFTP root under the name the board's boot profile expects
 # (oslab `rtos` profile -> rtos.bin; the banner tells the images apart).

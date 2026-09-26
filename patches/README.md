@@ -106,5 +106,16 @@ Current state:
     REPLY_TX completions reaching the rate-control statistics, per-frame
     retry sums, and where unread notifications land (garbage filter vs
     unhandled code).
+  - `0014-iwm-scan-event-trace.patch` — a 32-entry scan-lifecycle event
+    ring (newstate/force-init/scan request/completion/SCANNING
+    transitions/stop/init) dumped at the `fatal:` label and from
+    `wlan status`; this is what pinned the 0x090A fatal to the
+    assoc-failure INIT downgrade feeding a scan command after a soft
+    reset.
+  - `0015-iwm-init-downgrade-full-reset.patch` — every downgrade into
+    INIT now takes the full stop+init road the forced-INIT transition
+    used; the soft reset (stop_device + init_hw) left the firmware's
+    scan engine unready and the supplicant's immediate rescan asserted
+    0x090A there.
 - `threadx/`, `cherrysh/`, `cherryrb/`, `lwip/` — no patches; used
   byte-identical to their pins.

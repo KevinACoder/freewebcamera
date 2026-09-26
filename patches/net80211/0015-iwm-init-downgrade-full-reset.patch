@@ -1,0 +1,38 @@
+diff --git a/sys/dev/pci/if_iwm.c b/sys/dev/pci/if_iwm.c
+index 5c12248..4fdde23 100644
+--- a/sys/dev/pci/if_iwm.c
++++ b/sys/dev/pci/if_iwm.c
+@@ -6336,18 +6336,21 @@ iwm_do_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
+ 		 * puts the driver into AUTH state. This will fail with this
+ 		 * driver so bring the FSM from RUN to SCAN in this case.
+ 		 */
+-		if (nstate != IEEE80211_S_INIT) {
+-			DPRINTF(("Force transition to INIT; MGT=%d\n", arg));
+-			iwm_scan_ev('F', nstate);
+-			/* Always pass arg as -1 since we can't Tx right now. */
+-			sc->sc_newstate(ic, IEEE80211_S_INIT, -1);
+-			iwm_stop(ifp, 0);
+-			iwm_init(ifp);
+-			return 0;
+-		}
+-
+-		iwm_stop_device(sc);
+-		iwm_init_hw(sc);
++		/*
++		 * Take the full stop+init road for every downgrade into
++		 * INIT, INIT included: the soft reset (stop_device +
++		 * init_hw) leaves the firmware's scan engine unready, and
++		 * the first scan command after an assoc-failure downgrade
++		 * asserted 0x090A there (LMAC error table, scan family).
++		 * The supplicant's 1 s scan backoff absorbs the reload.
++		 */
++		DPRINTF(("Force transition to INIT; MGT=%d\n", arg));
++		iwm_scan_ev('F', nstate);
++		/* Always pass arg as -1 since we can't Tx right now. */
++		sc->sc_newstate(ic, IEEE80211_S_INIT, -1);
++		iwm_stop(ifp, 0);
++		iwm_init(ifp);
++		return 0;
+ 	}
+ 
+ 	switch (nstate) {
