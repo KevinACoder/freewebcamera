@@ -22,14 +22,36 @@
 #include <stdint.h>
 #include <stddef.h>
 
-typedef struct { int unused; } bus_space_tag_t;
+/* ------------------------------------------------------------------
+ * bus_space(9): little-endian device, little-endian host.
+ */
+
 typedef uintptr_t bus_space_handle_t;
 typedef uintptr_t bus_addr_t;
 typedef uintptr_t bus_size_t;
 
-/* ------------------------------------------------------------------
- * bus_space(9): little-endian device, little-endian host.
+/* The tag is a pointer to a method struct (the NetBSD shape, reduced to
+ * what the imported code reaches): pcihost_fdt copies a tag's struct
+ * and replaces bs_map to translate PCI bus addresses through the ranges
+ * window, so bs_map must be real indirection.  The register accessors
+ * stay direct volatile loads on the identity-mapped handle - the USB
+ * world has always discarded the tag.
  */
+
+struct bus_space {
+	void *bs_cookie;
+	int	(*bs_map)(void *, bus_addr_t, bus_size_t, int,
+		    bus_space_handle_t *);
+	void	(*bs_unmap)(void *, bus_space_handle_t, bus_size_t);
+};
+
+typedef struct bus_space *bus_space_tag_t;
+
+/* the singleton tag every bus backend hands out (bsd_bus.c) */
+extern bus_space_tag_t wlan_bus_space_tag;
+
+/* pci.c probes this around its dmat fields */
+#define	BUS_DMA_TAG_VALID(t)	((t) != NULL)
 
 static inline uint8_t bus_space_read_1(bus_space_tag_t t,
 	bus_space_handle_t h, bus_size_t o) {
@@ -96,6 +118,30 @@ static inline int bus_space_subregion(bus_space_tag_t t,
 
 #define BUS_SPACE_BARRIER_READ  0x01
 #define BUS_SPACE_BARRIER_WRITE 0x02
+
+/* bus_space_map flags (the subset pcihost_fdt/rk_pcie use) */
+#define	BUS_SPACE_MAP_CACHEABLE		0x01
+#define	BUS_SPACE_MAP_LINEAR		0x02
+#define	BUS_SPACE_MAP_PREFETCHABLE	0x04
+#define	BUS_SPACE_MAP_NONPOSTED		0x08
+
+/* identity-map window-checked mapping, implemented by the bus backend
+ * (bsd_bus.c): the kernel runs identity-mapped, so a handle is the
+ * physical address, but only windows the MMU actually covers are
+ * granted - an unmapped window faults loudly by design (mmu.c).
+ * Dispatch goes through the tag so pcihost_fdt's per-bus translation
+ * wrappers compose. */
+static inline int bus_space_map(bus_space_tag_t t, bus_addr_t addr,
+	bus_size_t size, int flags, bus_space_handle_t *hp) {
+	return t->bs_map(t->bs_cookie, addr, size, flags, hp);
+}
+
+static inline void bus_space_unmap(bus_space_tag_t t,
+	bus_space_handle_t h, bus_size_t size) {
+	if (t->bs_unmap != NULL) {
+		t->bs_unmap(t->bs_cookie, h, size);
+	}
+}
 
 /* dsb-backed barrier; implemented by the PCIe backend */
 void wlan_bus_space_barrier(bus_space_tag_t t, bus_space_handle_t h,

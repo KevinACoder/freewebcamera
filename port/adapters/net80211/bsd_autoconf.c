@@ -252,11 +252,28 @@ static struct cfdata cfdata_urtwn = {
 	.cf_fstate = FSTATE_STAR, .cf_loc = dlocs_zero,
 };
 
+/* the pcie endpoint: the native glue (pcie_glue.c) drives the DesignWare
+ * host directly through include/pcie.h and config_founds only the radio
+ * driver - no fdt world, no pci bus core, no ppb descent */
+static device_t iwm_devs[2];
+struct cfdriver iwm_cd = {
+	.cd_devs = iwm_devs,
+	.cd_name = "iwm",
+	.cd_class = DV_DULL,
+	.cd_ndevs = 2,
+};
+
+static struct cfdata cfdata_iwm = {
+	.cf_name = "iwm", .cf_atname = "iwm",
+	.cf_fstate = FSTATE_STAR, .cf_loc = dlocs_zero,
+};
+
 static struct cfentry cfentries[] = {
 	{ "usbus", &cfdata_usb, &usb_cd },
 	{ "usbroothubif", &cfdata_uroothub, &uroothub_cd },
 	{ "usbdevif", &cfdata_uhub, &uhub_cd },
 	{ "usbdevif", &cfdata_urtwn, &urtwn_cd },
+	{ "pci", &cfdata_iwm, &iwm_cd },
 };
 
 /* ------------------------------------------------------------------
@@ -306,6 +323,13 @@ cfattach_lookup(const char *atname)
 	}
 	if (strcmp(atname, "urtwn") == 0) {
 		return __DECONST(struct cfattach *, &urtwn_ca);
+	}
+	if (strcmp(atname, "iwm") == 0) {
+		/* CFATTACH_DECL_NEW(iwm, ...) inside iwm_reg.c's compiled
+		 * import of if_iwm.c */
+		extern const struct cfattach iwm_ca;
+
+		return __DECONST(struct cfattach *, &iwm_ca);
 	}
 	return NULL;
 }

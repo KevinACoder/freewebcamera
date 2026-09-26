@@ -21,7 +21,7 @@
  * Mechanical differences from the embox original, all noted at their site:
  *   - the domain is reached through include/msi.h instead of embox's
  *     arch_setup_msi_irqs hook, because the PCI MSI framework is not vendored
- *     (see drivers/dwc_msix.c for what of it is kept);
+ *     (see drivers/pci_msix.c for what of it is kept);
  *   - LPIs are addressed by raw INTID (8192 + slot) and armed by the caller
  *     through CMSIS IRQ_SetHandler/IRQ_Enable;
  *   - a failed allocation unwinds the events it already mapped, which in
@@ -126,7 +126,7 @@ static int32_t its_msi_allocate(uint32_t rid, uint32_t count,
 		vectors[i].intid = (uint32_t)intid;
 		vectors[i].address = doorbell;
 		/* The event id, which is also the MSI-X table index the PCIe
-		 * side programs. See drivers/dwc_msix.c for why they must be
+		 * side programs. See drivers/pci_msix.c for why they must be
 		 * the same number. */
 		vectors[i].data = i;
 	}

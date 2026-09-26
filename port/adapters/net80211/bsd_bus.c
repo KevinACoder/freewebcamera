@@ -46,7 +46,12 @@ __wlan_barrier(void)
  * the DMA pool: static, identity-mapped, 4096-aligned
  */
 
-#define WLAN_DMA_POOL_BYTES (512 * 1024)
+/* The USB line fits in half a megabyte; iwm does not - its fw load alone
+ * walks ~256 KiB DMA segments and the five TX queues carry their TFD ring,
+ * cmd buffers and scratch from the same pool (the abandoned fdt line died
+ * on "could not allocate TX cmd DMA memory" at 512 KiB). 4 MiB keeps the
+ * whole radio world comfortably inside the 96 MiB image RAM window. */
+#define WLAN_DMA_POOL_BYTES (4 * 1024 * 1024)
 
 static uint8_t wlan_dma_pool[WLAN_DMA_POOL_BYTES]
     __attribute__((aligned(4096)));
@@ -77,6 +82,61 @@ wlan_bus_space_barrier(bus_space_tag_t t, bus_space_handle_t h,
 	(void) t; (void) h; (void) o; (void) len; (void) flags;
 	__wlan_barrier();
 }
+
+/* ------------------------------------------------------------------
+ * bus_space(9): identity-map window-checked mapping
+ */
+
+/*
+ * The windows this port grants.  Everything below 4 GiB sits in the
+ * L1[3] Device window (mmu.c); the DesignWare DBI frames live above
+ * 4 GiB in the dedicated L2 pages board_conf.h switches on.  A request
+ * outside these windows is refused - the mapping would fault anyway,
+ * and refusing names the mistake at the map call instead of an async
+ * external abort deep inside an attach.
+ */
+static const struct wlan_bus_window {
+	bus_addr_t w_base;
+	bus_addr_t w_end;	/* exclusive */
+} wlan_bus_windows[] = {
+	{ 0xf0000000UL, 0xf0200000UL },	/* pcie ECAM config window */
+	{ 0xf0200000UL, 0xf4000000UL },	/* pcie MEM window (30 MiB + gap) */
+	{ 0xfd000000UL, 0xfe000000UL },	/* SoC low: GIC/CRU/GRF/PMUCRU */
+	{ 0xfe000000UL, 0xff000000UL },	/* peripherals: pcie apb, pcie30phy */
+	{ 0x3c0000000ULL, 0x3c0c00000ULL }, /* DWC DBI frames (pcie2x1/3x2) */
+};
+
+static int
+wlan_bus_space_map_cb(void *cookie, bus_addr_t addr, bus_size_t size,
+	int flags, bus_space_handle_t *hp)
+{
+	size_t n;
+
+	(void) cookie; (void) flags;
+
+	for (n = 0; n < sizeof(wlan_bus_windows) / sizeof(wlan_bus_windows[0]);
+	    n++) {
+		const struct wlan_bus_window *w = &wlan_bus_windows[n];
+
+		if (addr >= w->w_base && addr + size <= w->w_end) {
+			/* identity mapping: the handle is the address */
+			*hp = (bus_space_handle_t) addr;
+			return 0;
+		}
+	}
+	printf("bus: bus_space_map OUT OF WINDOWS addr=%08llx size=%lx\n",
+	    (unsigned long long) addr, (unsigned long) size);
+	return ERANGE;
+}
+
+static struct bus_space wlan_bus_space_store = {
+	.bs_cookie = NULL,
+	.bs_map = wlan_bus_space_map_cb,
+	.bs_unmap = NULL,
+};
+
+/* the singleton tag every bus backend hands out (compat bus.h) */
+bus_space_tag_t wlan_bus_space_tag = &wlan_bus_space_store;
 
 /* ------------------------------------------------------------------
  * bus_dma(9): identity mapping, single-segment
@@ -308,10 +368,29 @@ bus_dmamap_load_mbuf(bus_dma_tag_t tag, bus_dmamap_t map, struct mbuf *m0,
 {
 	(void) tag; (void) flags;
 
-	/* the compat mbuf model is one contiguous cluster per mbuf */
-	map->dm_segs[0].ds_addr = (bus_addr_t) m0;
+	/* The DMA address must be the address the stack reads and writes -
+	 * mtod(m) - i.e. the mbuf's DATA area, not the header.  The compat
+	 * allocation puts the cluster behind the header (m_data = cluster or
+	 * cluster + MH_ALIGN, 256-aligned); a descriptor programmed with the
+	 * header address lands the device's frame ahead of where the driver
+	 * looks, silently: for iwm the RX ring then parsed garbage and the
+	 * uCode ALIVE response was never seen (the interrupt arrived, the
+	 * driver's uc_intr was never set, the firmware load timed out).
+	 * m_data is also the 256-byte alignment the Intel RX descriptors
+	 * require.  The USB line is unaffected - its transfers move data
+	 * through usb_mem blocks and never hand an mbuf address to a master.
+	 */
+	if (m0 != NULL) {
+		map->dm_segs[0].ds_addr = (bus_addr_t)(uintptr_t)
+		    (m0->m_data != NULL ? m0->m_data : (void *) m0);
+		map->dm_segs[0].ds_len = (bus_size_t) m0->m_len;
+		map->dm_mapsize = (bus_size_t) m0->m_len;
+	} else {
+		map->dm_segs[0].ds_addr = 0;
+		map->dm_segs[0].ds_len = 0;
+		map->dm_mapsize = 0;
+	}
 	map->dm_nsegs = 1;
-	map->dm_mapsize = 0;
 	return 0;
 }
 
