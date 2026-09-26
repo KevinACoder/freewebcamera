@@ -30,16 +30,71 @@
 #define MH_ALIGN 256
 #define MH_DMA_PAD 1024
 
+/* --- mbuf block pool -------------------------------------------------------
+ *
+ * NetBSD's MCLGET takes 4 KB clusters from a *fixed* pool sized at boot,
+ * so the receive ring can always re-arm and a transmit can always get its
+ * buffer.  This shim called the general heap for every frame instead, and
+ * that churn (hundreds of 5.4 KB alloc/free pairs per second, forever)
+ * eventually left a free block out of TLSF's free lists - the block chain
+ * and tlsf_check() still look consistent, but no allocation finds the
+ * block any more, so the RX re-arm started failing 100% of the time and
+ * every transmit returned ERR_IF while the heap reported a free block of
+ * exactly the requested size.  A fixed pool has neither the churn nor the
+ * failure mode: blocks are carved once, taken and returned by pointer.
+ *
+ * Sized for the 256-slot iwm RX ring plus headroom for frames in flight
+ * up to the stack and for transmit.
+ */
+#define WLAN_MBUF_BLOCK (sizeof(struct mbuf) + MH_DMA_PAD + MCLBYTES + MH_ALIGN)
+#define WLAN_MBUF_POOL_N 384
+
+static void *wlan_mbuf_pool[WLAN_MBUF_POOL_N];
+static unsigned int wlan_mbuf_pool_free;
+static int wlan_mbuf_pool_ready;
+unsigned int wlan_mbuf_pool_low;	/* low-water mark */
+unsigned int wlan_mbuf_pool_short;	/* requests that found the pool empty */
+unsigned int wlan_mbuf_pool_dups;	/* frees of a block already in the pool */
+
+static void wlan_mbuf_pool_init(void)
+{
+	unsigned int i;
+
+	for (i = 0; i < WLAN_MBUF_POOL_N; i++) {
+		void *p = sysmalloc(WLAN_MBUF_BLOCK);
+
+		if (p == NULL) {
+			break;
+		}
+		wlan_mbuf_pool[i] = p;
+	}
+	wlan_mbuf_pool_free = i;
+	wlan_mbuf_pool_low = i;
+	wlan_mbuf_pool_ready = 1;
+	if (i < WLAN_MBUF_POOL_N) {
+		printf("wlan: mbuf pool only %u of %u blocks "
+		    "(%lu B per block)\n", i, (unsigned) WLAN_MBUF_POOL_N,
+		    (unsigned long) WLAN_MBUF_BLOCK);
+	}
+}
+
 struct mbuf *m_get_impl(int wait, int type, int pkthdr) {
 	struct mbuf *m;
 	uintptr_t cl;
 
-	if (wait == M_DONTWAIT) {
-		/* the embox heap blocks on exhaustion; same call either way */
+	(void) wait;
+
+	if (!wlan_mbuf_pool_ready) {
+		wlan_mbuf_pool_init();
 	}
-	m = sysmalloc(sizeof(struct mbuf) + MH_DMA_PAD + MCLBYTES + MH_ALIGN);
-	if (m == NULL) {
+	if (wlan_mbuf_pool_free == 0) {
+		wlan_mbuf_pool_short++;
 		return NULL;
+	}
+	m = wlan_mbuf_pool[--wlan_mbuf_pool_free];
+	wlan_mbuf_pool[wlan_mbuf_pool_free] = NULL;
+	if (wlan_mbuf_pool_free < wlan_mbuf_pool_low) {
+		wlan_mbuf_pool_low = wlan_mbuf_pool_free;
 	}
 	memset(m, 0, sizeof(struct mbuf));
 
@@ -63,7 +118,22 @@ struct mbuf *m_getcl_impl(int wait, int type, int pkthdr) {
 }
 
 static void m_free_one(struct mbuf *m) {
-	sysfree(m);
+	unsigned int i;
+
+	/* A block that is already in the pool must not go in twice: a
+	 * double free would hand the same buffer to two owners. */
+	for (i = wlan_mbuf_pool_free; i < WLAN_MBUF_POOL_N; i++) {
+		if (wlan_mbuf_pool[i] == m) {
+			wlan_mbuf_pool_dups++;
+			return;
+		}
+	}
+	if (wlan_mbuf_pool_free < WLAN_MBUF_POOL_N) {
+		wlan_mbuf_pool[wlan_mbuf_pool_free++] = m;
+		return;
+	}
+	/* over-full: something freed a block it never got from the pool */
+	wlan_mbuf_pool_dups++;
 }
 
 void m_free_impl(struct mbuf *m) {

@@ -77,5 +77,14 @@ Current state:
     at tens of lines per second.  First 8 lines, then one per thousand,
     each carrying an `n=` counter (same intent as 0003: keep the
     diagnostic, lose the flood).
+  - `0009-iwm-throttle-hcmd-ring-race-prints.patch` — `iwm_cmd_done()`'s
+    two ring-bookkeeping complaints (`Some HCMDs skipped?`, `cmd_done with
+    empty ring`) print once per affected completion, i.e. per frame while a
+    submitter and the completion path interleave on `ring->cur/queued`.
+    They keep the first 8 lines and then one per thousand, each with an
+    `n=` counter: the counter is the measurement (the race is a port-side
+    serialization defect — splnet is wired to the port serializer and the
+    softint worker runs its handlers under it — so the count going to zero
+    is the acceptance signal).
 - `threadx/`, `cherrysh/`, `cherryrb/`, `lwip/` — no patches; used
   byte-identical to their pins.

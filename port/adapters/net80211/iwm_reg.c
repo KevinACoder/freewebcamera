@@ -176,20 +176,32 @@ int wlan_port_scan_iwm(const uint8_t *ssid, size_t len) {
 	return 0;
 }
 
+/* TX exit reasons.  The netif surfaces every failure to lwIP as ERR_IF,
+ * so when a send dies the reason has to be counted here (it is the only
+ * thing that tells "no mbuf left" apart from "bad length"). */
+static unsigned wlan_iwm_tx_ok, wlan_iwm_tx_no_softc, wlan_iwm_tx_badlen,
+    wlan_iwm_tx_nombuf, wlan_iwm_tx_ifq;
+
 int wlan_port_xmit_iwm(const uint8_t *frame, size_t len) {
 	struct iwm_softc *sc = iwm_reg_softc;
 	struct ifnet *ifp;
 	struct mbuf *m;
 	int err;
 
-	if (sc == NULL || frame == NULL || len < sizeof(struct ether_header) ||
+	if (sc == NULL) {
+		wlan_iwm_tx_no_softc++;
+		return -1;
+	}
+	if (frame == NULL || len < sizeof(struct ether_header) ||
 	    len > MCLBYTES) {
+		wlan_iwm_tx_badlen++;
 		return -1;
 	}
 	ifp = sc->sc_ic.ic_ifp;
 
 	MGETHDR(m, M_DONTWAIT, MT_DATA);
 	if (m == NULL) {
+		wlan_iwm_tx_nombuf++;
 		return -1;
 	}
 	m->m_len = m->m_pkthdr.len = (int) len;
@@ -197,10 +209,12 @@ int wlan_port_xmit_iwm(const uint8_t *frame, size_t len) {
 
 	IFQ_ENQUEUE(&ifp->if_snd, m, err);
 	if (err != 0) {
+		wlan_iwm_tx_ifq++;
 		m_freem(m);
 		return -1;
 	}
 	if_start_lock(ifp);
+	wlan_iwm_tx_ok++;
 	return (int) len;
 }
 
@@ -242,12 +256,45 @@ void wlan_iwm_dump(void) {
 	    (unsigned long long)sc->sc_ic.ic_ifp->if_data.if_oerrors,
 	    (unsigned long long)sc->sc_ic.ic_ifp->if_data.if_ipackets,
 	    (unsigned long long)sc->sc_ic.ic_ifp->if_data.if_ierrors);
+	/* The RX pipeline and the TX exit reasons, in one line each: these
+	 * are the port-side measurements that decide whether a dead data
+	 * path is "the device stopped delivering" (rx counters frozen),
+	 * "we drop what it delivers" (phy_bad/crc_bad climbing) or "the
+	 * send never got past the mbuf allocation" (tx nombuf). */
+	printf("iwm rx dbg: notif=%u entries=%u delivered=%u phy_bad=%u "
+	    "crc_bad=%u rearm_fail=%u\n",
+	    iwm_dbg_notif_calls, iwm_dbg_rx_entries, iwm_dbg_rx_delivered,
+	    iwm_dbg_rx_phy_bad, iwm_dbg_rx_crc_bad, iwm_dbg_rx_rearm_fail);
+	printf("iwm rx buf: allocs=%u nombuf=%u noext=%u mapfail=%u\n",
+	    iwm_dbg_rx_allocs, iwm_dbg_rx_nombuf, iwm_dbg_rx_noext,
+	    iwm_dbg_rx_mapfail);
+	{
+		extern unsigned int wlan_mbuf_pool_low, wlan_mbuf_pool_short,
+		    wlan_mbuf_pool_dups;
+
+		printf("wlan mbuf pool: low=%u short=%u dup=%u\n",
+		    wlan_mbuf_pool_low, wlan_mbuf_pool_short,
+		    wlan_mbuf_pool_dups);
+	}
+	printf("iwm tx dbg: ok=%u no_sc=%u badlen=%u nombuf=%u ifq=%u snd_q=%d\n",
+	    wlan_iwm_tx_ok, wlan_iwm_tx_no_softc, wlan_iwm_tx_badlen,
+	    wlan_iwm_tx_nombuf, wlan_iwm_tx_ifq, ic->ic_ifp->if_snd.ifq_len);
 	printf("iwm state=%s opmode=%d ch=%d fw=%s\n",
 	    ic->ic_state >= 0 && ic->ic_state < IEEE80211_S_MAX ?
 	        ieee80211_state_name[ic->ic_state] : "?",
 	    ic->ic_opmode,
 	    ic->ic_curchan != NULL ? ic->ic_curchan->ic_freq : 0,
 	    sc->sc_fwname != NULL ? sc->sc_fwname : "(none)");
+	/* The reset/scan/PM state that decides whether frames flow: ic_flags
+	 * carries IEEE80211_F_SCAN, sc_flags carries IWM_FLAG_SCANNING (the
+	 * firmware still sweeping channels) and IWM_FLAG_STOPPED, and
+	 * F_PMGTON is the net80211 power-management enable that the AP's PS
+	 * bookkeeping keys off. */
+	printf("iwm flags ic=%08x sc=%08x scanning=%d stopped=%d psm=%d\n",
+	    (unsigned) ic->ic_flags, (unsigned) sc->sc_flags,
+	    ISSET(sc->sc_flags, IWM_FLAG_SCANNING) ? 1 : 0,
+	    ISSET(sc->sc_flags, IWM_FLAG_STOPPED) ? 1 : 0,
+	    (ic->ic_flags & IEEE80211_F_PMGTON) != 0);
 }
 
 void wlan_iwm_scan_dump(void) {

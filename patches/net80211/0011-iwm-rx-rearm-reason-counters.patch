@@ -1,0 +1,40 @@
+--- a/sys/dev/pci/if_iwm.c
++++ b/sys/dev/pci/if_iwm.c
+@@ -164,6 +164,8 @@ int iwm_debug = 0;
+  * interrupt keeps arriving but nothing reaches net80211". */
+ unsigned iwm_dbg_rx_entries, iwm_dbg_rx_phy_bad, iwm_dbg_rx_crc_bad,
+     iwm_dbg_rx_rearm_fail, iwm_dbg_rx_delivered, iwm_dbg_notif_calls;
++unsigned iwm_dbg_rx_allocs, iwm_dbg_rx_nombuf, iwm_dbg_rx_noext,
++    iwm_dbg_rx_mapfail;
+ 
+ #include <dev/pci/if_iwmreg.h>
+ #include <dev/pci/if_iwmvar.h>
+@@ -3779,8 +3781,11 @@ iwm_rx_addbuf(struct iwm_softc *sc, int size, int idx)
+ 	int fatal = 0;
+ 
+ 	m = m_gethdr(M_DONTWAIT, MT_DATA);
+-	if (m == NULL)
++	if (m == NULL) {
++		iwm_dbg_rx_nombuf++;
+ 		return ENOBUFS;
++	}
++	iwm_dbg_rx_allocs++;
+ 
+ 	if (size <= MCLBYTES) {
+ 		MCLGET(m, M_DONTWAIT);
+@@ -3788,6 +3793,7 @@ iwm_rx_addbuf(struct iwm_softc *sc, int size, int idx)
+ 		MEXTMALLOC(m, size, M_DONTWAIT);
+ 	}
+ 	if ((m->m_flags & M_EXT) == 0) {
++		iwm_dbg_rx_noext++;
+ 		m_freem(m);
+ 		return ENOBUFS;
+ 	}
+@@ -3801,6 +3807,7 @@ iwm_rx_addbuf(struct iwm_softc *sc, int size, int idx)
+ 	err = bus_dmamap_load_mbuf(sc->sc_dmat, data->map, m,
+ 	    BUS_DMA_READ|BUS_DMA_NOWAIT);
+ 	if (err) {
++		iwm_dbg_rx_mapfail++;
+ 		/* XXX */
+ 		if (fatal)
+ 			panic("iwm: could not load RX mbuf");

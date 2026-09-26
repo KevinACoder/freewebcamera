@@ -129,6 +129,54 @@ void __assert_func(const char *file, int line, const char *func,
 
 /* --- the pvPort surface ----------------------------------------------------- */
 
+/* Allocation accounting, reported by the `heap` shell command: the
+ * pathological case this exists for is "allocations start failing while
+ * the free count still looks healthy". */
+unsigned wlan_heap_alloc_ok, wlan_heap_alloc_fail, wlan_heap_frees;
+unsigned long wlan_heap_first_fail;
+unsigned wlan_heap_double_free;
+int wlan_heap_probe;
+
+static void heap_maxfree_walker(void *ptr, size_t size, int used, void *user);
+
+/* Double-free detection.  TLSF does not check: freeing a block that is
+ * already free merges it with itself, which pulls blocks out of the free
+ * lists while the block chain (and tlsf_check) still look consistent - the
+ * observed signature is "allocation fails while a big enough free block is
+ * reported".  The walk below is O(pool blocks), which is affordable here
+ * (a few thousand blocks) and only for a diagnostic build: a pointer that
+ * is already free is refused and counted instead of corrupting the pool. */
+struct heap_dbl_check {
+	uintptr_t target;
+	int found;
+	int used;
+};
+
+static void heap_dbl_walker(void *ptr, size_t size, int used, void *user)
+{
+	struct heap_dbl_check *d = user;
+
+	if ((uintptr_t) ptr == d->target) {
+		d->found = 1;
+		d->used = used;
+	}
+}
+
+static int heap_probe_used(uintptr_t ptr, int *used)
+{
+	struct heap_dbl_check d;
+
+	d.target = ptr;
+	d.found = 0;
+	d.used = 0;
+	tlsf_walk_pool(tlsf_get_pool(heap_tlsf), heap_dbl_walker, &d);
+	if (!d.found) {
+		return -1;
+	}
+	*used = d.used;
+	return 0;
+}
+
 void *pvPortMalloc(size_t length)
 {
 	uint8_t *payload = NULL;
@@ -136,6 +184,7 @@ void *pvPortMalloc(size_t length)
 	uintptr_t ra = (uintptr_t) __builtin_return_address(0);
 
 	if (length == 0u || length > HEAP_BYTES) {
+		wlan_heap_alloc_fail++;
 		return NULL;
 	}
 
@@ -148,10 +197,44 @@ void *pvPortMalloc(size_t length)
 	}
 	if (payload != NULL) {
 		heap_ring_push(ra, (uintptr_t) payload, (uint32_t) length, 0);
+		wlan_heap_alloc_ok++;
 		heap_check(ra);
+	} else {
+		wlan_heap_alloc_fail++;
+		/* First failure: record the request size, the largest free
+		 * block at that moment and TLSF's own verdict, once.  A
+		 * failure with a big enough free block means the free lists
+		 * (not the memory) are the problem. */
+		if (wlan_heap_first_fail == 0) {
+			static char fmsg[160];
+			size_t maxfree = 0;
+
+			wlan_heap_first_fail = length;
+			wlan_heap_probe = 1;	/* arm the double-free probe */
+			tlsf_walk_pool(tlsf_get_pool(heap_tlsf),
+				       heap_maxfree_walker, &maxfree);
+			(void)snprintf(fmsg, sizeof(fmsg),
+				       "heap: alloc FAIL len=%lu maxfree=%lu "
+				       "tlsf_check=%d\n",
+				       (unsigned long) length,
+				       (unsigned long) maxfree,
+				       tlsf_check(heap_tlsf));
+			board_early_print(fmsg);
+		}
 	}
 	_tx_thread_smp_unprotect(save);
 	return payload;
+}
+
+/* largest free block, used by the first-failure report above */
+static void heap_maxfree_walker(void *ptr, size_t size, int used, void *user)
+{
+	size_t *maxfree = user;
+
+	(void) ptr;
+	if (!used && size > *maxfree) {
+		*maxfree = size;
+	}
 }
 
 void vPortFree(void *ptr)
@@ -178,9 +261,29 @@ void vPortFree(void *ptr)
 	}
 
 	save = _tx_thread_smp_protect();
+	/* The probe walks the whole pool, so it is armed only once an
+	 * allocation has actually failed: normal operation pays nothing,
+	 * and the first failure turns on the diagnosis and the refusal of
+	 * a second free of the same block. */
+	if (wlan_heap_probe) {
+		int used = 0;
+
+		if (heap_probe_used((uintptr_t) ptr, &used) == 0 && !used) {
+			static char dmsg[64];
+
+			wlan_heap_double_free++;
+			(void)snprintf(dmsg, sizeof(dmsg),
+				       "heap: DOUBLE FREE %08lx (refused)\n",
+				       (unsigned long)(uintptr_t) ptr);
+			board_early_print(dmsg);
+			_tx_thread_smp_unprotect(save);
+			return;
+		}
+	}
 	heap_ring_push(ra, (uintptr_t) ptr,
 		       (uint32_t) tlsf_block_size(ptr), 1);
 	tlsf_free(heap_tlsf, ptr);
+	wlan_heap_frees++;
 	heap_check(ra);
 	_tx_thread_smp_unprotect(save);
 }
@@ -228,6 +331,12 @@ struct heap_census {
 	unsigned int printed;
 	size_t small_total;		/* everything live, for the balance */
 	unsigned int small_blocks;
+	/* The free side matters just as much: a request can fail while the
+	 * free *count* looks healthy when the pool has no single block big
+	 * enough, so the census reports the largest free block too. */
+	size_t free_total;
+	size_t free_max;
+	unsigned int free_blocks;
 };
 
 static void heap_census_walker(void *ptr, size_t size, int used, void *user)
@@ -239,6 +348,11 @@ static void heap_census_walker(void *ptr, size_t size, int used, void *user)
 	int n;
 
 	if (!used) {
+		c->free_total += size;
+		c->free_blocks++;
+		if (size > c->free_max) {
+			c->free_max = size;
+		}
 		return;
 	}
 	c->small_total += size;
@@ -270,7 +384,7 @@ static void heap_census_walker(void *ptr, size_t size, int used, void *user)
 void wlan_heap_census(void)
 {
 	struct heap_census c;
-	char msg[128];
+	char msg[256];
 	unsigned int save;
 
 	memset(&c, 0, sizeof(c));
@@ -283,8 +397,14 @@ void wlan_heap_census(void)
 	_tx_thread_smp_unprotect(save);
 
 	(void)snprintf(msg, sizeof(msg),
-		       "heap census: live=%lu B in %u block(s), >=2K: %lu B in %u\n",
+		       "heap census: live=%lu B in %u block(s), >=2K: %lu B in %u; "
+		       "free=%lu B in %u block(s) maxfree=%lu; "
+		       "alloc ok=%u fail=%u free=%u dbl=%u firstfail=%lu\n",
 		       (unsigned long) c.small_total, c.small_blocks,
-		       (unsigned long) c.total, c.blocks);
+		       (unsigned long) c.total, c.blocks,
+		       (unsigned long) c.free_total, c.free_blocks,
+		       (unsigned long) c.free_max,
+		       wlan_heap_alloc_ok, wlan_heap_alloc_fail, wlan_heap_frees,
+		       wlan_heap_double_free, wlan_heap_first_fail);
 	board_early_print(msg);
 }

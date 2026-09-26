@@ -1,0 +1,40 @@
+--- a/sys/dev/pci/if_iwm.c
++++ b/sys/dev/pci/if_iwm.c
+@@ -4491,17 +4491,33 @@ iwm_cmd_done(struct iwm_softc *sc, int qid, int idx)
+ 	}
+ 	wakeup(&ring->desc[idx]);
+ 
+ 	if (((idx + ring->queued) % IWM_TX_RING_COUNT) != ring->cur) {
+-		device_printf(sc->sc_dev,
+-		    "Some HCMDs skipped?: idx=%d queued=%d cur=%d\n",
+-		    idx, ring->queued, ring->cur);
++		/*
++		 * A completion processed against ring bookkeeping the
++		 * submitter was mid-update on lands here; it used to print
++		 * unconditionally (once per frame in the worst case).  Keep
++		 * the first few, then one per thousand, with the running
++		 * count so a board log still says whether it happens at all.
++		 */
++		static unsigned hcmd_skipped;
++
++		if (hcmd_skipped++ < 8 || (hcmd_skipped % 1000) == 0) {
++			device_printf(sc->sc_dev,
++			    "Some HCMDs skipped?: idx=%d queued=%d cur=%d (n=%u)\n",
++			    idx, ring->queued, ring->cur, hcmd_skipped);
++		}
+ 	}
+ 
+ 	if (ring->queued == 0) {
++		static unsigned cmd_empty;
++
+ 		splx(s);
+-		device_printf(sc->sc_dev, "cmd_done with empty ring\n");
++		if (cmd_empty++ < 8 || (cmd_empty % 1000) == 0) {
++			device_printf(sc->sc_dev,
++			    "cmd_done with empty ring (n=%u)\n", cmd_empty);
++		}
+ 		return;
+ 	}
+ 
+ 	if (--ring->queued == 0)
+ 		iwm_clear_cmd_in_flight(sc);

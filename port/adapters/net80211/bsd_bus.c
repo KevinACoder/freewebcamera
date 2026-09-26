@@ -381,8 +381,26 @@ bus_dmamap_load_mbuf(bus_dma_tag_t tag, bus_dmamap_t map, struct mbuf *m0,
 	 * through usb_mem blocks and never hand an mbuf address to a master.
 	 */
 	if (m0 != NULL) {
-		map->dm_segs[0].ds_addr = (bus_addr_t)(uintptr_t)
+		uintptr_t va = (uintptr_t)
 		    (m0->m_data != NULL ? m0->m_data : (void *) m0);
+
+		/* One segment is all this map can hold.  A chained mbuf, or
+		 * one whose m_len is not the whole frame, would be truncated
+		 * silently; upstream's callers handle EFBIG by linearizing
+		 * (iwm_tx), which is the faithful behaviour. */
+		if (m0->m_next != NULL || m0->m_len != m0->m_pkthdr.len) {
+			return EFBIG;
+		}
+		if (!dma_in_window(va, (bus_size_t) m0->m_len)) {
+			printf("bus_dmamap_load_mbuf OUT OF WINDOW va=%08lx "
+			    "len=%lu ra=%08lx (window %08lx..%08lx)\n",
+			    (unsigned long) va, (unsigned long) m0->m_len,
+			    (unsigned long) (uintptr_t) __builtin_return_address(0),
+			    (unsigned long) WLAN_DMA_WINDOW_BASE,
+			    (unsigned long) WLAN_DMA_WINDOW_END);
+			return EINVAL;
+		}
+		map->dm_segs[0].ds_addr = (bus_addr_t) va;
 		map->dm_segs[0].ds_len = (bus_size_t) m0->m_len;
 		map->dm_mapsize = (bus_size_t) m0->m_len;
 	} else {
@@ -416,15 +434,17 @@ bus_dmamap_sync(bus_dma_tag_t tag, bus_dmamap_t map, bus_size_t offset,
 	}
 	addr = (uintptr_t) map->dm_segs[0].ds_addr + offset;
 
-	if (ops & BUS_DMASYNC_PREREAD) {
-		/* discard dirty lines before the device fills the buffer */
-		board_dcache_invalidate(addr, len);
-	}
 	if (ops & BUS_DMASYNC_PREWRITE) {
 		/* push CPU writes out before the device reads them */
 		board_dcache_flush(addr, len);
 	}
-	if (ops & BUS_DMASYNC_POSTREAD) {
+	if (ops & (BUS_DMASYNC_PREREAD | BUS_DMASYNC_POSTREAD)) {
+		/* discard dirty lines before the device fills the buffer.
+		 * This has to run after the clean above: iwm syncs freshly
+		 * written buffers (firmware paging blocks, memset ring status,
+		 * staging images) with PREREAD|PREWRITE, and invalidating
+		 * first threw the CPU's data away, so the device read stale
+		 * memory - silently. */
 		board_dcache_invalidate(addr, len);
 	}
 	/* BUS_DMASYNC_POSTWRITE: nothing to do */

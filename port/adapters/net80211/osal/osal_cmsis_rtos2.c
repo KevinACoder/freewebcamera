@@ -770,11 +770,25 @@ ipl_t splsoftserial(void) {
 }
 
 ipl_t splnet(void) {
-	return 0;
+	/* NetBSD's splnet() is what serializes a driver's command,
+	 * state-machine and receive paths against each other, and the
+	 * imported drivers are written assuming it (the iwm command ring
+	 * bookkeeping in iwm_send_cmd/iwm_cmd_done is the case that
+	 * matters here: without it the submitter and the softint worker
+	 * interleave and completions go missing - "Some HCMDs skipped").
+	 * There is no IPL on this port, so splnet maps onto the port
+	 * serializer.  tsleep() drops it around its wait, which is what
+	 * lets a completion run while its submitter sleeps on it. */
+	wlan_port_serializer_lock();
+	return 1;
 }
 
 void splx(ipl_t ipl) {
-	(void) ipl;
+	/* splusb()/splraiseipl() still return 0, so splx(0) has to stay a
+	 * no-op: the USB line pairs splx() with splusb(). */
+	if (ipl != 0) {
+		wlan_port_serializer_unlock();
+	}
 }
 
 /* ------------------------------------------------------------------ */

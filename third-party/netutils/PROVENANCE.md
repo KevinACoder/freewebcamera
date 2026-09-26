@@ -11,7 +11,7 @@
 
 | File | Deviations from upstream |
 |---|---|
-| `ping/ping.c` | none |
+| `ping/ping.c` | two diagnostic prints (2026-09-27): a failed `rt_malloc` and a `lwip_sendto` short return are the only two ways this ping fails, and both ended at the same opaque `Send ... - error` line. The first now says so, the second prints the `errno` lwip_sendto left behind (`ENOMEM`/`ENOBUFS`/`EHOSTUNREACH`/...). No behaviour change; kept for the PCIe-wifi data-plane diagnosis and for users. |
 | `tftp/tftp.h` | none |
 | `tftp/tftp_client.c` | none |
 | `tftp/tftp_server.c` | none |
