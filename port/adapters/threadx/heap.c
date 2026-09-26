@@ -40,7 +40,13 @@ extern void board_early_print(const char *s);
 extern unsigned int _tx_thread_smp_protect(void);
 extern void _tx_thread_smp_unprotect(unsigned int save);
 
-#define HEAP_BYTES	(1024u * 1024u)
+/* The iwm line needs the headroom: its RX ring alone hands out 256
+ * mbuf+cluster allocations (~1.1 MB) from this heap on top of the
+ * USB/net80211 world (the first PCIe board run died silently in
+ * m_gethdr at "could not allocate RX ring").  The linker script
+ * reserves 4M for this region (bss is NOLOAD), so the reservation is
+ * free in the image. */
+#define HEAP_BYTES	(4u * 1024u * 1024u)
 
 static uint8_t heap_region[HEAP_BYTES] __attribute__((aligned(32)));
 static tlsf_t heap_tlsf;

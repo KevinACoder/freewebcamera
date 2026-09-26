@@ -130,7 +130,7 @@ ADAPTER_SRCS := \
 
 DRIVER_SRCS := drivers/uart_ns16550.c \
 	drivers/dwc_pcie.c \
-	drivers/dwc_msix.c
+	drivers/pci_msix.c
 
 # Board data for the PCIe controllers (D45 shape: drivers/ keeps the
 # platform-agnostic IP, the coordinates live with the board).

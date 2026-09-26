@@ -368,10 +368,29 @@ bus_dmamap_load_mbuf(bus_dma_tag_t tag, bus_dmamap_t map, struct mbuf *m0,
 {
 	(void) tag; (void) flags;
 
-	/* the compat mbuf model is one contiguous cluster per mbuf */
-	map->dm_segs[0].ds_addr = (bus_addr_t) m0;
+	/* The DMA address must be the address the stack reads and writes -
+	 * mtod(m) - i.e. the mbuf's DATA area, not the header.  The compat
+	 * allocation puts the cluster behind the header (m_data = cluster or
+	 * cluster + MH_ALIGN, 256-aligned); a descriptor programmed with the
+	 * header address lands the device's frame ahead of where the driver
+	 * looks, silently: for iwm the RX ring then parsed garbage and the
+	 * uCode ALIVE response was never seen (the interrupt arrived, the
+	 * driver's uc_intr was never set, the firmware load timed out).
+	 * m_data is also the 256-byte alignment the Intel RX descriptors
+	 * require.  The USB line is unaffected - its transfers move data
+	 * through usb_mem blocks and never hand an mbuf address to a master.
+	 */
+	if (m0 != NULL) {
+		map->dm_segs[0].ds_addr = (bus_addr_t)(uintptr_t)
+		    (m0->m_data != NULL ? m0->m_data : (void *) m0);
+		map->dm_segs[0].ds_len = (bus_size_t) m0->m_len;
+		map->dm_mapsize = (bus_size_t) m0->m_len;
+	} else {
+		map->dm_segs[0].ds_addr = 0;
+		map->dm_segs[0].ds_len = 0;
+		map->dm_mapsize = 0;
+	}
 	map->dm_nsegs = 1;
-	map->dm_mapsize = 0;
 	return 0;
 }
 

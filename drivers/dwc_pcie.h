@@ -6,7 +6,7 @@
  * sees (ARM_DRIVER_PCIE). This header exists for the two things that need
  * more than that interface offers:
  *
- *   - drivers/dwc_msix.c, which programs an endpoint's MSI-X table and so
+ *   - drivers/pci_msix.c, which programs an endpoint's MSI-X table and so
  *     needs the function's BAR and capability offsets - and the Requester
  *     ID, which is the ITS DeviceID;
  *   - drivers/dwc_nvme.c, which has to find its controller by class code
@@ -104,7 +104,8 @@ const struct dwc_pcie_dev *dwc_pcie_dev(uint32_t index);
  * the ITS DeviceID used for its message interrupts. */
 uint32_t dwc_pcie_requester_id(const struct dwc_pcie_dev *dev);
 
-/* Config space register offsets this driver and dwc_msix.c use. */
+/* Config space register offsets this driver's scan and the endpoint
+ * MSI-X programmer (drivers/pci_msix.h) use. */
 #define PCI_CFG_VENDOR_ID	0x00
 #define PCI_CFG_COMMAND		0x04
 #define PCI_CFG_REVISION	0x08
@@ -119,25 +120,11 @@ uint32_t dwc_pcie_requester_id(const struct dwc_pcie_dev *dev);
 #define PCI_CLASS_STORAGE	0x01
 #define PCI_SUBCLASS_NVME	0x08
 
+/* Capability ids the scan records. MSI-X is an endpoint capability, so its
+ * table/entry layout lives with the programmer (drivers/pci_msix.h), not
+ * with the host controller. */
 #define PCI_CAP_ID_MSI		0x05
 #define PCI_CAP_ID_MSIX		0x11
-
-/* MSI-X capability layout, relative to the capability offset. */
-#define PCI_MSIX_FLAGS		0x02	/* 16 bit: ENABLE, MASKALL, table size */
-#define PCI_MSIX_TABLE		0x04	/* 32 bit: BIR [2:0], offset [31:3] */
-#define PCI_MSIX_FLAGS_ENABLE	(1u << 15)
-#define PCI_MSIX_FLAGS_MASKALL	(1u << 14)
-#define PCI_MSIX_FLAGS_QSIZE	0x07ffu
-#define PCI_MSIX_TABLE_BIR	0x00000007u
-#define PCI_MSIX_TABLE_OFFSET	0xfffffff8u
-
-/* One MSI-X table entry, 16 bytes. */
-#define PCI_MSIX_ENTRY_SIZE	16
-#define PCI_MSIX_ENTRY_LOWER_ADDR	0x00
-#define PCI_MSIX_ENTRY_UPPER_ADDR	0x04
-#define PCI_MSIX_ENTRY_DATA		0x08
-#define PCI_MSIX_ENTRY_VECTOR_CTRL	0x0c
-#define PCI_MSIX_ENTRY_CTRL_MASKBIT	0x00000001u
 
 #ifdef __cplusplus
 }

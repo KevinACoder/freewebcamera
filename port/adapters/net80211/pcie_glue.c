@@ -51,8 +51,12 @@
 #include "irq_ctrl.h"
 #include "board.h"
 
-/* the DesignWare host backend (drivers/dwc_pcie.c) */
+/* the DesignWare host backend (drivers/dwc_pcie.c) and its endpoint
+ * MSI-X table programming (drivers/pci_msix.c) - the board-proven
+ * message-interrupt route (NVMe line) */
 extern ARM_DRIVER_PCIE Driver_PCIe;
+#include "dwc_pcie.h"
+#include "pci_msix.h"
 
 /* the bus backend singletons (bsd_bus.c) */
 extern bus_space_tag_t wlan_bus_space_tag;
@@ -78,6 +82,9 @@ static const struct pcie_glue_ctrl {
 
 #define PCIE_GLUE_CTRL_COUNT	2
 
+/* downstream bus of the AC7260 slot (pcie3x2) */
+#define PCIE_GLUE_RADIO_BUS	3u
+
 /* client APB legacy interrupt mask register (RK TRM: +0x1c); the four
  * INTx lines aggregate onto one GIC line per controller */
 #define PCIE_CLIENT_INT_MASK	0x1c
@@ -101,6 +108,14 @@ static struct pcie_intr_cookie pcie_cookie;
 static volatile unsigned long pcie_spurious_count;
 volatile unsigned long pcie_glue_irq_count;
 
+/* the radio's BAR0, learned when the endpoint maps its BAR: the ISR
+ * reads the cause registers there, which the log otherwise never shows */
+static volatile uint32_t *pcie_radio_regs;
+
+#define PCIE_RADIO_CSR_INT	0x008	/* read-clear cause register */
+#define PCIE_RADIO_CSR_INT_MASK	0x00c
+#define PCIE_RADIO_CSR_FH_INT	0x010	/* FH cause register */
+
 /* the MSI vector pci_intr_alloc handed out, kept for establish/release */
 static MSI_VECTOR pcie_msi_vector;
 
@@ -122,6 +137,19 @@ pcie_isr(void)
 		return;
 	}
 	pcie_cookie.count++;
+
+	/* Forensics: name the interrupt cause at delivery.  Deliberately
+	 * NON-destructive - CSR_INT is read-clear and consuming it here
+	 * would steal the cause from the driver's softint (the first
+	 * forensic round did exactly that); FH_INT_STATUS and INT_MASK
+	 * are plain reads. */
+	if (pcie_radio_regs != NULL && pcie_glue_irq_count <= 8ul) {
+		board_log("pcie_glue: isr %lu fh=%08x mask=%08x\n",
+		    pcie_glue_irq_count,
+		    pcie_radio_regs[PCIE_RADIO_CSR_FH_INT / 4],
+		    pcie_radio_regs[PCIE_RADIO_CSR_INT_MASK / 4]);
+	}
+
 	(void) pcie_cookie.func(pcie_cookie.arg);
 }
 
@@ -322,43 +350,146 @@ pcie_intx_alloc_pa(const struct pci_attach_args *pa, pci_intr_handle_t *ihs)
 	return ENODEV;
 }
 
-int
-pci_intr_alloc(const struct pci_attach_args *pa, pci_intr_handle_t **ihsp,
-	int *counts, pci_intr_type_t type)
+/* the dwc device record behind a function, needed to program its MSI-X
+ * table (pci_msix_arm addresses BARs and the cap offset itself) */
+static const struct dwc_pcie_dev *
+pcie_dwc_dev(const struct pci_attach_args *pa)
 {
-	pci_intr_handle_t *ihs;
+	uint32_t devfn = (pa->pa_device << 3) | pa->pa_function;
+	uint32_t i;
 
-	(void) counts;	/* one vector is all this port hands out */
+	for (i = 0; i < dwc_pcie_dev_count(); i++) {
+		const struct dwc_pcie_dev *dev = dwc_pcie_dev(i);
+
+		if (dev != NULL && dev->busn == pa->pa_bus &&
+		    dev->devfn == devfn) {
+			return dev;
+		}
+	}
+	return NULL;
+}
+
+/* the function whose MSI-X table this port armed (one radio) */
+static const struct dwc_pcie_dev *pcie_msix_dev;
+
+int
+pci_msix_alloc(const struct pci_attach_args *pa, pci_intr_handle_t **ihsp,
+	int *countp)
+{
+	const struct dwc_pcie_dev *dev = pcie_dwc_dev(pa);
+	pci_intr_handle_t *ihs;
+	MSI_VECTOR vec;
+	int32_t count;
+
+	if (dev == NULL || dev->msix_cap == 0) {
+		return ENODEV;
+	}
+
+	/* the board-proven MSI-X route: program the endpoint's table with
+	 * the vector the ITS domain hands out, raise ENABLE - the NVMe
+	 * line this code is ported from delivered real interrupts on it */
+	count = pci_msix_arm(dev, 1, &vec);
+	if (count < 1) {
+		return ENODEV;
+	}
 
 	ihs = kmem_zalloc(sizeof(*ihs), KM_SLEEP);
 	if (ihs == NULL) {
+		(void) pci_msix_disarm(dev);
 		return ENOMEM;
 	}
+	ihs[0] = (pci_intr_handle_t) vec.intid | ARM_PCI_INTR_MSIX |
+	    ARM_PCI_INTR_MPSAFE;
+	pcie_msix_dev = dev;
+	*ihsp = ihs;
+	if (countp != NULL) {
+		*countp = 1;
+	}
+	return 0;
+}
 
-	if (type == PCI_INTR_TYPE_INTX || type == 0) {
-		/* default order: MSI first (the proven doorbell path),
-		 * INTx fallback */
-		if (type != PCI_INTR_TYPE_INTX &&
-		    pcie_msi_alloc_pa(pa, ihs, 1) == 0) {
-			*ihsp = ihs;
-			return 0;
+int
+pci_msix_alloc_exact(const struct pci_attach_args *pa,
+	pci_intr_handle_t **ihsp, int nvec)
+{
+	if (nvec != 1) {
+		return EINVAL;
+	}
+	return pci_msix_alloc(pa, ihsp, NULL);
+}
+
+int
+pci_msix_alloc_map(const struct pci_attach_args *pa,
+	pci_intr_handle_t **ihsp, u_int *indices, int nvec)
+{
+	(void) indices;
+	return pci_msix_alloc_exact(pa, ihsp, nvec);
+}
+
+int
+pci_intr_alloc(const struct pci_attach_args *pa, pci_intr_handle_t **ihsp,
+	int *counts, pci_intr_type_t max_type)
+{
+	int intx_count, msi_count, msix_count;
+	int error = EINVAL;
+
+	/* NetBSD arm semantics (sys/arch/arm/pci/pci_msi_machdep.c): the
+	 * type argument is a CEILING, and a NULL counts array - what iwm
+	 * passes (`pci_intr_alloc(pa, &sc->sc_pihp, NULL, 0)`) - means
+	 * "all classes, in the order MSI-X -> MSI -> INTx".  The fdt
+	 * line's INTx-first (its D-10) was a workaround from before the
+	 * ITS doorbell had been proven; the message route is the proven
+	 * one on this board, and INTx is a level line that loses events
+	 * when it deasserts between the signal and the IAR read (the
+	 * first board run read 1023 exactly that way). */
+	if (counts != NULL) {
+		intx_count = msi_count = msix_count = 0;
+
+		switch (max_type) {
+		case PCI_INTR_TYPE_MSIX:
+			msix_count = counts[PCI_INTR_TYPE_MSIX];
+			/* FALLTHROUGH */
+		case PCI_INTR_TYPE_MSI:
+			msi_count = counts[PCI_INTR_TYPE_MSI];
+			/* FALLTHROUGH */
+		case PCI_INTR_TYPE_INTX:
+			intx_count = counts[PCI_INTR_TYPE_INTX];
+			if (intx_count > 1) {
+				return EINVAL;
+			}
+			break;
+		default:
+			return EINVAL;
 		}
-		if (pcie_intx_alloc_pa(pa, ihs) == 0) {
-			*ihsp = ihs;
-			return 0;
-		}
-	} else if (type == PCI_INTR_TYPE_MSI) {
-		if (pcie_msi_alloc_pa(pa, ihs, 1) == 0) {
-			*ihsp = ihs;
-			return 0;
-		}
-	} else if (type == PCI_INTR_TYPE_MSIX) {
-		kmem_free(ihs, sizeof(*ihs));
-		return ENODEV;	/* 7260 carries no MSI-X capability */
+		memset(counts, 0, sizeof(*counts) * PCI_INTR_TYPE_SIZE);
+	} else {
+		intx_count = msi_count = msix_count = 1;
 	}
 
-	kmem_free(ihs, sizeof(*ihs));
-	return ENODEV;
+	if (msix_count > 0 &&
+	    pci_msix_alloc_exact(pa, ihsp, msix_count) == 0) {
+		if (counts != NULL) {
+			counts[PCI_INTR_TYPE_MSIX] = msix_count;
+		}
+		return 0;
+	}
+
+	if (msi_count > 0 &&
+	    pci_msi_alloc_exact(pa, ihsp, msi_count) == 0) {
+		if (counts != NULL) {
+			counts[PCI_INTR_TYPE_MSI] = msi_count;
+		}
+		return 0;
+	}
+
+	if (intx_count > 0 && pci_intx_alloc(pa, ihsp) == 0) {
+		if (counts != NULL) {
+			counts[PCI_INTR_TYPE_INTX] = intx_count;
+		}
+		return 0;
+	}
+
+	return error;
 }
 
 void
@@ -372,7 +503,12 @@ pci_intr_release(pci_chipset_tag_t pc, pci_intr_handle_t *ihs, int count)
 		return;
 	}
 	IRQ_Disable((IRQn_ID_t) (ihs[0] & ARM_PCI_INTR_IRQ));
-	if ((ihs[0] & ARM_PCI_INTR_MSI) != 0) {
+	if ((ihs[0] & ARM_PCI_INTR_MSIX) != 0) {
+		if (pcie_msix_dev != NULL) {
+			(void) pci_msix_disarm(pcie_msix_dev);
+			pcie_msix_dev = NULL;
+		}
+	} else if ((ihs[0] & ARM_PCI_INTR_MSI) != 0) {
 		domain = msi_domain_get();
 		if (domain != NULL) {
 			domain->Free(pcie_cookie.rid);
@@ -441,33 +577,6 @@ pci_msi_alloc_exact(const struct pci_attach_args *pa,
 	return pci_msi_alloc(pa, ihsp, NULL);
 }
 
-int
-pci_msix_alloc(const struct pci_attach_args *pa, pci_intr_handle_t **ihsp,
-	int *countp)
-{
-
-	(void) pa; (void) ihsp; (void) countp;
-	return ENODEV;
-}
-
-int
-pci_msix_alloc_exact(const struct pci_attach_args *pa,
-	pci_intr_handle_t **ihsp, int nvec)
-{
-
-	(void) pa; (void) ihsp; (void) nvec;
-	return ENODEV;
-}
-
-int
-pci_msix_alloc_map(const struct pci_attach_args *pa,
-	pci_intr_handle_t **ihsp, u_int *indices, int nvec)
-{
-
-	(void) pa; (void) ihsp; (void) indices; (void) nvec;
-	return ENODEV;
-}
-
 static const char *
 pcie_intr_string_impl(void *v, pci_intr_handle_t ih, char *buf, size_t len)
 {
@@ -530,9 +639,12 @@ pcie_arm_device_side(const struct pcie_intr_cookie *ck)
 		return 0;
 	}
 
-	/* INTx: unmask the legacy lines at the client APB.  The all-clear
-	 * write is the second-hand R4 note, not a measured value - if a
-	 * board run shows no INTx delivery, this register is suspect #1. */
+	/* INTx: unmask the four legacy lines at the client APB.  The mask
+	 * register is HIWORD-encoded (Linux pcie-dw-rockchip.c:
+	 * HIWORD_DISABLE_BIT - the upper 16 bits are the write-enable for
+	 * the lower half), so an unmasked write of 0 changed nothing: the
+	 * lines stayed masked and the ucode download timed out waiting for
+	 * an interrupt that could never arrive.  INTA..INTD are bits 0..3. */
 	{
 		size_t i;
 
@@ -540,7 +652,8 @@ pcie_arm_device_side(const struct pcie_intr_cookie *ck)
 			if (pcie_glue_ctrls[i].intx_intid == ck->intid) {
 				*(volatile uint32_t *)
 				    (pcie_glue_ctrls[i].apb_base +
-				    PCIE_CLIENT_INT_MASK) = 0;
+				    PCIE_CLIENT_INT_MASK) =
+				    (0xfu << 16) | 0xfff0u;
 				printf("pcie_glue: client apb %08lx intx"
 				    " unmasked (intid %u)\n",
 				    (unsigned long) pcie_glue_ctrls[i].apb_base,
@@ -564,9 +677,6 @@ pcie_intr_establish_impl(void *v, pci_intr_handle_t ih, int ipl,
 		printf("pcie_glue: %s: interrupt already owned\n", xname);
 		return NULL;
 	}
-	if ((ih & ARM_PCI_INTR_MSIX) != 0) {
-		return NULL;	/* not on this endpoint */
-	}
 
 	pcie_cookie.func = func;
 	pcie_cookie.arg = arg;
@@ -579,6 +689,14 @@ pcie_intr_establish_impl(void *v, pci_intr_handle_t ih, int ipl,
 	IRQ_SetHandler((IRQn_ID_t) intid, pcie_isr);
 	IRQ_SetPriority((IRQn_ID_t) intid, BOARD_IRQ_PRIORITY_API_CALL_RAW);
 	IRQ_Enable((IRQn_ID_t) intid);
+
+	if ((ih & ARM_PCI_INTR_MSIX) != 0) {
+		/* the endpoint table was programmed (and ENABLE raised) by
+		 * pci_msix_arm at allocation time - nothing left to arm
+		 * on the device side */
+		printf("pcie_glue: msi-x vector armed (intid %u)\n", intid);
+		return &pcie_cookie;
+	}
 
 	if (pcie_arm_device_side(&pcie_cookie) != 0) {
 		IRQ_Disable((IRQn_ID_t) intid);
@@ -677,6 +795,12 @@ pci_mapreg_map(const struct pci_attach_args *pa, int reg, pcireg_t bus_mask,
 
 	printf("pcie_glue: BAR%d mapped at %08llx\n",
 	    PCI_MAPREG_NUM(reg), (unsigned long long) base);
+
+	/* the radio's register file, for the ISR-side cause forensics
+	 * (the AC7260 slot is the only endpoint this port maps) */
+	if (reg == PCI_CFG_BAR0 && pa->pa_bus == PCIE_GLUE_RADIO_BUS) {
+		pcie_radio_regs = (volatile uint32_t *)(uintptr_t) base;
+	}
 	return 0;
 }
 
@@ -781,7 +905,10 @@ pcie_glue_init(void)
 		const struct pcie_glue_ctrl *c = &pcie_glue_ctrls[ci];
 		uint32_t bus = c->downstream_bus;
 
-		if (Driver_PCIe.LinkUp(bus - 1) != ARM_DRIVER_OK) {
+		/* LinkUp takes the controller INSTANCE (0/1), not the
+		 * downstream bus number - the first board run skipped
+		 * pcie1 because 3-1=2 indexed past the ctrl table */
+		if (Driver_PCIe.LinkUp((uint32_t) ci) != ARM_DRIVER_OK) {
 			continue;
 		}
 		for (uint32_t func = 0; func < 8u; func++) {

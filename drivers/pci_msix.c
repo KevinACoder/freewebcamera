@@ -1,9 +1,9 @@
 /*
- * @file   dwc_msix.c
+ * @file   pci_msix.c
  * @brief  MSI-X table programming: mask discipline, function arming, and the
  *         hand-off to the board's message-interrupt domain.
  *
- * See drivers/dwc_msix.h for what is ported and from where. Two things here
+ * See drivers/pci_msix.h for what is ported and from where. Two things here
  * are worth reading before changing anything:
  *
  *   - The MSI-X table lives inside one of the function's BARs, and this code
@@ -27,7 +27,7 @@
 #include "msi.h"
 #include "regs.h"
 
-#include "dwc_msix.h"
+#include "pci_msix.h"
 
 static int32_t msix_ctrl_read(const struct dwc_pcie_dev *dev, uint16_t *value)
 {
@@ -110,7 +110,7 @@ static void msix_write_entry(uintptr_t entry, const MSI_VECTOR *vec)
 	reg_dsb();
 }
 
-int32_t dwc_msix_alloc(const struct dwc_pcie_dev *dev, uint32_t nvec_max,
+int32_t pci_msix_arm(const struct dwc_pcie_dev *dev, uint32_t nvec_max,
 		       MSI_VECTOR *vectors)
 {
 	const MSI_DOMAIN *domain;
@@ -136,8 +136,8 @@ int32_t dwc_msix_alloc(const struct dwc_pcie_dev *dev, uint32_t nvec_max,
 	if (nvec_max > entries) {
 		nvec_max = entries;
 	}
-	if (nvec_max > DWC_MSIX_VECTOR_MAX) {
-		nvec_max = DWC_MSIX_VECTOR_MAX;
+	if (nvec_max > PCI_MSIX_VECTOR_MAX) {
+		nvec_max = PCI_MSIX_VECTOR_MAX;
 	}
 
 	/* MSI-X stays disabled while the table and the ITS are programmed. */
@@ -206,7 +206,7 @@ int32_t dwc_msix_alloc(const struct dwc_pcie_dev *dev, uint32_t nvec_max,
 	return count;
 }
 
-int32_t dwc_msix_release(const struct dwc_pcie_dev *dev)
+int32_t pci_msix_disarm(const struct dwc_pcie_dev *dev)
 {
 	const MSI_DOMAIN *domain;
 	uint16_t ctrl = 0;
