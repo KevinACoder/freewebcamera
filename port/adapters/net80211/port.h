@@ -124,9 +124,21 @@ int wlan_port_up(void);
 void wlan_port_status_dump(void);
 void wlan_port_scan_dump(void);
 
-/* Focus the shell hooks on a named driver adapter. */
+/* Focus the shell hooks on a named driver adapter. The adapter must have
+ * attached; the port keeps a small registry of everything that did. */
 int wlan_port_select(const char *name);
 const char *wlan_port_active_name(void);
+
+/* How many NICs may attach at once (the registry bound). */
+#define WLAN_PORT_NIC_MAX 4
+
+/* Which adapter the port prefers: a driver name, or NULL for "whichever
+ * attaches first".  Set before wlan_start() to keep a NIC out of the active
+ * slot - the PCIe attach is synchronous and would otherwise always win
+ * against the deferred USB one - and for "urtwn" the PCIe bring-up is
+ * skipped entirely, so the two NICs are testable in one boot recipe. */
+void wlan_port_nic_pref_set(const char *name);
+const char *wlan_port_nic_pref_get(void);
 
 /* The active adapter's ieee80211com (NULL before attach). */
 void *wlan_port_get_ic(void);

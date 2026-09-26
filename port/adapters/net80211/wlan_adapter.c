@@ -68,6 +68,14 @@ extern const size_t rtl8188eufw_size;
 
 extern int pcie_glue_init(void);
 
+/* adapter registry state (the port-core section at the bottom of the file
+ * owns the logic; wlan_start reads the preference) */
+static const struct wlan_port_adapter *wlan_registry[WLAN_PORT_NIC_MAX];
+static unsigned wlan_registered;
+static const struct wlan_port_adapter *wlan_active;
+static char wlan_nic_pref_name[16];
+static const char *wlan_nic_pref;
+
 /* ------------------------------------------------------------------ */
 
 static int wlan_started;
@@ -110,18 +118,28 @@ int wlan_start(void) {
 
 	/* platform power-up + ehci_init + config_found: the enumeration,
 	 * hub exploration and urtwn attach (with its firmware load) run
-	 * on the calling thread and the threads the chain spawns. */
-	if (usb_platform_init() != 0) {
+	 * on the calling thread and the threads the chain spawns.
+	 *
+	 * The two bus lines are brought up independently so one NIC can be
+	 * exercised alone: `wlan nic urtwn` skips the PCIe line, `wlan nic iwm`
+	 * skips the USB platform.  That is not only about who owns the active
+	 * slot - the 4 MB system heap carries both worlds, and a NIC under test
+	 * must not be starved by the other's buffers (iwm's RX ring alone is
+	 * ~1.1 MB). */
+	if (wlan_nic_pref != NULL && strcmp(wlan_nic_pref, "iwm") == 0) {
+		printf("wlan: usb line skipped (preference: %s)\n",
+		    wlan_nic_pref);
+	} else if (usb_platform_init() != 0) {
 		printf("wlan: usb platform init failed\n");
 		return -1;
 	}
-	/* the pcie world runs after the usb line: usb keeps its proven
-	 * boot order, and the adapter registry simply prefers whichever
-	 * chip attached first (unplug the USB dongle to make the PCIe
-	 * line the active one).  A pcie failure must not flip the
-	 * started flag back - the usb world is already up and a re-run
-	 * would re-init the EHCI/xHCI hosts. */
-	if (pcie_glue_init() != 0) {
+	/* The pcie world runs after the usb line: usb keeps its proven boot
+	 * order.  A pcie failure must not flip the started flag back - the usb
+	 * world is already up and a re-run would re-init the EHCI/xHCI hosts. */
+	if (wlan_nic_pref != NULL && strcmp(wlan_nic_pref, "urtwn") == 0) {
+		printf("wlan: pcie line skipped (preference: %s)\n",
+		    wlan_nic_pref);
+	} else if (pcie_glue_init() != 0) {
 		printf("wlan: pcie glue init failed (usb line stays up;"
 		    " reboot to retry pcie)\n");
 	}
@@ -131,76 +149,157 @@ int wlan_start(void) {
 
 /* ------------------------------------------------------------------ */
 /* port core: the bus-neutral shell the shell commands dispatch onto
- * (see port.h). One adapter, one active device: the registry keeps the
- * first adapter that registered and every port.* entry point lands on
- * it. */
+ * (see port.h).  The registry keeps every adapter that attached and one
+ * of them is active: the preference (set from the shell with `wlan nic`)
+ * picks which, and without a preference the first to attach wins. */
 
-static const struct wlan_port_adapter *wlan_active;
+void wlan_port_nic_pref_set(const char *name) {
+	/* The name arrives from the shell's argv, whose storage is reused by
+	 * the next command - keep our own copy. */
+	if (name == NULL || strcmp(name, "auto") == 0) {
+		wlan_nic_pref = NULL;
+		return;
+	}
+	strncpy(wlan_nic_pref_name, name, sizeof(wlan_nic_pref_name) - 1);
+	wlan_nic_pref_name[sizeof(wlan_nic_pref_name) - 1] = '\0';
+	wlan_nic_pref = wlan_nic_pref_name;
+}
+
+const char *wlan_port_nic_pref_get(void) {
+	return wlan_nic_pref;
+}
+
+static const struct wlan_port_adapter *wlan_registry_find(const char *name) {
+	unsigned i;
+
+	for (i = 0; i < wlan_registered; i++) {
+		if (strcmp(wlan_registry[i]->name, name) == 0) {
+			return wlan_registry[i];
+		}
+	}
+	return NULL;
+}
 
 void wlan_port_adapter_register(const struct wlan_port_adapter *adapter) {
-	if (wlan_active == NULL) {
-		wlan_active = adapter;
-		printf("wlan: adapter '%s' registered\n", adapter->name);
+	if (wlan_registry_find(adapter->name) != NULL || adapter->name == NULL) {
+		return;
 	}
+	if (wlan_registered >= WLAN_PORT_NIC_MAX) {
+		printf("wlan: adapter registry full, '%s' ignored\n",
+		    adapter->name);
+		return;
+	}
+	wlan_registry[wlan_registered++] = adapter;
+
+	if (wlan_active == NULL) {
+		if (wlan_nic_pref == NULL ||
+		    strcmp(wlan_nic_pref, adapter->name) == 0) {
+			wlan_active = adapter;
+		} else {
+			printf("wlan: adapter '%s' registered (inactive;"
+			    " preference is '%s')\n", adapter->name,
+			    wlan_nic_pref);
+			return;
+		}
+	}
+	printf("wlan: adapter '%s' registered\n", adapter->name);
+}
+
+/* The effective active adapter.  A preference that nothing matched (typo, or
+ * a NIC whose attach failed) must not leave the port dead: fall back to the
+ * first one that attached.  Deferring the fallback to first use is what keeps
+ * a preference like "urtwn" working - iwm attaches first and stays inactive,
+ * and the USB attach that arrives later takes the slot. */
+static const struct wlan_port_adapter *wlan_active_eff(void) {
+	if (wlan_active == NULL && wlan_registered > 0) {
+		return wlan_registry[0];
+	}
+	return wlan_active;
 }
 
 int wlan_port_select(const char *name) {
-	if (wlan_active == NULL || name == NULL) {
+	const struct wlan_port_adapter *a;
+
+	if (name == NULL) {
 		return -1;
 	}
-	return strcmp(wlan_active->name, name) == 0 ? 0 : -1;
+	a = wlan_registry_find(name);
+	if (a == NULL) {
+		return -1;
+	}
+	if (a != wlan_active_eff()) {
+		wlan_active = a;
+		printf("wlan: adapter '%s' selected\n", a->name);
+	}
+	return 0;
 }
 
 const char *wlan_port_active_name(void) {
-	return wlan_active != NULL ? wlan_active->name : NULL;
+	const struct wlan_port_adapter *a = wlan_active_eff();
+
+	return a != NULL ? a->name : NULL;
 }
 
 void *wlan_port_get_ic(void) {
-	return wlan_active != NULL ? wlan_active->ic : NULL;
+	const struct wlan_port_adapter *a = wlan_active_eff();
+
+	return a != NULL ? a->ic : NULL;
 }
 
 int wlan_port_up(void) {
-	if (wlan_active == NULL || wlan_active->up == NULL) {
+	const struct wlan_port_adapter *a = wlan_active_eff();
+
+	if (a == NULL || a->up == NULL) {
 		return -1;
 	}
-	return wlan_active->up();
+	return a->up();
 }
 
 int wlan_port_scan(const uint8_t *ssid, size_t len) {
-	if (wlan_active == NULL || wlan_active->scan == NULL) {
+	const struct wlan_port_adapter *a = wlan_active_eff();
+
+	if (a == NULL || a->scan == NULL) {
 		return -1;
 	}
-	return wlan_active->scan(ssid, len);
+	return a->scan(ssid, len);
 }
 
 int wlan_port_xmit(const uint8_t *frame, size_t len) {
-	if (wlan_active == NULL || wlan_active->xmit == NULL) {
+	const struct wlan_port_adapter *a = wlan_active_eff();
+
+	if (a == NULL || a->xmit == NULL) {
 		return -1;
 	}
-	return wlan_active->xmit(frame, len);
+	return a->xmit(frame, len);
 }
 
 int wlan_port_get_hwaddr(uint8_t addr[6]) {
-	if (wlan_active == NULL || wlan_active->get_hwaddr == NULL) {
+	const struct wlan_port_adapter *a = wlan_active_eff();
+
+	if (a == NULL || a->get_hwaddr == NULL) {
 		return -1;
 	}
-	return wlan_active->get_hwaddr(addr);
+	return a->get_hwaddr(addr);
 }
 
 void wlan_port_status_dump(void) {
-	if (wlan_active == NULL || wlan_active->status_dump == NULL) {
+	const struct wlan_port_adapter *a = wlan_active_eff();
+
+	if (a == NULL || a->status_dump == NULL) {
 		printf("wlan: no adapter\n");
 		return;
 	}
-	wlan_active->status_dump();
+	a->status_dump();
 }
 
 void wlan_port_scan_dump(void) {
-	if (wlan_active == NULL || wlan_active->scan_dump == NULL) {
+	const struct wlan_port_adapter *a = wlan_active_eff();
+
+	if (a == NULL || a->scan_dump == NULL) {
 		printf("wlan: no adapter\n");
 		return;
 	}
-	wlan_active->scan_dump();
+	a->scan_dump();
 }
 
 void wlan_port_deinit(void) {

@@ -40,6 +40,9 @@ extern void wlan_urtwn_txq_dump(void);
 extern volatile unsigned wlan_callout_fires;
 extern volatile unsigned wlan_callout_sched;
 extern volatile unsigned wlan_callout_suppressed;
+
+/* system heap free bytes (port/adapters/threadx/heap.c) */
+extern size_t xPortGetFreeHeapSize(void);
 extern unsigned wlan_callout_get_enabled(void);
 extern void wlan_callout_set_enabled(unsigned on);
 
@@ -113,8 +116,45 @@ static int cmd_wlan(int argc, char **argv)
 			csh_printf(csh, "wlan: no adapter registered yet "
 				   "(run: wlan start)\r\n");
 		}
+		/* The wireless RX rings are the largest single consumer of the
+		 * system heap (iwm's 256 mbuf+cluster slots are ~1.1 MB of 4 MB),
+		 * so a driver that leaks a buffer per event shows up here first:
+		 * free bytes only ever drops. */
+		csh_printf(csh, "heap free=%lu B\r\n",
+		    (unsigned long) xPortGetFreeHeapSize());
 		wlan_port_status_dump();
 		usb_platform_dump();
+		return 0;
+	}
+
+	/* wlan nic [<name>|auto] - pick which attached NIC the port drives.
+	 * Set the preference before `wlan start` to make it stick from the
+	 * beginning (with "urtwn" the PCIe line is then not brought up at
+	 * all); switching after the fact only affects a fresh `wpa start`. */
+	if (argc >= 2 && strcmp(argv[1], "nic") == 0) {
+		const char *active = wlan_port_active_name();
+		const char *pref = wlan_port_nic_pref_get();
+
+		if (argc < 3) {
+			csh_printf(csh, "wlan nic: preference=%s active=%s\r\n",
+			    pref != NULL ? pref : "auto",
+			    active != NULL ? active : "(none)");
+			return 0;
+		}
+		if (strcmp(argv[2], "auto") == 0) {
+			wlan_port_nic_pref_set(NULL);
+			csh_printf(csh, "wlan nic: preference=auto\r\n");
+			return 0;
+		}
+		wlan_port_nic_pref_set(argv[2]);
+		if (wlan_port_select(argv[2]) != 0) {
+			csh_printf(csh, "wlan nic: '%s' not attached yet;"
+			    " preference recorded for the next 'wlan start'\r\n",
+			    argv[2]);
+			return 0;
+		}
+		csh_printf(csh, "wlan nic: preference=%s active=%s\r\n",
+		    argv[2], wlan_port_active_name());
 		return 0;
 	}
 

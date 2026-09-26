@@ -1,0 +1,45 @@
+--- a/sys/dev/pci/if_iwm.c
++++ b/sys/dev/pci/if_iwm.c
+@@ -3937,6 +3937,32 @@ iwm_rx_rx_mpdu(struct iwm_softc *sc, struct iwm_rx_packet *pkt,
+ 	m->m_data = pkt->data + sizeof(*rx_res);
+ 	m->m_pkthdr.len = m->m_len = len;
+ 
++	/*
++	 * Re-arm the ring slot *before* any of the early returns below.
++	 *
++	 * The slot's mbuf has just been re-pointed at the frame, while the RBD
++	 * still holds the buffer's original address (the device rebuilds it as
++	 * rbd << 8, so the slot's DMA view is fixed).  A return with the mbuf
++	 * still re-pointed therefore poisons the slot: every later DMA into it
++	 * is parsed from the wrong offset, which yields a garbage packet per
++	 * wrap - dropped, so the slot never recovers - and the garbage can
++	 * even look like a command or TX completion, at which point the
++	 * bookkeeping is fed bogus indices.  Rid the driver of that by taking
++	 * a fresh buffer for the slot here; the frame below still travels on
++	 * the mbuf `m`, which iwm_rx_addbuf no longer owns.
++	 */
++	if (iwm_rx_addbuf(sc, IWM_RBUF_SIZE, sc->rxq.cur) != 0) {
++		/*
++		 * Keep the slot's DMA view consistent even when no fresh
++		 * buffer could be had (heap exhausted): the frame is dropped
++		 * below, but the next DMA into this slot must still be parsed
++		 * at the offset the RBD names.
++		 */
++		m->m_data = (char *)(uintptr_t)data->map->dm_segs[0].ds_addr;
++		m->m_len = m->m_pkthdr.len = IWM_RBUF_SIZE;
++		return;
++	}
++
+ 	if (__predict_false(phy_info->cfg_phy_cnt > 20)) {
+ 		DPRINTF(("dsp size out of range [0,20]: %d\n",
+ 		    phy_info->cfg_phy_cnt));
+@@ -3961,9 +3987,6 @@ iwm_rx_rx_mpdu(struct iwm_softc *sc, struct iwm_rx_packet *pkt,
+ 	if (ic->ic_state == IEEE80211_S_SCAN)
+ 		iwm_fix_channel(sc, m);
+ 
+-	if (iwm_rx_addbuf(sc, IWM_RBUF_SIZE, sc->rxq.cur) != 0)
+-		return;
+-
+ 	m_set_rcvif(m, IC2IFP(ic));
+ 
+ 	if (le16toh(phy_info->channel) < __arraycount(ic->ic_channels))

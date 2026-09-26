@@ -209,3 +209,82 @@ size_t xPortGetFreeHeapSize(void)
 	_tx_thread_smp_unprotect(save);
 	return free_bytes;
 }
+
+/* --- census: what is outstanding right now ---------------------------------
+ *
+ * The 4 MB region carries the whole networking world, and the wireless
+ * drivers allocate in bursts (an RX ring is 256 x 4.4 KB).  When an
+ * allocation fails, the useful question is not the free count but *which*
+ * blocks are live: this walk reports every block of 2 KB or more with its
+ * size and its first four words, so a leaked mbuf is recognizable from the
+ * shell (an mbuf's head reads m_flags/m_next/m_nextpkt, then m_data at
+ * word 2 and m_len at word 3 - m_flags 3 is M_PKTHDR|M_EXT, i.e. a
+ * header+cluster pair).
+ */
+
+struct heap_census {
+	size_t total;			/* bytes in live blocks >= 2 KB */
+	unsigned int blocks;
+	unsigned int printed;
+	size_t small_total;		/* everything live, for the balance */
+	unsigned int small_blocks;
+};
+
+static void heap_census_walker(void *ptr, size_t size, int used, void *user)
+{
+	struct heap_census *c = user;
+	char msg[128];
+	const uint32_t *w;
+	char *out;
+	int n;
+
+	if (!used) {
+		return;
+	}
+	c->small_total += size;
+	c->small_blocks++;
+	if (size < 2048u) {
+		return;
+	}
+	c->total += size;
+	c->blocks++;
+	if (c->printed >= 16u) {
+		return;
+	}
+	c->printed++;
+
+	w = (const uint32_t *) ptr;
+	n = snprintf(msg, sizeof(msg),
+		     "heap blk %08lx sz=%lu w=%08lx %08lx %08lx %08lx\n",
+		     (unsigned long)(uintptr_t) ptr, (unsigned long) size,
+		     (unsigned long) w[0], (unsigned long) w[1],
+		     (unsigned long) w[2], (unsigned long) w[3]);
+	if (n > 0 && (size_t) n < sizeof(msg)) {
+		out = msg;
+		board_early_print(out);
+	} else {
+		board_early_print("heap blk (unprintable)\n");
+	}
+}
+
+void wlan_heap_census(void)
+{
+	struct heap_census c;
+	char msg[128];
+	unsigned int save;
+
+	memset(&c, 0, sizeof(c));
+	if (heap_tlsf == (tlsf_t) 0) {
+		board_early_print("heap: not created yet\n");
+		return;
+	}
+	save = _tx_thread_smp_protect();
+	tlsf_walk_pool(tlsf_get_pool(heap_tlsf), heap_census_walker, &c);
+	_tx_thread_smp_unprotect(save);
+
+	(void)snprintf(msg, sizeof(msg),
+		       "heap census: live=%lu B in %u block(s), >=2K: %lu B in %u\n",
+		       (unsigned long) c.small_total, c.small_blocks,
+		       (unsigned long) c.total, c.blocks);
+	board_early_print(msg);
+}

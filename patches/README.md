@@ -57,5 +57,25 @@ Current state:
     `XHCI_DEBUG_DEFAULT` (same treatment as ehci's debug level) instead of
     a hard 0, so the xHCI debug verbosity is compile-time configurable via
     the compat `opt_usb.h` (introduced with the xHCI line).
+  - `0007-iwm-rx-rearm-slot-before-early-returns.patch` — `iwm_rx_rx_mpdu()`
+    re-points the ring slot's mbuf at the frame *before* its two early
+    returns (bad phy-info, bad CRC/overrun), so any dropped frame used to
+    leave the slot poisoned: the RBD keeps the buffer's original address
+    (the device rebuilds it as `rbd << 8`) while the driver reads from the
+    moved `m_data` — a 12-byte shift that turns every later DMA into that
+    slot into a garbage packet.  The garbage is dropped (the slot never
+    recovers) and, when it looks like a TX response, walks `txd->in ==
+    NULL` into a null dereference; the same stream feeds bogus indices to
+    the command ring, which is how the trunk image flooded the console and
+    then crashed.  The re-arm now happens before both returns, and a failed
+    re-arm restores the slot's DMA view before dropping the frame.  Board
+    evidence: flood gone, no KASSERT/crash, WPA2 association succeeds
+    (evidence 20260926-feat-net80211_refine).
+  - `0008-iwm-throttle-unhandled-response-print.patch` — the `default:` of
+    `iwm_notif_intr()`'s response switch printed unconditionally; one
+    corrupted ring slot is re-read on every wrap, so it buried the console
+    at tens of lines per second.  First 8 lines, then one per thousand,
+    each carrying an `n=` counter (same intent as 0003: keep the
+    diagnostic, lose the flood).
 - `threadx/`, `cherrysh/`, `cherryrb/`, `lwip/` — no patches; used
   byte-identical to their pins.
