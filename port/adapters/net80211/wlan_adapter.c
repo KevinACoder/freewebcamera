@@ -60,10 +60,13 @@ void *wlan_port_thread_create(void (*run)(void *), void *arg) {
 
 /* ------------------------------------------------------------------ */
 /* firmware: the blobs embedded at build time (generated from the
- * net80211 submodule's realtek dist by tools/gen_firmware_array.py) */
+ * net80211 submodule's realtek dist by tools/gen_firmware_array.py,
+ * and the Intel 7260 ucode carried alongside them) */
 
 extern const uint8_t rtl8188eufw_data[];
 extern const size_t rtl8188eufw_size;
+
+extern int pcie_glue_init(void);
 
 /* ------------------------------------------------------------------ */
 
@@ -93,6 +96,17 @@ int wlan_start(void) {
 		printf("wlan: firmware registration failed\n");
 		return -1;
 	}
+	{
+		extern const uint8_t iwlwifi7260_17_ucode_data[];
+		extern const size_t iwlwifi7260_17_ucode_size;
+
+		if (wlan_port_firmware_register("iwlwifi-7260-17.ucode",
+			iwlwifi7260_17_ucode_data,
+			(size_t) iwlwifi7260_17_ucode_size) != 0) {
+			printf("wlan: iwm firmware registration failed\n");
+			return -1;
+		}
+	}
 
 	/* platform power-up + ehci_init + config_found: the enumeration,
 	 * hub exploration and urtwn attach (with its firmware load) run
@@ -100,6 +114,16 @@ int wlan_start(void) {
 	if (usb_platform_init() != 0) {
 		printf("wlan: usb platform init failed\n");
 		return -1;
+	}
+	/* the pcie world runs after the usb line: usb keeps its proven
+	 * boot order, and the adapter registry simply prefers whichever
+	 * chip attached first (unplug the USB dongle to make the PCIe
+	 * line the active one).  A pcie failure must not flip the
+	 * started flag back - the usb world is already up and a re-run
+	 * would re-init the EHCI/xHCI hosts. */
+	if (pcie_glue_init() != 0) {
+		printf("wlan: pcie glue init failed (usb line stays up;"
+		    " reboot to retry pcie)\n");
 	}
 	wlan_started = 1;
 	return 0;

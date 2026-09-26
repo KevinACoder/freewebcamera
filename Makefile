@@ -126,8 +126,15 @@ ADAPTER_SRCS := \
 	port/adapters/netutils/iperf3_cmd.c \
 	port/adapters/netutils/ntp_port.c \
 	port/adapters/netutils/telnet_port.c \
+	port/adapters/pcie/pcie_cmds.c \
 
-DRIVER_SRCS := drivers/uart_ns16550.c
+DRIVER_SRCS := drivers/uart_ns16550.c \
+	drivers/dwc_pcie.c \
+	drivers/dwc_msix.c
+
+# Board data for the PCIe controllers (D45 shape: drivers/ keeps the
+# platform-agnostic IP, the coordinates live with the board).
+BOARD_SRCS := port/board/$(BOARD)/rk3568_pcie.c
 
 APP_SRCS := app/main.c app/dbg_scenario.c
 
@@ -187,11 +194,15 @@ NET80211_ADAPTER_SRCS := \
 	port/adapters/net80211/wlan_cmds.c \
 	port/adapters/net80211/usb_platform.c \
 	port/adapters/net80211/usb_xhci_platform.c \
-	port/adapters/net80211/fw_rtl8188eufw.c
+	port/adapters/net80211/fw_rtl8188eufw.c \
+	port/adapters/net80211/fw_iwlwifi7260.c \
+	port/adapters/net80211/iwm_reg.c \
+	port/adapters/net80211/pcie_glue.c
 
 NET80211_INC := -Iinclude \
 	-Iport/adapters/net80211/compat/netbsd \
 	-Ithird-party/net80211/sys \
+	-Ithird-party/net80211/sys/arch \
 	-Iport/adapters/net80211/osal \
 	-Iport/adapters/net80211/osal/compat \
 	-Iport/adapters/net80211 \
@@ -402,7 +413,7 @@ ASM_SRCS := \
 
 # --- rules --------------------------------------------------------------------
 
-C_SRCS := $(KERNEL_SRCS) $(ARCH_SRCS) $(ADAPTER_SRCS) $(DRIVER_SRCS) $(APP_SRCS)
+C_SRCS := $(KERNEL_SRCS) $(ARCH_SRCS) $(ADAPTER_SRCS) $(DRIVER_SRCS) $(BOARD_SRCS) $(APP_SRCS)
 NET80211_IMPL_OBJS := $(addprefix $(BUILD)/,$(NET80211_IMPL_SRCS:.c=.o))
 NET80211_ADAPTER_OBJS := $(addprefix $(BUILD)/,$(NET80211_ADAPTER_SRCS:.c=.o))
 LWIP_OBJS := $(addprefix $(BUILD)/,$(LWIP_SRCS:.c=.o))
@@ -562,7 +573,8 @@ modules:
 	git -c protocol.file.allow=always submodule update --init --recursive
 	git -C third-party/net80211 sparse-checkout set \
 		sys/net80211 sys/dev/usb sys/dev/ic sys/dev/hid sys/crypto/aes \
-		sys/fs external/realtek/urtwn || \
+		sys/fs external/realtek/urtwn \
+		sys/dev/pci sys/arch/arm/include || \
 		echo 'note: net80211 sparse-checkout not set (kept full checkout)'
 	git -C third-party/wpa_supplicant sparse-checkout set \
 		src wpa_supplicant || \

@@ -46,7 +46,12 @@ __wlan_barrier(void)
  * the DMA pool: static, identity-mapped, 4096-aligned
  */
 
-#define WLAN_DMA_POOL_BYTES (512 * 1024)
+/* The USB line fits in half a megabyte; iwm does not - its fw load alone
+ * walks ~256 KiB DMA segments and the five TX queues carry their TFD ring,
+ * cmd buffers and scratch from the same pool (the abandoned fdt line died
+ * on "could not allocate TX cmd DMA memory" at 512 KiB). 4 MiB keeps the
+ * whole radio world comfortably inside the 96 MiB image RAM window. */
+#define WLAN_DMA_POOL_BYTES (4 * 1024 * 1024)
 
 static uint8_t wlan_dma_pool[WLAN_DMA_POOL_BYTES]
     __attribute__((aligned(4096)));
@@ -77,6 +82,61 @@ wlan_bus_space_barrier(bus_space_tag_t t, bus_space_handle_t h,
 	(void) t; (void) h; (void) o; (void) len; (void) flags;
 	__wlan_barrier();
 }
+
+/* ------------------------------------------------------------------
+ * bus_space(9): identity-map window-checked mapping
+ */
+
+/*
+ * The windows this port grants.  Everything below 4 GiB sits in the
+ * L1[3] Device window (mmu.c); the DesignWare DBI frames live above
+ * 4 GiB in the dedicated L2 pages board_conf.h switches on.  A request
+ * outside these windows is refused - the mapping would fault anyway,
+ * and refusing names the mistake at the map call instead of an async
+ * external abort deep inside an attach.
+ */
+static const struct wlan_bus_window {
+	bus_addr_t w_base;
+	bus_addr_t w_end;	/* exclusive */
+} wlan_bus_windows[] = {
+	{ 0xf0000000UL, 0xf0200000UL },	/* pcie ECAM config window */
+	{ 0xf0200000UL, 0xf4000000UL },	/* pcie MEM window (30 MiB + gap) */
+	{ 0xfd000000UL, 0xfe000000UL },	/* SoC low: GIC/CRU/GRF/PMUCRU */
+	{ 0xfe000000UL, 0xff000000UL },	/* peripherals: pcie apb, pcie30phy */
+	{ 0x3c0000000ULL, 0x3c0c00000ULL }, /* DWC DBI frames (pcie2x1/3x2) */
+};
+
+static int
+wlan_bus_space_map_cb(void *cookie, bus_addr_t addr, bus_size_t size,
+	int flags, bus_space_handle_t *hp)
+{
+	size_t n;
+
+	(void) cookie; (void) flags;
+
+	for (n = 0; n < sizeof(wlan_bus_windows) / sizeof(wlan_bus_windows[0]);
+	    n++) {
+		const struct wlan_bus_window *w = &wlan_bus_windows[n];
+
+		if (addr >= w->w_base && addr + size <= w->w_end) {
+			/* identity mapping: the handle is the address */
+			*hp = (bus_space_handle_t) addr;
+			return 0;
+		}
+	}
+	printf("bus: bus_space_map OUT OF WINDOWS addr=%08llx size=%lx\n",
+	    (unsigned long long) addr, (unsigned long) size);
+	return ERANGE;
+}
+
+static struct bus_space wlan_bus_space_store = {
+	.bs_cookie = NULL,
+	.bs_map = wlan_bus_space_map_cb,
+	.bs_unmap = NULL,
+};
+
+/* the singleton tag every bus backend hands out (compat bus.h) */
+bus_space_tag_t wlan_bus_space_tag = &wlan_bus_space_store;
 
 /* ------------------------------------------------------------------
  * bus_dma(9): identity mapping, single-segment

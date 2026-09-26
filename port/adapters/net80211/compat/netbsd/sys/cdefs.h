@@ -98,16 +98,33 @@
 #define __link_set_foreach(pvar, set)
 #endif
 
-/* bitfield helpers from NetBSD sys/types.h */
+/* Bit helpers, upstream semantics (kept identical to port_config.h,
+ * which is force-included ahead of this header). */
 #ifndef __BIT
-#define __BIT(n) ((uintmax_t)1 << (n))
+#define __BIT(n) \
+	(((uintmax_t)(n) >= __CHAR_BIT__ * sizeof(uintmax_t)) ? 0 : \
+	 ((uintmax_t)1 << (n)))
+#endif
+#ifndef SET
 #define SET(t, f) ((t) |= (f))
 #define CLR(t, f) ((t) &= ~(f))
 #define ISSET(t, f) ((t) & (f))
 #endif
 
 #ifndef __BITS
-#define __BITS(hi, lo) ((UINT64_MAX >> (63 - (hi))) & (UINT64_MAX << (lo)))
+/* Contiguous mask for bits a..b in either order (upstream:
+ * __BITS(0, 7) == 0xff).  A (hi, lo)-only form here made every
+ * (low, high) call site - the order the imported PCI code uses -
+ * evaluate to 0. */
+#define __BITS(a, b) \
+	((__BIT((((a) > (b)) ? (a) : (b)) + 1) - 1) ^ \
+	 (__BIT(((a) > (b)) ? (b) : (a)) - 1))
+#endif
+#ifndef __LOWEST_SET_BIT
+#define __LOWEST_SET_BIT(m) ((((m) - 1) & (m)) ^ (m))
+#endif
+#ifndef __SHIFTOUT_MASK
+#define __SHIFTOUT_MASK(m) __SHIFTOUT((m), (m))
 #endif
 
 /* NetBSD's cdefs.h carries these as PRIuMAX; only the format string
