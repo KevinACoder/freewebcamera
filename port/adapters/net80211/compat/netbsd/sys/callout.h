@@ -28,6 +28,12 @@ struct callout {
 	unsigned hc_fires;
 	unsigned hc_long_fires;
 	unsigned hc_last_fire_ms;
+	/* deferral generation: bumped by stop/schedule; a fire that spent
+	 * time in the callout-worker queue only runs if its captured
+	 * generation is still current */
+	unsigned hc_gen;
+	unsigned hc_fire_gen;
+	unsigned hc_stale_drops;
 	struct callout *hc_next;
 };
 typedef struct callout callout_t;
