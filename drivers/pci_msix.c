@@ -27,15 +27,18 @@
 #include "msi.h"
 #include "regs.h"
 
+#include "pci.h"
 #include "pci_msix.h"
 
-static int32_t msix_ctrl_read(const struct dwc_pcie_dev *dev, uint16_t *value)
+static int32_t msix_ctrl_read(const struct pci_func *pf,
+				      const struct pci_cfg_backend *cfg,
+				      uint16_t *value)
 {
 	uint32_t tmp;
 	int32_t ret;
 
-	ret = dwc_pcie_cfg_read(dev->busn, dev->devfn,
-				(uint32_t)dev->msix_cap + PCI_MSIX_FLAGS, 2, &tmp);
+	ret = cfg->read(pf->busn, pf->devfn,
+				(uint32_t)pf->msix_cap + PCI_MSIX_FLAGS, 2, &tmp);
 	if (ret != ARM_DRIVER_OK) {
 		return ret;
 	}
@@ -44,32 +47,36 @@ static int32_t msix_ctrl_read(const struct dwc_pcie_dev *dev, uint16_t *value)
 	return ARM_DRIVER_OK;
 }
 
-static void msix_ctrl_write(const struct dwc_pcie_dev *dev, uint16_t value)
+static void msix_ctrl_write(const struct pci_func *pf,
+				    const struct pci_cfg_backend *cfg,
+				    uint16_t value)
 {
-	(void)dwc_pcie_cfg_write(dev->busn, dev->devfn,
-				 (uint32_t)dev->msix_cap + PCI_MSIX_FLAGS, 2, value);
+	(void)cfg->write(pf->busn, pf->devfn,
+				 (uint32_t)pf->msix_cap + PCI_MSIX_FLAGS, 2, value);
 }
 
 /* The table's physical address: BAR `bir` plus the offset the capability
  * carries. A 64-bit BAR needs its upper half read as well; the MEM window on
  * this board is below 4GiB, but a BAR fetched from firmware config space is
  * the wrong thing to assume about. */
-static int32_t msix_table_addr(const struct dwc_pcie_dev *dev, uint32_t *bir,
-			       uintptr_t *table, uint32_t *entries)
+static int32_t msix_table_addr(const struct pci_func *pf,
+			       const struct pci_cfg_backend *cfg,
+			       uint32_t *bir, uintptr_t *table,
+			       uint32_t *entries)
 {
 	uint16_t control;
 	uint32_t tbl;
 	uint64_t base;
 	int32_t ret;
 
-	ret = msix_ctrl_read(dev, &control);
+	ret = msix_ctrl_read(pf, cfg, &control);
 	if (ret != ARM_DRIVER_OK) {
 		return ret;
 	}
 	*entries = (control & PCI_MSIX_FLAGS_QSIZE) + 1u;
 
-	ret = dwc_pcie_cfg_read(dev->busn, dev->devfn,
-				(uint32_t)dev->msix_cap + PCI_MSIX_TABLE, 4, &tbl);
+	ret = cfg->read(pf->busn, pf->devfn,
+				(uint32_t)pf->msix_cap + PCI_MSIX_TABLE, 4, &tbl);
 	if (ret != ARM_DRIVER_OK) {
 		return ret;
 	}
@@ -79,9 +86,9 @@ static int32_t msix_table_addr(const struct dwc_pcie_dev *dev, uint32_t *bir,
 		return ARM_DRIVER_ERROR;
 	}
 
-	base = dev->bar[*bir] & ~0xfULL;
-	if ((dev->bar[*bir] & 0x6u) == 0x4u && *bir < 5u) {	/* 64-bit BAR */
-		base |= (uint64_t)dev->bar[*bir + 1u] << 32;
+	base = pf->bar[*bir] & ~0xfULL;
+	if ((pf->bar[*bir] & 0x6u) == 0x4u && *bir < 5u) {	/* 64-bit BAR */
+		base |= (uint64_t)pf->bar[*bir + 1u] << 32;
 	}
 
 	*table = (uintptr_t)(base + (tbl & PCI_MSIX_TABLE_OFFSET));
@@ -110,8 +117,9 @@ static void msix_write_entry(uintptr_t entry, const MSI_VECTOR *vec)
 	reg_dsb();
 }
 
-int32_t pci_msix_arm(const struct dwc_pcie_dev *dev, uint32_t nvec_max,
-		       MSI_VECTOR *vectors)
+int32_t pci_msix_arm(const struct pci_func *pf,
+		     const struct pci_cfg_backend *cfg, uint32_t nvec_max,
+		     MSI_VECTOR *vectors)
 {
 	const MSI_DOMAIN *domain;
 	uintptr_t table;
@@ -122,14 +130,15 @@ int32_t pci_msix_arm(const struct dwc_pcie_dev *dev, uint32_t nvec_max,
 	int32_t count;
 	int32_t ret;
 
-	if (dev == NULL || vectors == NULL || nvec_max == 0) {
+	if (pf == NULL || cfg == NULL || vectors == NULL ||
+	    nvec_max == 0) {
 		return ARM_DRIVER_ERROR_PARAMETER;
 	}
-	if (dev->msix_cap == 0) {
+	if (pf->msix_cap == 0) {
 		return ARM_DRIVER_ERROR_UNSUPPORTED;
 	}
 
-	ret = msix_table_addr(dev, &bir, &table, &entries);
+	ret = msix_table_addr(pf, cfg, &bir, &table, &entries);
 	if (ret != ARM_DRIVER_OK) {
 		return ret;
 	}
@@ -141,8 +150,9 @@ int32_t pci_msix_arm(const struct dwc_pcie_dev *dev, uint32_t nvec_max,
 	}
 
 	/* MSI-X stays disabled while the table and the ITS are programmed. */
-	(void)msix_ctrl_read(dev, &ctrl);
-	msix_ctrl_write(dev, (uint16_t)(ctrl & ~PCI_MSIX_FLAGS_ENABLE));
+	(void)msix_ctrl_read(pf, cfg, &ctrl);
+	msix_ctrl_write(pf, cfg,
+			  (uint16_t)(ctrl & ~PCI_MSIX_FLAGS_ENABLE));
 
 	domain = msi_domain_get();
 	if (domain == NULL) {
@@ -150,17 +160,17 @@ int32_t pci_msix_arm(const struct dwc_pcie_dev *dev, uint32_t nvec_max,
 		return ARM_DRIVER_ERROR_UNSUPPORTED;
 	}
 
-	count = domain->Allocate(dwc_pcie_requester_id(dev), nvec_max, vectors);
+	count = domain->Allocate(pci_func_requester_id(pf), nvec_max, vectors);
 	if (count < 1) {
-		board_log("msix: %04x:%04x got no vectors\n", dev->vendor,
-			  dev->device);
+		board_log("msix: %04x:%04x got no vectors\n", pf->vendor,
+			  pf->device);
 		return ARM_DRIVER_ERROR;
 	}
 	if ((uint32_t)count > entries) {
 		/* The domain promised more than the table can carry: the extra
 		 * event ids would be unmapped again on release, so refuse now
 		 * rather than leave live translations behind. */
-		domain->Free(dwc_pcie_requester_id(dev));
+		domain->Free(pci_func_requester_id(pf));
 		return ARM_DRIVER_ERROR;
 	}
 
@@ -172,7 +182,7 @@ int32_t pci_msix_arm(const struct dwc_pcie_dev *dev, uint32_t nvec_max,
 		if (vectors[i].data != i) {
 			board_log("msix: vector %u carries event id %u,"
 				  " table index would not match\n", i, vectors[i].data);
-			domain->Free(dwc_pcie_requester_id(dev));
+			domain->Free(pci_func_requester_id(pf));
 			return ARM_DRIVER_ERROR;
 		}
 		msix_write_entry(table + (uintptr_t)i * PCI_MSIX_ENTRY_SIZE,
@@ -181,9 +191,10 @@ int32_t pci_msix_arm(const struct dwc_pcie_dev *dev, uint32_t nvec_max,
 
 	/* Function masked while the entries are armed, then every entry
 	 * unmasked, then ENABLE raised - all in that order. */
-	(void)msix_ctrl_read(dev, &ctrl);
-	msix_ctrl_write(dev, (uint16_t)((ctrl & ~PCI_MSIX_FLAGS_ENABLE) |
-					PCI_MSIX_FLAGS_MASKALL));
+	(void)msix_ctrl_read(pf, cfg, &ctrl);
+	msix_ctrl_write(pf, cfg,
+			(uint16_t)((ctrl & ~PCI_MSIX_FLAGS_ENABLE) |
+				    PCI_MSIX_FLAGS_MASKALL));
 
 	for (i = 0; i < (uint32_t)count; i++) {
 		uintptr_t entry = table + (uintptr_t)i * PCI_MSIX_ENTRY_SIZE;
@@ -192,38 +203,40 @@ int32_t pci_msix_arm(const struct dwc_pcie_dev *dev, uint32_t nvec_max,
 	}
 	reg_dsb();
 
-	(void)msix_ctrl_read(dev, &ctrl);
-	msix_ctrl_write(dev, (uint16_t)((ctrl & ~PCI_MSIX_FLAGS_MASKALL) |
-					PCI_MSIX_FLAGS_ENABLE));
+	(void)msix_ctrl_read(pf, cfg, &ctrl);
+	msix_ctrl_write(pf, cfg,
+			(uint16_t)((ctrl & ~PCI_MSIX_FLAGS_MASKALL) |
+				    PCI_MSIX_FLAGS_ENABLE));
 	reg_dsb();
 
 	board_log("msix: %04x:%04x rid %04x, %d vector(s), table BAR%u+0x%lx"
 		  " (%lu entries)\n",
-		  dev->vendor, dev->device, dwc_pcie_requester_id(dev), count, bir,
-		  (unsigned long)(table - (dev->bar[bir] & ~0xfULL)),
+		  pf->vendor, pf->device, pci_func_requester_id(pf), count, bir,
+		  (unsigned long)(table - (pf->bar[bir] & ~0xfULL)),
 		  (unsigned long)entries);
 
 	return count;
 }
 
-int32_t pci_msix_disarm(const struct dwc_pcie_dev *dev)
+int32_t pci_msix_disarm(const struct pci_func *pf,
+			const struct pci_cfg_backend *cfg)
 {
 	const MSI_DOMAIN *domain;
 	uint16_t ctrl = 0;
 
-	if (dev == NULL || dev->msix_cap == 0) {
+	if (pf == NULL || cfg == NULL || pf->msix_cap == 0) {
 		return ARM_DRIVER_ERROR_PARAMETER;
 	}
 
-	(void)msix_ctrl_read(dev, &ctrl);
+	(void)msix_ctrl_read(pf, cfg, &ctrl);
 	ctrl &= (uint16_t)~PCI_MSIX_FLAGS_ENABLE;
 	ctrl |= PCI_MSIX_FLAGS_MASKALL;
-	msix_ctrl_write(dev, ctrl);
+	msix_ctrl_write(pf, cfg, ctrl);
 	reg_dsb();
 
 	domain = msi_domain_get();
 	if (domain != NULL) {
-		domain->Free(dwc_pcie_requester_id(dev));
+		domain->Free(pci_func_requester_id(pf));
 	}
 
 	return ARM_DRIVER_OK;
