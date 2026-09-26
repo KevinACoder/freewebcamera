@@ -61,12 +61,37 @@ void *wlan_port_thread_create(void (*run)(void *), void *arg) {
 /* ------------------------------------------------------------------ */
 /* firmware: the blobs embedded at build time (generated from the
  * net80211 submodule's realtek dist by tools/gen_firmware_array.py,
- * and the Intel 7260 ucode carried alongside them) */
+ * and the Intel 7260 ucode carried alongside them). Each line's
+ * bring-up compiles only when the image carries it (WLAN_NIC at
+ * build time - see the Makefile block). */
 
+#if WLAN_NIC_USB
 extern const uint8_t rtl8188eufw_data[];
 extern const size_t rtl8188eufw_size;
+#endif
 
+#if WLAN_NIC_PCIE
 extern int pcie_glue_init(void);
+#endif
+
+#if WLAN_NIC_SDIO
+#include "sdio.h"
+
+extern const uint8_t rtw8189ffw_data[];
+extern const size_t rtw8189ffw_size;
+/* the rtw8189f chip driver TU (rtw8189f_reg.c) */
+extern const struct wlan_chip_driver rtw8189f_driver;
+/* SDIO has no autoconf hotplug hook (D51 of the frozen DESIGN): the port
+ * claims the enumerated card through this explicit, idempotent probe. */
+int wlan_sdio_probe(void);
+
+/* the SDIO-side chip driver registry the bus probe scans (the USB and
+ * PCIe lines attach through the NetBSD autoconf chain instead) */
+const struct wlan_chip_driver *const wlan_chip_drivers[] = {
+	&rtw8189f_driver,
+	NULL,
+};
+#endif
 
 /* ------------------------------------------------------------------ */
 
@@ -84,6 +109,7 @@ int wlan_start(void) {
 	}
 	wlan_osal_cmsis_init();
 	wlan_console_ready();
+#if WLAN_NIC_USB
 		/* the netbsd usb history log level for the bring-up rounds
 		 * (ehci's level comes from EHCI_DEBUG_DEFAULT) */
 		{
@@ -96,6 +122,8 @@ int wlan_start(void) {
 		printf("wlan: firmware registration failed\n");
 		return -1;
 	}
+#endif
+#if WLAN_NIC_PCIE
 	{
 		extern const uint8_t iwlwifi7260_17_ucode_data[];
 		extern const size_t iwlwifi7260_17_ucode_size;
@@ -107,24 +135,51 @@ int wlan_start(void) {
 			return -1;
 		}
 	}
+#endif
+#if WLAN_NIC_SDIO
+	if (wlan_port_firmware_register("rtw8189f_fw.bin", rtw8189ffw_data,
+	    (size_t) rtw8189ffw_size) != 0) {
+		printf("wlan: rtw8189f firmware registration failed\n");
+		return -1;
+	}
+#endif
 
 	/* platform power-up + ehci_init + config_found: the enumeration,
 	 * hub exploration and urtwn attach (with its firmware load) run
 	 * on the calling thread and the threads the chain spawns. */
+#if WLAN_NIC_USB
 	if (usb_platform_init() != 0) {
 		printf("wlan: usb platform init failed\n");
 		return -1;
 	}
+#endif
 	/* the pcie world runs after the usb line: usb keeps its proven
 	 * boot order, and the adapter registry simply prefers whichever
 	 * chip attached first (unplug the USB dongle to make the PCIe
 	 * line the active one).  A pcie failure must not flip the
 	 * started flag back - the usb world is already up and a re-run
 	 * would re-init the EHCI/xHCI hosts. */
+#if WLAN_NIC_PCIE
 	if (pcie_glue_init() != 0) {
 		printf("wlan: pcie glue init failed (usb line stays up;"
 		    " reboot to retry pcie)\n");
 	}
+#endif
+	/* the SDIO line: enumerate the slot, then run the explicit claim
+	 * probe. Both are idempotent - a `sdio reinit` on the shell re-runs
+	 * the enumeration and the probe re-claims (D51 of the frozen
+	 * DESIGN: SDIO has no hotplug hook, whichever runs last wins).
+	 * The started flag goes up first: the probe's readiness gate reads
+	 * it, and by this point the OSAL, the console and the firmware
+	 * registry it stands for are all up. */
+#if WLAN_NIC_SDIO
+	wlan_started = 1;
+	if (sdio_start() != 0) {
+		printf("wlan: sdio slot enumeration failed\n");
+	} else if (wlan_sdio_probe() != 0) {
+		printf("wlan: no SDIO wlan card matched\n");
+	}
+#endif
 	wlan_started = 1;
 	return 0;
 }

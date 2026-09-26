@@ -1,0 +1,280 @@
+--- a/sys/dev/sdmmc/if_rtw8189f.c
++++ b/sys/dev/sdmmc/if_rtw8189f.c
+@@ -88,6 +88,8 @@
+ static void	rtw8189f_attachhook(device_t);
+ static int	rtw8189f_load_firmware(struct rtw8189f_softc *);
+ static int	rtw8189f_init(struct ifnet *);
++/* NET80211_PORT(L): SDIO DAT1 card interrupt handler */
++static int	rtw8189f_sdio_intr(void *);
+ static void	rtw8189f_stop(struct ifnet *, int);
+ static void	rtw8189f_start(struct ifnet *);
+ static void	rtw8189f_watchdog(struct ifnet *);
+@@ -208,7 +210,8 @@
+ 	 * running with the PBP reset default 0x10 - RX pages of 64 bytes
+ 	 * instead of 128 - and every large received frame was lost on the
+ 	 * air interface while small frames (beacons, ARP, ICMP) passed:
+-	 * the M11 TCP-downlink stall.
++	 * the M11 TCP-downlink stall.  Post-download chip_init still
++	 * re-writes these; harmless re-assertion.
+ 	 */
+ 	rtw8189f_mac_write_1(sc, RTW8189F_REG_PBP,
+ 	    RTW8189F_PBP_RX(RTW8189F_PBP_128) | RTW8189F_PBP_TX(RTW8189F_PBP_128));
+@@ -411,6 +414,22 @@
+ 			sc->sc_chip_ready = false;
+ 			return error;
+ 		}
++
++		/* NET80211_PORT(L): SDIO DAT1 interrupt mode. Chip-side
++		 * RX_REQUEST plus CCCR INT_ENABLE go on with the worker
++		 * already running; the 10 ms poll stays armed as the
++		 * watchdog (mstohz(RTW8189F_RX_POLL_MS)). */
++		sc->sc_ih = sdmmc_intr_establish(sc->sc_sf,
++		    rtw8189f_sdio_intr, sc);
++		if (sc->sc_ih != NULL) {
++			(void) rtw8189f_sdiolocal_write_1(sc,
++			    RTW8189F_SDIO_REG_HIMR, RTW8189F_HIMR_RX_REQUEST);
++			aprint_normal_dev(sc->sc_dev,
++			    "SDIO interrupt mode on\n");
++		} else {
++			aprint_normal_dev(sc->sc_dev,
++			    "SDIO interrupt establish failed, poll-only\n");
++		}
+ 	}
+ 
+ 	s = splnet();
+@@ -440,6 +459,14 @@
+ 		ieee80211_new_state(ic, IEEE80211_S_INIT, -1);
+ 	splx(s);
+ 
++	if (sc->sc_ih != NULL) {
++		/* kill the chip-side source first, then the host line */
++		(void) rtw8189f_sdiolocal_write_1(sc,
++		    RTW8189F_SDIO_REG_HIMR, 0);
++		sdmmc_intr_disestablish(sc->sc_ih);
++		sc->sc_ih = NULL;
++	}
++
+ 	/*
+ 	 * Halt the worker without joining it: the worker can be deep
+ 	 * inside a net80211 callback chain and a join here deadlocks the
+@@ -737,6 +764,19 @@
+ 		kpause("rtw8189fw", false, mstohz(10), NULL);
+ }
+ 
++/* NET80211_PORT(L): SDIO card interrupt (DAT1). Runs in host-controller
++ * ISR context: latch the RX work flag and hand the worker cv one token -
++ * the bus itself is untouchable here. */
++static int
++rtw8189f_sdio_intr(void *arg)
++{
++	struct rtw8189f_softc *sc = arg;
++
++	sc->sc_flags |= RTW8189F_F_RX;
++	wlan_cv_isr_wake(&sc->sc_cv);
++	return 1;
++}
++
+ static void
+ rtw8189f_worker(void *arg)
+ {
+@@ -753,10 +793,13 @@
+ 	while (!sc->sc_dying) {
+ 		mutex_enter(&sc->sc_work_mtx);
+ 		while (!(sc->sc_flags & (RTW8189F_F_NEWSTATE | RTW8189F_F_TX |
+-		    RTW8189F_F_SCANNEXT | RTW8189F_F_EXIT)) && !sc->sc_dying) {
+-			/* A timeout is RX work, even without a software event. */
++		    RTW8189F_F_SCANNEXT | RTW8189F_F_EXIT |
++		    RTW8189F_F_RX)) && !sc->sc_dying) {
++			/* A timeout is RX work, even without a software event.
++			 * PORT: poll quantum is a tunable (opt_rtw8189f.h,
++			 * 10 ms here vs NetBSD's 50 ms). */
+ 			if (cv_timedwait(&sc->sc_cv, &sc->sc_work_mtx,
+-			    mstohz(50)) == EWOULDBLOCK)
++			    mstohz(RTW8189F_RX_POLL_MS)) == EWOULDBLOCK)
+ 				break;
+ 		}
+ 		flags = sc->sc_flags;
+@@ -776,6 +819,16 @@
+ 			break;
+ 
+ 		/*
++		 * PORT: on NetBSD the ioctl/start contexts hold splnet
++		 * while this kthread runs at IPL_NONE; here spl is a no-op,
++		 * so the port serializer stands in for the discipline.
++		 * Held across the bus and net80211 work (ms-scale CMD53
++		 * bursts), dropped around the cv wait above - the same
++		 * shape the usbdi shim wraps its completion callbacks in.
++		 */
++		wlan_port_serializer_lock();
++
++		/*
+ 		 * Drain the FIFO before anything moves ic_curchan: frames
+ 		 * heard on the previous dwell carry that channel in their
+ 		 * DS-param IE and net80211 discards them on mismatch, so
+@@ -802,8 +855,17 @@
+ 			rtw8189f_tx_frame(sc, m);
+ 		}
+ 
+-		/* Poll the RX FIFO; interrupts are a hardening step. */
++		/* NET80211_PORT(L): the DAT1 interrupt makes this drain the
++		 * primary RX path (the comment below it predates the round).
++		 * The drain doubles as the ack - the chip-side source is
++		 * consumed by then, so re-arm the host line; a frame landing
++		 * in between simply re-asserts DAT1. */
+ 		rtw8189f_rx_drain(sc);
++
++		if (sc->sc_ih != NULL)
++			sdmmc_intr_ack(sc->sc_ih);
++
++		wlan_port_serializer_unlock();
+ 	}
+ 
+ 	/* Flush anything still queued. */
+--- a/sys/dev/sdmmc/rtw8189f_chip.c
++++ b/sys/dev/sdmmc/rtw8189f_chip.c
+@@ -1767,6 +1767,23 @@
+ 
+ #define RTW8189F_TX_QUEUE_IDX_HI	0
+ 
++static unsigned rtw8189f_data_rate_mbps = 24;
++
++int
++rtw8189f_data_rate_set(unsigned mbps)
++{
++	if (mbps != 24 && mbps != 36 && mbps != 54)
++		return EINVAL;
++	rtw8189f_data_rate_mbps = mbps;
++	return 0;
++}
++
++unsigned
++rtw8189f_data_rate_get(void)
++{
++	return rtw8189f_data_rate_mbps;
++}
++
+ void
+ rtw8189f_tx_frame(struct rtw8189f_softc *sc, struct mbuf *m)
+ {
+@@ -1775,8 +1792,9 @@
+ 	struct ieee80211_node *ni;
+ 	struct ieee80211_frame *wh;
+ 	uint8_t *buf = sc->sc_txbuf;
+-	uint32_t len, pages, free_hi, free_pub, rptseq;
+-	unsigned rate;
++	uint32_t len, pages, free_queue, free_pub, rptseq;
++	unsigned rate, queue, devid, page_offset;
++	bool data;
+ 	int tries;
+ 
+ 	rptseq = (uint32_t)-1;
+@@ -1788,8 +1806,21 @@
+ 	}
+ 
+ 	wh = mtod(m, struct ieee80211_frame *);
++	data = (wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK) ==
++	    IEEE80211_FC0_TYPE_DATA && (wh->i_addr1[0] & 0x01) == 0;
++	queue = data ? RTW8189F_TXDESC_QSEL_BE : RTW8189F_TXDESC_QSEL_MGNT;
++	devid = data ? RTW8189F_WLAN_TX_LOQ_DEVICE_ID :
++	    RTW8189F_WLAN_TX_HIQ_DEVICE_ID;
++	page_offset = data ? 4 : 0;
+ 	rate = (wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK) == IEEE80211_FC0_TYPE_MGT
+ 	    ? RTW8189F_RATE_1M : RTW8189F_RATE_6M;
++	if (data) {
++		switch (rtw8189f_data_rate_mbps) {
++		case 24: rate = RTW8189F_RATE_24M; break;
++		case 36: rate = RTW8189F_RATE_36M; break;
++		default: rate = RTW8189F_RATE_54M; break;
++		}
++	}
+ 
+ 	len = (uint32_t)m->m_pkthdr.len;
+ 	if (len + RTW8189F_TXDESC_SIZE > RTW8189F_TXBUFSZ) {
+@@ -1802,7 +1833,7 @@
+ 
+ 	le32enc(buf + 0, (len & RTW8189F_TXDW0_PKTLEN_M) |
+ 	    (RTW8189F_TXDESC_SIZE << RTW8189F_TXDW0_OFFSET_S));
+-	le32enc(buf + 4, RTW8189F_TXDESC_QSEL_MGNT << RTW8189F_TXDW1_QSEL_S);
++	le32enc(buf + 4, queue << RTW8189F_TXDW1_QSEL_S);
+ 	le32enc(buf + 12, RTW8189F_TXDW3_USE_RATE);
+ 	le32enc(buf + 16, rate & RTW8189F_TXDW4_RATE_M);
+ 	if ((wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK) == IEEE80211_FC0_TYPE_MGT) {
+@@ -1837,22 +1868,23 @@
+ 	len = (len + RTW8189F_TXDESC_SIZE + 3) & ~3u;
+ 	pages = (len + 127) / 128;
+ 
+-	/* Wait for HIQ (+public) pages, vendor polling mode. */
++	/* FREE_TXPG stores high, normal, low and public 16-bit counts. */
+ 	for (tries = 0;; tries++) {
+-		free_hi = rtw8189f_sdiolocal_read_1(sc, RTW8189F_SDIO_REG_FREE_TXPG + 0);
++		free_queue = rtw8189f_sdiolocal_read_1(sc,
++		    RTW8189F_SDIO_REG_FREE_TXPG + page_offset);
+ 		free_pub = rtw8189f_sdiolocal_read_1(sc, RTW8189F_SDIO_REG_FREE_TXPG + 6);
+-		if (free_hi + free_pub >= pages)
++		if (free_queue + free_pub >= pages)
+ 			break;
+ 		if (tries >= 100 || sc->sc_dying) {
+ 			DPRINTF(sc, "tx: no free pages (%u+%u < %u)\n",
+-			    free_hi, free_pub, pages);
++			    free_queue, free_pub, pages);
+ 			if_statinc(ifp, if_oerrors);
+ 			goto out;
+ 		}
+ 		kpause("rtw8189ft", true, mstohz(50), NULL);
+ 	}
+ 
+-	if (rtw8189f_fifo_write(sc, RTW8189F_WLAN_TX_HIQ_DEVICE_ID, buf, len) != 0) {
++	if (rtw8189f_fifo_write(sc, devid, buf, len) != 0) {
+ 		DPRINTF(sc, "tx: fifo write failed\n");
+ 		if_statinc(ifp, if_oerrors);
+ 		goto out;
+--- a/sys/dev/sdmmc/rtw8189f_reg.h
++++ b/sys/dev/sdmmc/rtw8189f_reg.h
+@@ -361,6 +361,7 @@
+  * the first 32 bytes, HW sequence numbers enabled via REG_HWSEQ_CTRL).
+  */
+ #define RTW8189F_TXDESC_SIZE			40
++#define RTW8189F_TXDESC_QSEL_BE			0x00
+ #define RTW8189F_TXDESC_QSEL_MGNT		0x12
+ 
+ /* dword0: [15:0] packet size, [23:16] offset (= descriptor size). */
+@@ -390,6 +391,9 @@
+ /* TX rate indices (DESC8188F_RATE*) and rate-adaptive table ids. */
+ #define RTW8189F_RATE_1M			0x00
+ #define RTW8189F_RATE_6M			0x04
++#define RTW8189F_RATE_24M			0x08
++#define RTW8189F_RATE_36M			0x09
++#define RTW8189F_RATE_54M			0x0b
+ #define RTW8189F_RATEID_G			7	/* RATEID_IDX_G */
+ 
+ #endif /* !_DEV_SDMMC_RTW8189F_REG_H_ */
+--- a/sys/dev/sdmmc/rtw8189fvar.h
++++ b/sys/dev/sdmmc/rtw8189fvar.h
+@@ -78,6 +78,10 @@
+ #define RTW8189F_F_TX			0x0002
+ #define RTW8189F_F_EXIT			0x0004
+ #define RTW8189F_F_SCANNEXT		0x0008
++/* NET80211_PORT(L): set from the SDIO DAT1 ISR, so it lives outside the
++ * mutex discipline - a lost update to this one bit only costs one poll
++ * quantum (the 10 ms watchdog stays on). */
++#define RTW8189F_F_RX			0x0010
+ 
+ /* Bounce buffer sizes: RX must hold the largest aggregated FIFO burst,
+  * TX one TXDESC (40B) plus the largest 802.11 frame. */
+@@ -106,6 +110,7 @@
+ 	enum ieee80211_state	sc_nstate;	/* deferred newstate args */
+ 	int			sc_narg;
+ 	lwp_t			*sc_worker;
++	void			*sc_ih;		/* NET80211_PORT(L): SDIO intr cookie */
+ 
+ 	int			sc_dying;
+ 	bool			sc_attached;
+@@ -173,6 +178,8 @@
+ void	rtw8189f_scan_rx_fltr(struct rtw8189f_softc *, bool);
+ void	rtw8189f_set_bssid(struct rtw8189f_softc *, const uint8_t *);
+ void	rtw8189f_tx_frame(struct rtw8189f_softc *, struct mbuf *);
++int	rtw8189f_data_rate_set(unsigned);
++unsigned rtw8189f_data_rate_get(void);
+ void	rtw8189f_rx_drain(struct rtw8189f_softc *);
+ 
+ #endif /* !_DEV_SDMMC_RTW8189FVAR_H_ */

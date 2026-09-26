@@ -23,6 +23,7 @@
 
 #include "wlan_adapter.h"
 
+#if WLAN_NIC_USB
 extern void usb_platform_dump(void);
 extern void usb_platform_qh_dump(void);
 extern void usb_platform_reg_dump(void);
@@ -35,6 +36,20 @@ extern void usb_xhci_reg_dump(void);
 extern int wlan_urtwn_reg_read(unsigned addr, unsigned *val);
 extern int wlan_urtwn_reg_write(unsigned addr, unsigned val);
 extern void wlan_urtwn_txq_dump(void);
+extern void wlan_urtwn_chanmap_dump(void);
+#endif /* WLAN_NIC_USB */
+
+#if WLAN_NIC_SDIO
+/* register-level debug access (rtw8189f adapter; "wlan reg" falls back
+ * to it when no urtwn adapter is compiled in) */
+extern int rtw8189f_data_rate_set(unsigned mbps);
+extern unsigned rtw8189f_data_rate_get(void);
+extern int wlan_rtw8189f_reg_read(unsigned addr, unsigned *val);
+extern int wlan_rtw8189f_reg_write(unsigned addr, unsigned val);
+extern void wlan_rtw8189f_txq_dump(void);
+extern void wlan_rtw8189f_icstats_dump(void);
+extern void wlan_rtw8189f_sdreg_dump(void);
+#endif
 
 /* callout diagnostic gate (osal layer, see "wlan calib") */
 extern volatile unsigned wlan_callout_fires;
@@ -51,9 +66,6 @@ extern volatile unsigned wlan_cv_signals;
 extern volatile unsigned wlan_cv_signals_dropped;
 extern volatile unsigned wlan_cv_broadcasts;
 extern volatile unsigned wlan_cv_broadcasts_dropped;
-
-/* scan state machine + bitmap + cmd ring (urtwn adapter) */
-extern void wlan_urtwn_chanmap_dump(void);
 
 /* the cherrysh libc strtoul ignores the base argument (parses decimal
  * regardless), so hex addresses need this tiny parser */
@@ -114,7 +126,9 @@ static int cmd_wlan(int argc, char **argv)
 				   "(run: wlan start)\r\n");
 		}
 		wlan_port_status_dump();
+#if WLAN_NIC_USB
 		usb_platform_dump();
+#endif
 		return 0;
 	}
 
@@ -139,6 +153,7 @@ static int cmd_wlan(int argc, char **argv)
 		return 0;
 	}
 
+#if WLAN_NIC_USB
 	if (argc >= 2 && strcmp(argv[1], "dump") == 0) {
 		usb_platform_dump();
 		usb_platform_qh_dump();
@@ -181,6 +196,7 @@ static int cmd_wlan(int argc, char **argv)
 		return 0;
 	}
 
+	/* the urtwn driver's register windows */
 	if (argc >= 2 && strcmp(argv[1], "reg") == 0) {
 		unsigned long addr;
 		unsigned val;
@@ -213,6 +229,66 @@ static int cmd_wlan(int argc, char **argv)
 			   "wlan reg write <hexaddr> <hexval> | wlan reg txq\r\n");
 		return 0;
 	}
+#endif /* WLAN_NIC_USB */
+
+#if WLAN_NIC_SDIO
+	/* the rtw8189f driver's register windows + SDIO-local state */
+	if (argc >= 2 && strcmp(argv[1], "reg") == 0) {
+		unsigned long addr;
+		unsigned val;
+
+		if (argc >= 3 && strcmp(argv[2], "txq") == 0) {
+			wlan_rtw8189f_txq_dump();
+			return 0;
+		}
+		if (argc >= 3 && strcmp(argv[2], "sdreg") == 0) {
+			wlan_rtw8189f_sdreg_dump();
+			return 0;
+		}
+		if (argc >= 3 && strcmp(argv[2], "icstats") == 0) {
+			/* net80211 RX-path error counters: the TCP-downlink
+			 * chase reads them (plus the driver frame counters
+			 * in wlan dump) twice ~10 s apart and diffs */
+			wlan_rtw8189f_icstats_dump();
+			return 0;
+		}
+		if (argc >= 4 && strcmp(argv[2], "read") == 0) {
+			addr = parse_hex(argv[3]);
+			if (wlan_rtw8189f_reg_read((unsigned) addr, &val) == 0) {
+				csh_printf(csh, "rtw8189f reg[0x%04lx] = 0x%08x\r\n",
+					   addr & 0xfffful, val);
+			} else {
+				csh_printf(csh, "wlan: reg read failed\r\n");
+			}
+			return 0;
+		}
+		if (argc >= 5 && strcmp(argv[2], "write") == 0) {
+			addr = parse_hex(argv[3]);
+			val = (unsigned) parse_hex(argv[4]);
+			if (wlan_rtw8189f_reg_write((unsigned) addr, val) == 0) {
+				csh_printf(csh, "wlan: reg write ok (rtw8189f)\r\n");
+			} else {
+				csh_printf(csh, "wlan: reg write failed\r\n");
+			}
+			return 0;
+		}
+		csh_printf(csh, "usage: wlan reg read <hexaddr> | "
+			   "wlan reg write <hexaddr> <hexval> | "
+			   "wlan reg txq | wlan reg sdreg | wlan reg icstats\r\n");
+		return 0;
+	}
+
+	/* the r4 TX-rate override for data frames (the throughput candidate
+	 * knob; 24 Mbps is the tuned default) */
+	if (argc >= 2 && strcmp(argv[1], "rate") == 0) {
+		if (argc >= 3) {
+			(void) rtw8189f_data_rate_set((unsigned) atoi(argv[2]));
+		}
+		csh_printf(csh, "rtw8189f data rate=%u Mbps\r\n",
+		    rtw8189f_data_rate_get());
+		return 0;
+	}
+#endif /* WLAN_NIC_SDIO */
 
 	if (argc >= 2 && strcmp(argv[1], "calib") == 0) {
 		if (argc > 2) {
@@ -237,10 +313,12 @@ static int cmd_wlan(int argc, char **argv)
 
 	/* scan state machine + channel bitmap + host cmd ring: the
 	 * parked-first-scan state in one screen */
+#if WLAN_NIC_USB
 	if (argc >= 2 && strcmp(argv[1], "chanmap") == 0) {
 		wlan_urtwn_chanmap_dump();
 		return 0;
 	}
+#endif
 
 	if (argc >= 2 && strcmp(argv[1], "cv") == 0) {
 		csh_printf(csh, "wlan cv: signals=%u dropped=%u "
@@ -252,6 +330,7 @@ static int cmd_wlan(int argc, char **argv)
 
 	/* runtime usb history level (wlan_start pins it to 10; the full
 	 * ring flood drowns the interesting records) */
+#if WLAN_NIC_USB
 	if (argc >= 2 && strcmp(argv[1], "usbdebug") == 0) {
 		extern int usbdebug;
 
@@ -261,6 +340,7 @@ static int cmd_wlan(int argc, char **argv)
 		csh_printf(csh, "wlan: usbdebug=%d\r\n", usbdebug);
 		return 0;
 	}
+#endif
 
 	csh_printf(csh,
 		   "usage: wlan start | scan [seconds] | status | dump | "
