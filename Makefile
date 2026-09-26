@@ -243,9 +243,23 @@ NET80211_PCIE_ADAPTER_SRCS := \
 	port/adapters/net80211/iwm_reg.c \
 	port/adapters/net80211/pcie_glue.c
 
-# The SDIO line (feat/net80211_sdio): the bus claim layer + rtw8189f + the
-# firmware blob, filled in by that line.
-NET80211_SDIO_ADAPTER_SRCS :=
+# The SDIO line (feat/net80211_sdio): rtw8189f over the fsl_sdmmc stack.
+# The driver's transport/chip TUs compile in the frozen-import BSD world;
+# the in-file-compile wrapper (rtw8189f_reg.c) and the sdmmc(9) shim
+# (sd/sdio_compat.c) join the adapter impl units; the claim layer (the
+# fsl_sdio ops binding + the explicit probe) and the firmware array join
+# the shell-facing adapter files.
+NET80211_SDIO_BSD_SRCS := \
+	third-party/net80211/sys/dev/sdmmc/rtw8189f_sdio.c \
+	third-party/net80211/sys/dev/sdmmc/rtw8189f_chip.c
+
+NET80211_SDIO_IMPL_SRCS := \
+	port/adapters/net80211/rtw8189f_reg.c \
+	port/adapters/net80211/sd/sdio_compat.c
+
+NET80211_SDIO_ADAPTER_SRCS := \
+	port/adapters/net80211/fw_rtw8189ffw.c \
+	port/adapters/net80211/wlan_sdio_claim.c
 
 ifeq ($(WLAN_HAVE_USB),1)
 NET80211_IMPL_SRCS    += port/adapters/net80211/urtwn_reg.c
@@ -255,6 +269,8 @@ ifeq ($(WLAN_HAVE_PCIE),1)
 NET80211_ADAPTER_SRCS += $(NET80211_PCIE_ADAPTER_SRCS)
 endif
 ifeq ($(WLAN_HAVE_SDIO),1)
+NET80211_BSD_SRCS     += $(NET80211_SDIO_BSD_SRCS)
+NET80211_IMPL_SRCS    += $(NET80211_SDIO_IMPL_SRCS)
 NET80211_ADAPTER_SRCS += $(NET80211_SDIO_ADAPTER_SRCS)
 endif
 
@@ -543,6 +559,13 @@ $(NET80211_ADAPTER_OBJS): $(BUILD)/port/adapters/net80211/%.o: port/adapters/net
 	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(NET80211_INC) \
 		$(NET80211_BSD_CFG) -MMD -MP -c $< -o $@
 
+# the SDIO claim layer additionally sees the fsl_sdio world (the fsl_sdio
+# API it binds the bus ops to, and the adapter's board header)
+$(BUILD)/port/adapters/net80211/wlan_sdio_claim.o: port/adapters/net80211/wlan_sdio_claim.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(NET80211_INC) \
+		$(SDMMC_INC) -MMD -MP -c $< -o $@
+
 # fsl_sdmmc protocol layer: frozen NXP import, warnings silenced (-w); the
 # shadow SDK headers come first so they win over anything vendored.
 $(BUILD)/third-party/sdmmc/%.o: third-party/sdmmc/%.c
@@ -683,7 +706,8 @@ modules:
 	git -C third-party/net80211 sparse-checkout set \
 		sys/net80211 sys/dev/usb sys/dev/ic sys/dev/hid sys/crypto/aes \
 		sys/fs external/realtek/urtwn \
-		sys/dev/pci sys/arch/arm/include || \
+		sys/dev/pci sys/arch/arm/include \
+		sys/dev/sdmmc external/realtek/rtw8189f || \
 		echo 'note: net80211 sparse-checkout not set (kept full checkout)'
 	git -C third-party/wpa_supplicant sparse-checkout set \
 		src wpa_supplicant || \

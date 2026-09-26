@@ -344,6 +344,14 @@ int wlan_cv_broadcast(kcondvar_t *cv) {
 	return 0;
 }
 
+/* ISR-context wake (M11 r4 SDIO card interrupt): one token straight
+ * onto the counting semaphore - osSemaphoreRelease is ISR-safe, the
+ * waiters mutex is not. A token that lands while the worker is not
+ * waiting is a spurious wakeup by the cv contract. */
+int wlan_cv_isr_wake(kcondvar_t *cv) {
+	return (osSemaphoreRelease(hc_cond_sem(cv)) == osOK) ? 0 : EPERM;
+}
+
 int wlan_cv_signal(kcondvar_t *cv, unsigned n) {
 
 	osMutexAcquire(hc_cond_lock(cv), osWaitForever);

@@ -200,6 +200,14 @@ struct wlan_chip_driver {
  * embox port wires wlan_port_init as its unit init. */
 void wlan_port_deinit(void);
 
+/* Explicit SDIO claim probe (the SDIO counterpart of the USB autoconf
+ * chain): matches the enumerated SDIO card's function-0 CIS against the
+ * WLAN_BUS_SDIO entries of wlan_chip_drivers[] and attaches the winner.
+ * SDIO has no hotplug hook, so the call is explicit and idempotent -
+ * run it after wlan_start() and again after a re-enumeration. Provided
+ * by the SDIO bus backend (wlan_sdio_claim.c). */
+int wlan_sdio_probe(void);
+
 /* ------------------------------------------------------------------
  * Driver serialization
  *

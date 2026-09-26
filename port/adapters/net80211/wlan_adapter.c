@@ -74,6 +74,25 @@ extern const size_t rtl8188eufw_size;
 extern int pcie_glue_init(void);
 #endif
 
+#if WLAN_NIC_SDIO
+#include "sdio.h"
+
+extern const uint8_t rtw8189ffw_data[];
+extern const size_t rtw8189ffw_size;
+/* the rtw8189f chip driver TU (rtw8189f_reg.c) */
+extern const struct wlan_chip_driver rtw8189f_driver;
+/* SDIO has no autoconf hotplug hook (D51 of the frozen DESIGN): the port
+ * claims the enumerated card through this explicit, idempotent probe. */
+int wlan_sdio_probe(void);
+
+/* the SDIO-side chip driver registry the bus probe scans (the USB and
+ * PCIe lines attach through the NetBSD autoconf chain instead) */
+const struct wlan_chip_driver *const wlan_chip_drivers[] = {
+	&rtw8189f_driver,
+	NULL,
+};
+#endif
+
 /* ------------------------------------------------------------------ */
 
 static int wlan_started;
@@ -117,6 +136,13 @@ int wlan_start(void) {
 		}
 	}
 #endif
+#if WLAN_NIC_SDIO
+	if (wlan_port_firmware_register("rtw8189f_fw.bin", rtw8189ffw_data,
+	    (size_t) rtw8189ffw_size) != 0) {
+		printf("wlan: rtw8189f firmware registration failed\n");
+		return -1;
+	}
+#endif
 
 	/* platform power-up + ehci_init + config_found: the enumeration,
 	 * hub exploration and urtwn attach (with its firmware load) run
@@ -139,8 +165,19 @@ int wlan_start(void) {
 		    " reboot to retry pcie)\n");
 	}
 #endif
-	/* the SDIO line (rtw8189f over dw-mmc/fsl_sdmmc) plugs in here in
-	 * its own feat branch (feat/net80211_sdio). */
+	/* the SDIO line: enumerate the slot, then run the explicit claim
+	 * probe. Both are idempotent - a `sdio reinit` on the shell re-runs
+	 * the enumeration and the probe re-claims (D51 of the frozen
+	 * DESIGN: SDIO has no hotplug hook, whichever runs last wins). */
+#if WLAN_NIC_SDIO
+	if (sdio_start() != 0) {
+		printf("wlan: sdio slot enumeration failed\n");
+	} else if (wlan_sdio_probe() != 0) {
+		printf("wlan: no SDIO wlan card matched\n");
+	}
+#endif
+	/* the SDIO line's own bring-up ran above; the USB/PCIe notes below
+	 * keep their proven boot order in the images that carry them. */
 	wlan_started = 1;
 	return 0;
 }
