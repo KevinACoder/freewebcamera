@@ -22,23 +22,6 @@
 # interrupt numbers, MMU windows) and the link script.
 BOARD ?= rk3568
 
-# Wireless line selection (build-time, not runtime): which stack this image
-# carries at all.
-#   make WLAN_NIC=iwm     PCIe line only: DW host + iwm + iwlwifi ucode
-#   make WLAN_NIC=urtwn   USB line only:  netbsd usb di/hcd + urtwn + rtl fw
-#   make WLAN_NIC=all     both (default)
-# A NIC that is not built contributes no code, no threads, no buffers and no
-# bring-up, so a driver being debugged is never coupled to the other one -
-# neither through the shared 4 MB heap (iwm's RX ring alone is ~1.1 MB) nor
-# through the bus bring-up order.  WLAN_NIC_USB/WLAN_NIC_PCIE reach the
-# sources as defines; the source lists below are the other half of the gate.
-WLAN_NIC ?= all
-ifeq ($(filter $(WLAN_NIC),iwm urtwn all),)
-$(error WLAN_NIC must be one of: iwm, urtwn, all)
-endif
-WLAN_HAVE_USB  := $(if $(filter $(WLAN_NIC),urtwn all),1,0)
-WLAN_HAVE_PCIE := $(if $(filter $(WLAN_NIC),iwm all),1,0)
-
 # Bare-metal toolchain, set explicitly (non-interactive shells do not source
 # ~/.bashrc - silently picking up a Linux-targeted compiler links against
 # glibc assumptions that cannot work here).
