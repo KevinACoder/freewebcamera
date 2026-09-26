@@ -148,8 +148,21 @@ void tx_irq_handler(void)
 	} else {
 		/* Spurious (IAR=1023): same stamped raw marker as the
 		 * FreeRTOS glue, so both kernels produce comparable logs. No
-		 * EOI for a spurious ack. */
-		board_early_print_raw("irq: spurious\n");
+		 * EOI for a spurious ack.
+		 *
+		 * Known high-rate source (M11 r4, D55): the SDIO DAT1 line's
+		 * self-masking ISR produces one empty IAR per real interrupt
+		 * - harmless by design, but a scan-rate beacon stream still
+		 * floods the console at full rate, so the print is throttled
+		 * to every 100th occurrence. */
+		static uint32_t spurious_count;
+		static uint32_t spurious_last_print;
+
+		spurious_count++;
+		if ((spurious_count - spurious_last_print) >= 100u) {
+			spurious_last_print = spurious_count;
+			board_early_print_raw("irq: spurious (throttled, count)\n");
+		}
 	}
 
 	if (id != 1023U) {

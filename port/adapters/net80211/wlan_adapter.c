@@ -168,16 +168,18 @@ int wlan_start(void) {
 	/* the SDIO line: enumerate the slot, then run the explicit claim
 	 * probe. Both are idempotent - a `sdio reinit` on the shell re-runs
 	 * the enumeration and the probe re-claims (D51 of the frozen
-	 * DESIGN: SDIO has no hotplug hook, whichever runs last wins). */
+	 * DESIGN: SDIO has no hotplug hook, whichever runs last wins).
+	 * The started flag goes up first: the probe's readiness gate reads
+	 * it, and by this point the OSAL, the console and the firmware
+	 * registry it stands for are all up. */
 #if WLAN_NIC_SDIO
+	wlan_started = 1;
 	if (sdio_start() != 0) {
 		printf("wlan: sdio slot enumeration failed\n");
 	} else if (wlan_sdio_probe() != 0) {
 		printf("wlan: no SDIO wlan card matched\n");
 	}
 #endif
-	/* the SDIO line's own bring-up ran above; the USB/PCIe notes below
-	 * keep their proven boot order in the images that carry them. */
 	wlan_started = 1;
 	return 0;
 }
