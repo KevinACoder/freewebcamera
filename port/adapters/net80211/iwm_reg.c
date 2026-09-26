@@ -295,6 +295,42 @@ void wlan_iwm_dump(void) {
 	    ISSET(sc->sc_flags, IWM_FLAG_SCANNING) ? 1 : 0,
 	    ISSET(sc->sc_flags, IWM_FLAG_STOPPED) ? 1 : 0,
 	    (ic->ic_flags & IEEE80211_F_PMGTON) != 0);
+	/* Rate adaptation health: ni_txrate is the AMRR-chosen index into
+	 * the BSS rate set (this NO_HT build's only control of the firmware
+	 * LQ table), and in_amn.txcnt/retrycnt are the per-completion
+	 * counters AMRR chooses from. txcnt frozen = completions not
+	 * feeding AMRR; ni_txrate pinned at 0 with txcnt growing = the
+	 * calib callout is not choosing. */
+	if (ic->ic_bss != NULL) {
+		struct iwm_node *in = (struct iwm_node *) ic->ic_bss;
+		struct ieee80211_rateset *rs = &in->in_ni.ni_rates;
+		int idx = in->in_ni.ni_txrate;
+
+		printf("iwm amrr: txrate=%d/%u rate=%d txcnt=%lu retry=%lu\n",
+		    idx, rs->rs_nrates,
+		    (idx >= 0 && idx < rs->rs_nrates) ?
+		        (rs->rs_rates[idx] & IEEE80211_RATE_VAL) : -1,
+		    (unsigned long) in->in_amn.amn_txcnt,
+		    (unsigned long) in->in_amn.amn_retrycnt);
+		{
+			extern unsigned iwm_dbg_calib_ticks,
+			    iwm_dbg_calib_choose, iwm_dbg_tx_status,
+			    iwm_dbg_tx_failack_sum, iwm_dbg_tx_status_err,
+			    iwm_dbg_notif_garbage, iwm_dbg_notif_unhandled,
+			    iwm_dbg_last_unhandled_code;
+			extern int iwm_dbg_tx_last_failack;
+
+			printf("iwm amrr2: calib=%u choose=%u txsts=%u "
+			    "fsum=%u ferr=%u flast=%d garbage=%u unhand=%u "
+			    "last=0x%x\n",
+			    iwm_dbg_calib_ticks, iwm_dbg_calib_choose,
+			    iwm_dbg_tx_status, iwm_dbg_tx_failack_sum,
+			    iwm_dbg_tx_status_err, iwm_dbg_tx_last_failack,
+			    iwm_dbg_notif_garbage,
+			    iwm_dbg_notif_unhandled,
+			    iwm_dbg_last_unhandled_code);
+		}
+	}
 }
 
 void wlan_iwm_scan_dump(void) {

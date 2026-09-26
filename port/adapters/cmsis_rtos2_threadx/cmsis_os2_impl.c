@@ -473,6 +473,16 @@ osThreadId_t osThreadGetId(void)
 	return (osThreadId_t)tx_thread_identify();
 }
 
+const char *osThreadGetName (osThreadId_t thread_id)
+{
+	TX_THREAD *thread = (TX_THREAD *)thread_id;
+
+	if (thread == NULL || thread->tx_thread_name == NULL) {
+		return NULL;
+	}
+	return thread->tx_thread_name;
+}
+
 /* Fault-dump helper (tx_glue.c): identify the slot behind a TCB without
  * leaking the slot-table types into the glue. */
 unsigned int cmsis_slot_diag(const void *tcb, char *out, unsigned int outsz)

@@ -86,5 +86,25 @@ Current state:
     serialization defect — splnet is wired to the port serializer and the
     softint worker runs its handlers under it — so the count going to zero
     is the acceptance signal).
+  - `0010-iwm-rx-pipeline-counters.patch` — the RX pipeline is only
+    observable through counters (the interrupt can keep arriving while
+    nothing reaches net80211): notif calls, ring entries, delivered
+    frames, PHY/CRC rejects, and the rearm failures that ate the first
+    data-plane round.
+  - `0011-iwm-rx-rearm-reason-counters.patch` — `iwm_rx_addbuf()`'s
+    failure paths (nombuf/noext/mapfail) counted separately so a refill
+    starvation names its own reason instead of a silent rearm failure.
+  - `0012-iwm-legacy-rate-lq.patch` — this port's `IEEE80211_NO_HT`
+    build compiled out the whole `iwm_setrates()` legacy-rate path, so
+    the firmware's rate table was never installed and data frames crawled
+    at the ucode default while AMRR's chosen rate went nowhere. Re-wires
+    the legacy LQ plumbing (install at association, re-install on AMRR
+    change via this port's softint backend instead of the upstream
+    workqueue).
+  - `0013-iwm-tx-status-amrr-counters.patch` — cumulative counters that
+    decide whether the AMRR feedback loop runs: calib-callout liveness,
+    REPLY_TX completions reaching the rate-control statistics, per-frame
+    retry sums, and where unread notifications land (garbage filter vs
+    unhandled code).
 - `threadx/`, `cherrysh/`, `cherryrb/`, `lwip/` — no patches; used
   byte-identical to their pins.

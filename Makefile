@@ -255,9 +255,16 @@ NET80211_INC := -Iinclude \
 	-Ithird-party/tlsf
 
 NET80211_BSD_CFG := -D_KERNEL -D_KERNEL_OPT -DDIAGNOSTIC \
+	-DIWM_DEBUG \
 	-D_COMPAT_SYS_SYSCTL_H_ -include stdarg.h \
 	-DUSBHIST_SIZE=4096 -include port/adapters/net80211/compat/netbsd/opt_usb.h \
 	-include port/adapters/net80211/port_config_bsd.h
+# IWM_DEBUG compiles in iwm_nic_error()/iwm_nic_umac_error() and the
+# tx/rx-ring + 802.11-state dump that run on the fatal-firmware-error
+# interrupt (if_iwm.c iwm_softintr). Runtime traces behind it stay gated
+# by the iwm_debug variable (default 0), so the only new output is the
+# one-shot dump at the fatal moment - without it the SW_ERR branch
+# prints a single line and the error id is unrecoverable.
 # USBHIST_SIZE is usb.c's history ring (the imported default is 50000
 # records, which is ~3 MB of .bss here); 4096 x 64 B keeps a whole
 # enumeration trail with room to spare.
@@ -646,7 +653,17 @@ sync: modules
 	@for comp in $$(ls -d patches/*/ 2>/dev/null | xargs -n1 basename); do \
 		[ -d third-party/$$comp ] || { echo "skip    $$comp (no submodule)"; continue; }; \
 		if [ -n "$$(git -C third-party/$$comp status --porcelain)" ]; then \
-			pin=$$(git -C third-party/$$comp rev-parse --short HEAD); \
+			branch=$$(git -C third-party/$$comp rev-parse --abbrev-ref HEAD); \
+			if [ "$$branch" = "fwc/$$comp" ] && [ "$$(git -C third-party/$$comp rev-list --count fwc/$$comp^ 2>/dev/null)" = "1" ]; then \
+				pin=$$(git -C third-party/$$comp rev-parse --short fwc/$$comp^); \
+				echo "rebase   $$comp materialization onto pin $$pin"; \
+				git -C third-party/$$comp checkout -q -f --detach $$pin; \
+				for p in patches/$$comp/*.patch; do \
+					git -C third-party/$$comp apply "$$PWD/$$p" || exit 1; \
+				done; \
+			else \
+				pin=$$(git -C third-party/$$comp rev-parse --short HEAD); \
+			fi; \
 			git -C third-party/$$comp checkout -q -B fwc/$$comp; \
 			git -C third-party/$$comp add -A; \
 			git -C third-party/$$comp commit -q -m \

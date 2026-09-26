@@ -806,30 +806,48 @@ static int wlan_ser_depth;
 
 /* Operation ring: an unlock that does not match the owner is a locking
  * bug in the port, and the only useful thing to print is who locked and
- * unlocked last (with the caller's address) plus the live owner/depth. */
+ * unlocked last (with the caller's address) plus the live owner/depth.
+ * tsleep's silent suspend/resume of the serializer is recorded too
+ * ("tslp"/"tres", tagged with the sleep's wmesg), because the window it
+ * opens is exactly where owner confusion hides. */
 struct wlan_ser_op {
 	void *self;
 	void *owner;
 	const char *op;
+	const char *tag;
 	unsigned long ra;
 	int depth;
 };
 
-#define WLAN_SER_OPS 12
+#define WLAN_SER_OPS 24
 static struct wlan_ser_op wlan_ser_ops[WLAN_SER_OPS];
 static unsigned wlan_ser_op_n;
 
-static void wlan_ser_op(const char *op, void *self, int depth) {
+static void wlan_ser_opt(const char *op, const char *tag, void *self,
+    int depth) {
 	struct wlan_ser_op *e = &wlan_ser_ops[wlan_ser_op_n++ % WLAN_SER_OPS];
 
 	e->self = self;
 	e->owner = wlan_ser_owner;
 	e->op = op;
+	e->tag = tag;
 	e->ra = (unsigned long) __builtin_return_address(0);
 	e->depth = depth;
 }
 
-static void wlan_ser_dump(void) {
+static void wlan_ser_op(const char *op, void *self, int depth) {
+	wlan_ser_opt(op, NULL, self, depth);
+}
+
+/* CMSIS thread ids are ThreadX TCBs; osThreadGetName (adapter-implemented)
+ * reads the TCB's name without pulling kernel headers in here. */
+static const char *wlan_ser_tname(void *t) {
+	const char *n = osThreadGetName(t);
+
+	return (n != NULL) ? n : "none";
+}
+
+void wlan_ser_dump(void) {
 	char msg[128];
 	unsigned i;
 
@@ -846,8 +864,10 @@ static void wlan_ser_dump(void) {
 			continue;
 		}
 		(void)snprintf(msg, sizeof(msg),
-			       "wlan ser[%u] %s self=%p owner=%p d=%d ra=%08lx\n",
-			       i, e->op, e->self, e->owner, e->depth, e->ra);
+			       "wlan ser[%u] %s%s%s self=%p(%s) owner=%p d=%d ra=%08lx\n",
+			       i, e->op, e->tag ? "<" : "", e->tag ? e->tag : "",
+			       e->self, wlan_ser_tname(e->self), e->owner,
+			       e->depth, e->ra);
 		board_early_print(msg);
 	}
 }
@@ -890,25 +910,30 @@ void *wlan_port_serializer_owner(void) {
 /* Fully release the lock around a sleep and return the saved hold
  * count (0 when the caller was not holding it). */
 int wlan_port_serializer_suspend(void) {
+	osThreadId_t self = osThreadGetId();
 	int depth;
 
-	if (wlan_ser_owner != osThreadGetId()) {
+	if (wlan_ser_owner != self) {
 		return 0;
 	}
 	depth = wlan_ser_depth;
 	wlan_ser_owner = NULL;
 	wlan_ser_depth = 0;
 	osMutexRelease(wlan_ser_mtx);
+	wlan_ser_op("susp", self, depth);
 	return depth;
 }
 
 void wlan_port_serializer_resume(int depth) {
+	osThreadId_t self = osThreadGetId();
+
 	if (depth <= 0) {
 		return;
 	}
 	osMutexAcquire(wlan_ser_mtx, osWaitForever);
-	wlan_ser_owner = osThreadGetId();
+	wlan_ser_owner = self;
 	wlan_ser_depth = depth;
+	wlan_ser_op("resm", self, depth);
 }
 
 /* ------------------------------------------------------------------ */
@@ -983,6 +1008,7 @@ int tsleep(void *ident, int pri, const char *wmesg, int timo) {
 	quantum = ms2ticks(20);
 
 	held = wlan_port_serializer_suspend();
+	wlan_ser_opt("tslp", wmesg, osThreadGetId(), held);
 
 	osMutexAcquire(wlan_tsleep_mtx, osWaitForever);
 	while (!w.fired) {
@@ -1014,6 +1040,7 @@ int tsleep(void *ident, int pri, const char *wmesg, int timo) {
 	}
 	osMutexRelease(wlan_tsleep_mtx);
 
+	wlan_ser_opt("tres", wmesg, osThreadGetId(), held);
 	wlan_port_serializer_resume(held);
 	return rc;
 }
@@ -1111,10 +1138,15 @@ void kthread_exit(int code) {
 /* ------------------------------------------------------------------ */
 
 void wlan_osal_cmsis_init(void) {
+	osMutexAttr_t ser_attr;
+
 	if (wlan_ser_mtx != NULL) {
 		return;
 	}
-	wlan_ser_mtx = osMutexNew(NULL);
+	/* priority inheritance: the holders are BelowNormal workers while
+	 * the claimers include the AboveNormal tcpip thread */
+	ser_attr = (osMutexAttr_t) { NULL, osMutexPrioInherit, NULL, 0 };
+	wlan_ser_mtx = osMutexNew(&ser_attr);
 	wlan_tsleep_mtx = osMutexNew(NULL);
 	wlan_tsleep_sem = osSemaphoreNew(0xffff, 0, NULL);
 }

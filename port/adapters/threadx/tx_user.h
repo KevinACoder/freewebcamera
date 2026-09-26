@@ -24,8 +24,6 @@
  *                                default busy-poll; kept off to stay on
  *                                the upstream default until the comparison
  *                                run asks for it (knob, not policy).
- *   TX_ENABLE_STACK_CHECKING     adds per-thread fill/checking; off for
- *                                behavioral parity with the FreeRTOS image.
  *   ENABLE_ARM_FP                the image is -mgeneral-regs-only; there is
  *                                no FP state to save (tx_port.h guards all
  *                                FP code on this define).
@@ -49,6 +47,13 @@
  * the kernel timer thread via the CMSIS osTimer bridge - a driver-depth
  * call chain that the 4 KB default stack cannot hold. */
 #define TX_TIMER_THREAD_STACK_SIZE			16384
+
+/* Pattern-fill every thread stack at creation and bounds-check the stack
+ * pointer on each suspend/resume (tx_glue.c registers the notify handler
+ * that names the culprit). Was off for behavioral parity with the
+ * FreeRTOS image; armed while the iwm line hunts the load-time memory
+ * corruption behind the serializer panic / firmware SW_ERR pair. */
+#define TX_ENABLE_STACK_CHECKING			1
 
 #define TX_THREAD_USER_EXTENSION	VOID	*tx_thread_cmsis_slot;
 

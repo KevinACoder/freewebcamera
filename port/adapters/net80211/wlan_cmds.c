@@ -107,6 +107,14 @@ static int cmd_wlan(int argc, char **argv)
 		return 0;
 	}
 
+	if (argc >= 2 && strcmp(argv[1], "ser") == 0) {
+		/* live view of the serializer: owner/depth plus the recent
+		 * lock/unlock ring with caller addresses (nm the ELF to name
+		 * them); the same dump the unlock-by-non-owner panic prints */
+		wlan_ser_dump();
+		return 0;
+	}
+
 	if (argc >= 2 && strcmp(argv[1], "status") == 0) {
 		const char *name = wlan_port_active_name();
 		uint8_t mac[6];

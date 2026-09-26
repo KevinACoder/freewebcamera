@@ -144,7 +144,10 @@
 /* --- threads and mailboxes ------------------------------------------------ */
 
 #define TCPIP_THREAD_NAME               "tcpip"
-#define TCPIP_THREAD_STACKSIZE          4096
+/* 4096 overflowed under sustained iperf load (socket layer + netif chains
+ * on top of the whole lwIP stack); same class of crash the net80211
+ * callout thread hit with the timer thread's 4 KB default. */
+#define TCPIP_THREAD_STACKSIZE          8192
 /* Band 4 (osPriorityAboveNormal): above its feeders, below the shell. */
 #define TCPIP_THREAD_PRIO               4
 #define TCPIP_MBOX_SIZE                 64

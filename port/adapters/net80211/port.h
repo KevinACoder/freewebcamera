@@ -223,6 +223,10 @@ void wlan_port_deinit(void);
 void wlan_port_serializer_lock(void);
 void wlan_port_serializer_unlock(void);
 
+/* Diagnostic dump of the serializer's live state (owner/depth) and the
+ * recent lock/unlock operation ring; also the panic path's forensics. */
+void wlan_ser_dump(void);
+
 /* Monotonic milliseconds, for the usbdi shim's xfer-timeout watchdog
  * (the stand-in for the NetBSD callout that arms ux_timeout). Wrap
  * around is tolerated: deadlines are compared as signed deltas. */

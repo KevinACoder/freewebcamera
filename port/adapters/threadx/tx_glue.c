@@ -66,6 +66,22 @@
  * by the common headers - it is port-owned - so declare it here. */
 extern void _tx_timer_interrupt(void);
 
+/* TX_ENABLE_STACK_CHECKING (tx_user.h): without a notify handler a caught
+ * overflow degrades to a silent hang. Name the culprit and park - the
+ * serial log is the evidence, so do not reboot from here. */
+static void tx_stack_error_handler(TX_THREAD *thread_ptr)
+{
+	printf("\n*** thread stack error: '%s' sp=%p stack=%p..%p (%lu bytes)\n",
+	    thread_ptr->tx_thread_name,
+	    thread_ptr->tx_thread_stack_ptr,
+	    thread_ptr->tx_thread_stack_start,
+	    thread_ptr->tx_thread_stack_end,
+	    (unsigned long) thread_ptr->tx_thread_stack_size);
+	for (;;) {
+		;
+	}
+}
+
 /* Provided by port/adapters/cmsis_rtos2_threadx/: creates the threads the
  * CMSIS layer deferred while the kernel was not yet running. */
 extern void tx_cmsis_application_define(void *first_unused_memory);
@@ -238,6 +254,7 @@ static void tx_tick_setup(void)
 void tx_application_define(void *first_unused_memory)
 {
 	vbar_install();
+	tx_thread_stack_error_notify(tx_stack_error_handler);
 	tx_tick_setup();
 #ifndef THREADX_UP_BUILD
 	tx_smp_ipi_setup();

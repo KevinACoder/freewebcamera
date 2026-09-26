@@ -52,7 +52,7 @@ void *wlan_port_thread_create(void (*run)(void *), void *arg) {
 	static const osThreadAttr_t attr = {
 		.name = "wlan-work",
 		.priority = osPriorityBelowNormal,
-		.stack_size = 4096,
+		.stack_size = 8192,
 	};
 
 	return (void *) osThreadNew((osThreadFunc_t) run, arg, &attr);
