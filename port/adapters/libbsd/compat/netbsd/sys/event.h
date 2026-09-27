@@ -13,6 +13,10 @@
 #define EVFILT_READ	(-1)
 #define EVFILT_WRITE	(-2)
 
+/* kqueue note flags: only the one the audio(4) selnotify() calls carry
+ * (upstream value); the queue behind it never wakes here */
+#define NOTE_SUBMIT	0x01000000U
+
 struct knote;
 
 struct filterops {

@@ -74,6 +74,11 @@ struct sysctlnode {
 #define CTLFLAG_PERMANENT 0
 #define CTLTYPE_INT 0
 #define CTLTYPE_NODE 0
+/* audio(4) registers a multiuser node with CTLTYPE_BOOL and a CTL_HW
+ * tree position; with sysctl_createv failing either way the values only
+ * have to exist (the real sysctl values are upstream's) */
+#define CTLTYPE_BOOL 5
+#define CTL_HW 6
 #define sysctl_createv(...) (-1)
 static inline int sysctl_lookup(struct sysctlnode *node, void *newp) {
 	(void) node;

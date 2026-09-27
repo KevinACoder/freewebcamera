@@ -68,6 +68,15 @@ UVC ?= 1
 # switch is a build define, not a source change.
 UVC_DEBUG ?= 0
 
+# UAC line (S2 of feat/libbsd_uvc): NetBSD audio(4) middle layer + the
+# audio converters it links against, plus uaudio (USB audio class), all
+# compiled straight from the submodule tree; the adapter side is the
+# fileops consumer shim (av_audio.c).  uaudio is a USB device driver, so
+# UAC=1 needs a USB-carrying WLAN_NIC - same coupling UVC already has.
+# UAC=0 compiles the line out entirely (sources, cfdrivers and cfentries
+# are all guarded).  Switching UAC needs `make clean` like UVC/WLAN_NIC.
+UAC ?= 1
+
 # Debug-carrier optimization profile (D57): symbols plus near-no optimization,
 # so gdb's line table places breakpoints on addresses code actually reaches.
 # UC_OPT=-O0 reproduces the reference SDK's CONFIG_DEBUG_NOOPT exact-noopt shape.
@@ -85,7 +94,7 @@ CFLAGS := $(UC_OPT) -g3 -std=c11 -Wall -Wextra \
 	-march=armv8-a -mgeneral-regs-only -mstrict-align -mno-outline-atomics \
 	-DGUEST -DEL1 -DSMP_CORES=1 \
 	-DWLAN_NIC_USB=$(WLAN_HAVE_USB) -DWLAN_NIC_PCIE=$(WLAN_HAVE_PCIE) \
-	-DUVC_BUILD=$(UVC) \
+	-DUVC_BUILD=$(UVC) -DUAC_BUILD=$(UAC) \
 	-DTHREADX_BUILD=1 -DTHREADX_UP_BUILD=1 \
 	-DTX_INCLUDE_USER_DEFINE_FILE \
 	-DWLAN_NIC_USB=$(WLAN_HAVE_USB) -DWLAN_NIC_PCIE=$(WLAN_HAVE_PCIE) \
@@ -233,6 +242,7 @@ LIBBSD_IMPL_SRCS := \
 	port/adapters/libbsd/aes_impl_compat.c \
 	port/adapters/libbsd/bsd_bus.c \
 	port/adapters/libbsd/bsd_autoconf.c \
+	port/adapters/libbsd/bsd_file.c \
 	port/adapters/libbsd/bsd_kernhist.c \
 	port/adapters/libbsd/bsd_subr_prf.c \
 	port/adapters/libbsd/osal/osal_cmsis_rtos2.c \
@@ -294,6 +304,18 @@ LIBBSD_BSD_SRCS     += third-party/libbsd/sys/dev/video.c \
 LIBBSD_ADAPTER_SRCS += port/adapters/libbsd/av_video.c \
 	port/adapters/libbsd/av_dump.c \
 	port/adapters/libbsd/uvc_cmds.c
+endif
+
+# The audio line: audio.c is the audio(4) middle layer and its converter
+# TUs (linear/mulaw/alaw) are link-time dependencies of it; uaudio is the
+# USB audio class driver that hands the microphone's endpoints to it.
+ifeq ($(UAC),1)
+LIBBSD_BSD_SRCS     += third-party/libbsd/sys/dev/audio/audio.c \
+	third-party/libbsd/sys/dev/audio/linear.c \
+	third-party/libbsd/sys/dev/audio/mulaw.c \
+	third-party/libbsd/sys/dev/audio/alaw.c \
+	third-party/libbsd/sys/dev/usb/uaudio.c
+LIBBSD_ADAPTER_SRCS += port/adapters/libbsd/av_audio.c
 endif
 
 LIBBSD_INC := -Iinclude \
@@ -780,7 +802,9 @@ modules:
 		'/external/realtek/rtw8189f/' '/external/realtek/urtwn/' \
 		'/sys/arch/arm/include/' '/sys/crypto/aes/' '/sys/dev/hid/' \
 		'/sys/dev/ic/' '/sys/dev/pci/' '/sys/dev/sdmmc/' '/sys/dev/usb/' \
+		'/sys/dev/audio/' \
 		'/sys/fs/' '/sys/net80211/' '/sys/sys/videoio.h' \
+		'/sys/sys/audioio.h' \
 		'/sys/sys/featuretest.h' '/sys/compat/sys/time.h' \
 		'/sys/compat/sys/time_types.h' || \
 		echo 'note: libbsd sparse-checkout not set (kept full checkout)'

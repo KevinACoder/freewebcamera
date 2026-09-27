@@ -37,16 +37,21 @@ struct timeval {
 #endif
 
 /* the interval forms the compat time_types.h ABI references (upstream
- * sys/time.h field order) */
+ * sys/time.h field order); newlib's sys/timespec.h defines the same
+ * struct under its _SYS_TIMESPEC_H_ guard, so reuse the guard the way
+ * the timespec/timeval pairs above do */
 struct itimerval {
 	struct timeval it_interval;
 	struct timeval it_value;
 };
 
+#ifndef _SYS_TIMESPEC_H_
 struct itimerspec {
 	struct timespec it_interval;
 	struct timespec it_value;
 };
+#define _SYS_TIMESPEC_H_
+#endif
 
 #define TIMEVAL_TO_TIMESPEC(tv, ts) do { \
 	(ts)->tv_sec = (tv)->tv_sec; \

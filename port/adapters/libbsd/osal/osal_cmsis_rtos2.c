@@ -172,6 +172,71 @@ void kmem_free(void *p, size_t size) {
 	wlan_kfree(p, M_DEVBUF);
 }
 
+/* kern_malloc(9): audio(4)'s ring buffers arrive through this spelling
+ * (upstream aliases malloc/free onto it).  kern_realloc's signature has
+ * no old-size argument, and the port allocator cannot grow in place, so
+ * these three carry a 16-byte header holding the block size.  The header
+ * keeps the 8-byte alignment TLSF hands out (ALIGN_SIZE == 8). */
+#define KERN_MAGIC	0x4b45524e75u	/* "KERN" + tag, catches misuse */
+
+struct kern_hdr {
+	uint32_t kh_magic;
+	uint32_t kh_pad;
+	unsigned long kh_size;
+	unsigned long kh_pad2;
+};
+
+void *kern_malloc(unsigned long size, int flags) {
+	struct kern_hdr *h = wlan_kmalloc(sizeof(*h) + (size_t) size, flags,
+	    M_DEVBUF);
+
+	if (h == NULL) {
+		return NULL;
+	}
+	h->kh_magic = KERN_MAGIC;
+	h->kh_size = size;
+	return (void *) (h + 1);
+}
+
+void *kern_realloc(void *p, unsigned long size, int flags) {
+	struct kern_hdr *oh, *nh;
+	unsigned long old;
+
+	if (p == NULL) {
+		return kern_malloc(size, flags);
+	}
+	if (size == 0) {
+		kern_free(p);
+		return NULL;
+	}
+	oh = ((struct kern_hdr *) p) - 1;
+	if (oh->kh_magic != KERN_MAGIC) {
+		return NULL;	/* not a kern block: refuse rather than corrupt */
+	}
+	old = oh->kh_size;
+	nh = kern_malloc(size, flags);
+	if (nh == NULL) {
+		return NULL;
+	}
+	memcpy(nh, p, old < size ? old : size);
+	kmem_free(oh, sizeof(*oh) + old);
+	return nh;
+}
+
+void kern_free(void *p) {
+	struct kern_hdr *h;
+
+	if (p == NULL) {
+		return;
+	}
+	h = ((struct kern_hdr *) p) - 1;
+	if (h->kh_magic != KERN_MAGIC) {
+		return;
+	}
+	h->kh_magic = 0;
+	kmem_free(h, sizeof(*h) + h->kh_size);
+}
+
 /* the compat <mem/sysmalloc.h> surface used by the shared mbuf/ifnet
  * shells (port/net/embox) */
 void *sysmalloc(size_t size) {

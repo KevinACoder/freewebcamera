@@ -57,6 +57,17 @@
 #define __predict_false(exp) __builtin_expect((exp) != 0, 0)
 #endif
 
+/* placement attributes from upstream cdefs_elf.h (where they steer ELF
+ * sections).  The port's link script has no such sections, so they are
+ * inert - but they must expand, audio(4) annotates a static pointer
+ * with __read_mostly */
+#ifndef __read_mostly
+#define __read_mostly
+#endif
+#ifndef __cacheline_aligned
+#define __cacheline_aligned
+#endif
+
 /* DIAGNOSTIC reassertions: compiled out here */
 #ifndef __diagused
 #define __diagused __unused

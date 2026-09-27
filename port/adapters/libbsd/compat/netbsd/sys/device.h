@@ -25,6 +25,11 @@
 #include <stdio.h>
 #include <sys/callout.h>
 #include <sys/queue.h>
+/* upstream device.h includes pmf.h here, and drivers take pmf_qual_t
+ * from that chain (audio(4)'s suspend/resume prototypes).  The compat
+ * pmf.h includes this header back - guarded on both sides, so the
+ * typedef lands after the guard is up, exactly once. */
+#include <sys/pmf.h>
 
 struct cfdata;
 struct cfdriver;
@@ -229,6 +234,11 @@ device_t config_attach(device_t, cfdata_t, void *, cfprint_t,
 int config_detach(device_t, int);
 int config_detach_children(device_t, int);
 int config_stdsubmatch(device_t, cfdata_t, const int *, void *);
+/* audio(4)'s rescan walks the cfdata table with config_probe before
+ * config_attach.  The port's table is static and driver-specific, so
+ * every entry the walk reaches is already known to match (the same
+ * answer config_stdsubmatch gives). */
+int config_probe(device_t, cfdata_t, void *);
 void config_defer(device_t, void (*)(device_t));
 void config_interrupts(device_t, void (*)(device_t));
 void config_mountroot(device_t, void (*)(device_t));
@@ -324,6 +334,36 @@ static inline int pmf_device_register1(device_t dev,
 static inline void pmf_device_deregister(device_t dev) {
 	(void) dev;
 }
+
+/* pmf generic events (volume keys): the audio(4) attach registers three
+ * handlers.  Nothing generates the events on this carrier, so register
+ * and deregister only have to succeed. */
+typedef enum pmf_generic_event {
+	PMFE_AUDIO_VOLUME_UP,
+	PMFE_AUDIO_VOLUME_DOWN,
+	PMFE_AUDIO_VOLUME_TOGGLE,
+} pmf_generic_event_t;
+
+static inline bool pmf_event_register(device_t dev, pmf_generic_event_t e,
+	void (*fn)(device_t), bool global) {
+	(void) dev; (void) e; (void) fn; (void) global;
+	return true;
+}
+
+static inline void pmf_event_deregister(device_t dev, pmf_generic_event_t e,
+	void (*fn)(device_t), bool global) {
+	(void) dev; (void) e; (void) fn; (void) global;
+}
+
+/* audio(4)'s open path pins the autoconf instance before using it
+ * (device_lookup_acquire) and drops the pin after (device_release).  The
+ * port's device shells outlive every open (they are only freed at detach,
+ * which never runs here), so acquire is the plain lookup and release is
+ * a no-op. */
+#define device_lookup_acquire(d, u) \
+	(((u) < (d)->cd_ndevs) ? (d)->cd_devs[u] : NULL)
+#define device_acquire(d) ((void) (d))
+#define device_release(d) ((void) (d))
 
 static inline bool pmf_class_network_register(device_t dev, void *ifp) {
 	(void) dev; (void) ifp;

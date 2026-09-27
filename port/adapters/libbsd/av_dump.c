@@ -276,6 +276,11 @@ int
 av_dump_start(int chan, int mode, const char *spec)
 {
 	struct av_dump_chan *ch;
+	/* one name per channel: ThreadX keeps names distinct so a thread
+	 * list/dump can tell the video sender from the audio one */
+	static const char *const av_dump_names[AV_DUMP_CHANNELS] = {
+		"av_dump0", "av_dump1",
+	};
 	osThreadAttr_t attr = {
 		.name = "av_dump",
 		.stack_size = 4096,
@@ -286,6 +291,7 @@ av_dump_start(int chan, int mode, const char *spec)
 	    (mode != AV_DUMP_SERVER && mode != AV_DUMP_CLIENT)) {
 		return -1;
 	}
+	attr.name = av_dump_names[chan];
 	ch = &av_dump_ch[chan];
 	if (av_dump_init(ch) != 0) {
 		printf("avdump: chan%d init failed\n", chan);
@@ -387,6 +393,12 @@ void
 av_dump_put_video(const void *buf, size_t len)
 {
 	av_dump_put(AV_DUMP_VIDEO, buf, len);
+}
+
+void
+av_dump_put_audio(const void *buf, size_t len)
+{
+	av_dump_put(AV_DUMP_AUDIO, buf, len);
 }
 
 int

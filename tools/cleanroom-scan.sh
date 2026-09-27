@@ -85,8 +85,14 @@ fi
 #   finsh.h (netutils feat) - the RT-Thread shell header the vendored
 #                netutils code includes by name ("finsh"); it is a shim
 #                shadow, not a vendor trace of ours. Reviewed 2026-09-25.
+#   file.h filedesc.h filio.h (libbsd feat, UAC line) - NetBSD's own
+#                header names (sys/file.h, sys/filedesc.h, sys/filio.h),
+#                which the audio(4) import includes by name; the compat
+#                tree carries them under those names so the quoted includes
+#                resolve, exactly like fcntl.h above. Reviewed 2026-09-27,
+#                no vendor traces.
 # Anything else matching the pattern is still a failure.
-ALLOWED_NAMES='ffconf.h fs.h fs_stub.c fsl_common.h fsl_os_abstraction.h fsl_sdmmc_host.h fsl_sdmmc.h finterrupt.h fw_rtl8188eufw.c fw_rtw8189ffw.c fw_iwlwifi7260.c firmware_cmsis.c firmload.h fcntl.h finsh.h'
+ALLOWED_NAMES='ffconf.h fs.h fs_stub.c fsl_common.h fsl_os_abstraction.h fsl_sdmmc_host.h fsl_sdmmc.h finterrupt.h fw_rtl8188eufw.c fw_rtw8189ffw.c fw_iwlwifi7260.c firmware_cmsis.c firmload.h fcntl.h finsh.h file.h filedesc.h filio.h'
 ALLOWED_PATTERNS='port/adapters/fatfs/fatfs_*.c port/adapters/fatfs/fatfs_*.h'
 
 badnames=$(find . -path ./third-party -prune -o -path ./.git -prune -o \

@@ -1,6 +1,10 @@
-/*
- * @file
- * @brief Byte order helpers.
+/* Byte order helpers.
+ *
+ * The traditional byteorder names ride along here: upstream's
+ * <machine/endian.h> ends at <sys/endian.h>, and audio(4)'s
+ * audio_format2_endian() returns these as values (and audioio.h picks
+ * AUDIO_ENCODING_SLINEAR_NE with `#if BYTE_ORDER == LITTLE_ENDIAN'), so
+ * they must be real macros, not an undefined-name comparison.
  */
 
 #ifndef _SYS_ENDIAN_H_
@@ -8,6 +12,16 @@
 
 #include <sys/cdefs.h>
 #include <sys/types.h>
+
+#define _LITTLE_ENDIAN	1234	/* LSB first */
+#define _BIG_ENDIAN	4321	/* MSB first */
+#define _PDP_ENDIAN	3412	/* LSB first in word, MSW first in long */
+#define _BYTE_ORDER	_LITTLE_ENDIAN
+
+#define LITTLE_ENDIAN	_LITTLE_ENDIAN
+#define BIG_ENDIAN	_BIG_ENDIAN
+#define PDP_ENDIAN	_PDP_ENDIAN
+#define BYTE_ORDER	_BYTE_ORDER
 
 static inline uint16_t bswap16_impl(uint16_t v) {
 	return __builtin_bswap16(v);
@@ -54,6 +68,14 @@ static inline uint32_t bswap32_impl(uint32_t v) {
 #ifndef bswap32
 static inline uint32_t bswap32(uint32_t v) {
 	return bswap32_impl(v);
+}
+#endif
+
+#ifndef bswap16
+/* the audio converters call bswap16() by name (endian conversion inside
+ * the linear/mulaw filters) */
+static inline uint16_t bswap16(uint16_t v) {
+	return bswap16_impl(v);
 }
 #endif
 

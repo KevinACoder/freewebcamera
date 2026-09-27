@@ -21,6 +21,9 @@ typedef int devminor_t;
 struct tty;
 struct buf;
 struct cfdriver;
+struct lwp;
+struct uio;
+struct knote;
 
 #define D_OTHER		0x0000
 #define D_TAPE		0x0001
@@ -60,8 +63,13 @@ struct cdevsw {
 #define dev_type_mmap(n)	paddr_t n(dev_t, off_t, int)
 #define dev_type_discard(n)	int n(dev_t, off_t, off_t)
 #define dev_type_ioctl_locked(n) int n(dev_t, u_long, void *, int, struct lwp *)
+#define dev_type_cancel(n) int n(dev_t, int, int, struct lwp *)
 
 int nowrite(dev_t, struct uio *, int);
+int noclose(dev_t, int, int, struct lwp *);
+int noread(dev_t, struct uio *, int);
+int noioctl(dev_t, u_long, void *, int, struct lwp *);
+int nopoll(dev_t, int, struct lwp *);
 int nostop(struct tty *, int);
 int noioctl(dev_t, u_long, void *, int, struct lwp *);
 int nokqfilter(dev_t, struct knote *);
@@ -79,5 +87,11 @@ paddr_t nommap(dev_t, off_t, int);
 devmajor_t cdevsw_lookup_major(const struct cdevsw *);
 void vdevgone(devmajor_t, int, int, int);
 #define VCHR	4	/* upstream enum vtype order: VNON VREG VDIR VBLK VCHR */
+
+/* audiostat() stamps S_IFCHR into st_mode; upstream takes it from
+ * <sys/stat.h>, which this tree does not carry */
+#ifndef S_IFCHR
+#define S_IFCHR	0020000
+#endif
 
 #endif /* _COMPAT_SYS_CONF_H_ */

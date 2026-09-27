@@ -33,6 +33,7 @@
 #include <sys/kthread.h>
 #include <sys/mutex.h>
 #include <sys/pool.h>
+#include <sys/reboot.h>
 #include <sys/systm.h>
 #include <sys/tty.h>
 #include <sys/select.h>
@@ -172,6 +173,28 @@ struct cfdriver video_cd = {
 };
 #endif /* UVC_BUILD */
 
+#if UAC_BUILD
+/* the UAC line: uaudio claims the audio-control interface (the same
+ * usbifif walk uvideo rides) and attaches audio(4) on top of it over
+ * audiobus */
+static device_t uaudio_devs[2];
+static device_t audio_devs[2];
+
+struct cfdriver uaudio_cd = {
+	.cd_devs = uaudio_devs,
+	.cd_name = "uaudio",
+	.cd_class = DV_DULL,
+	.cd_ndevs = 2,
+};
+
+struct cfdriver audio_cd = {
+	.cd_devs = audio_devs,
+	.cd_name = "audio",
+	.cd_class = DV_AUDIODEV,
+	.cd_ndevs = 2,
+};
+#endif /* UAC_BUILD */
+
 #if WLAN_NIC_USB
 extern const struct cfattach usb_ca;
 extern const struct cfattach uroothub_ca;
@@ -241,6 +264,29 @@ void selremove_knote(struct selinfo *sip, struct knote *kn) {
 
 int nowrite(dev_t dev, struct uio *uio, int ioflag) {
 	(void) dev; (void) uio; (void) ioflag;
+	return ENODEV;
+}
+
+/* the audio(4) cdev switch's unused entry points (upstream routes these
+ * to devenodev); the port never dispatches through this switch - the
+ * consumer drives the fileops path - so they answer ENODEV like nowrite */
+int noclose(dev_t dev, int flags, int ifmt, struct lwp *l) {
+	(void) dev; (void) flags; (void) ifmt; (void) l;
+	return ENODEV;
+}
+
+int noread(dev_t dev, struct uio *uio, int ioflag) {
+	(void) dev; (void) uio; (void) ioflag;
+	return ENODEV;
+}
+
+int nopoll(dev_t dev, int events, struct lwp *l) {
+	(void) dev; (void) events; (void) l;
+	return 0;
+}
+
+int noioctl(dev_t dev, u_long cmd, void *data, int flag, struct lwp *l) {
+	(void) dev; (void) cmd; (void) data; (void) flag; (void) l;
 	return ENODEV;
 }
 
@@ -333,6 +379,18 @@ static struct cfdata cfdata_video = {
 };
 #endif /* UVC_BUILD */
 
+#if UAC_BUILD
+static struct cfdata cfdata_uaudio = {
+	.cf_name = "uaudio", .cf_atname = "uaudio",
+	.cf_fstate = FSTATE_STAR, .cf_loc = dlocs_zero,
+};
+
+static struct cfdata cfdata_audio = {
+	.cf_name = "audio", .cf_atname = "audio",
+	.cf_fstate = FSTATE_STAR, .cf_loc = dlocs_zero,
+};
+#endif /* UAC_BUILD */
+
 #if WLAN_NIC_PCIE
 /* the pcie endpoint: the native glue (pcie_glue.c) drives the DesignWare
  * host directly through include/pcie.h and config_founds only the radio
@@ -364,6 +422,14 @@ static struct cfentry cfentries[] = {
 	{ "usbifif", &cfdata_uvideo, &uvideo_cd },
 	/* video_attach_mi config_founds the middle layer per stream */
 	{ "videobus", &cfdata_video, &video_cd },
+#endif
+#if UAC_BUILD
+	/* uaudio matches on the audio-control interface class: same iattr,
+	 * the earlier video entry answers NONE for it and the walk falls
+	 * through to this one */
+	{ "usbifif", &cfdata_uaudio, &uaudio_cd },
+	/* audio_attach_mi config_founds the middle layer over audiobus */
+	{ "audiobus", &cfdata_audio, &audio_cd },
 #endif
 #if WLAN_NIC_PCIE
 	{ "pci", &cfdata_iwm, &iwm_cd },
@@ -444,6 +510,22 @@ cfattach_lookup(const char *atname)
 		extern const struct cfattach video_ca;
 
 		return __DECONST(struct cfattach *, &video_ca);
+	}
+#endif
+#if UAC_BUILD
+	if (strcmp(atname, "uaudio") == 0) {
+		/* CFATTACH_DECL2_NEW(uaudio, ...) inside the verbatim
+		 * uaudio.c (compiled straight from the submodule tree) */
+		extern const struct cfattach uaudio_ca;
+
+		return __DECONST(struct cfattach *, &uaudio_ca);
+	}
+	if (strcmp(atname, "audio") == 0) {
+		/* CFATTACH_DECL3_NEW(audio, ...) inside the verbatim
+		 * sys/dev/audio/audio.c middle layer */
+		extern const struct cfattach audio_ca;
+
+		return __DECONST(struct cfattach *, &audio_ca);
 	}
 #endif
 	return NULL;
@@ -584,6 +666,16 @@ config_detach_children(device_t dev, int flags)
 {
 	(void) dev; (void) flags;
 	return 0;
+}
+
+/* audio(4)'s rescan walks the table with config_probe before
+ * config_attach; the static table's entries are already driver-specific,
+ * so every one the walk reaches matches (config_stdsubmatch's answer) */
+int
+config_probe(device_t parent, cfdata_t cf, void *aux)
+{
+	(void) parent; (void) cf; (void) aux;
+	return 1;
 }
 
 /* ------------------------------------------------------------------

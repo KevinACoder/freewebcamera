@@ -13,6 +13,24 @@
 
 #define IO_NDELAY	0x01	/* fcntl flag bits (fcntl(9)) */
 
+/* fcntl(2) commands (upstream values): fnullop_fcntl accepts F_SETFL and
+ * reports EOPNOTSUPP for the rest */
+#ifndef F_DUPFD
+#define F_DUPFD		0
+#endif
+#ifndef F_GETFD
+#define F_GETFD		1
+#endif
+#ifndef F_SETFD
+#define F_SETFD		2
+#endif
+#ifndef F_GETFL
+#define F_GETFL		3
+#endif
+#ifndef F_SETFL
+#define F_SETFL		4
+#endif
+
 /* the open(2) spelling the cdev entry points test (upstream value;
  * unrelated to the FNONBLOCK file-flag bit) */
 #ifndef O_NONBLOCK

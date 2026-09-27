@@ -21,6 +21,10 @@
 
 #include "av_video.h"
 #include "av_dump.h"
+#if UAC_BUILD
+#include "av_audio.h"
+extern struct cfdriver audio_cd;
+#endif
 
 static uint32_t
 uvc_fourcc(const char *s)
@@ -78,6 +82,18 @@ uvc_list(void)
 		}
 		av_video_close(unit);
 	}
+#if UAC_BUILD
+	{
+		/* the audio(4) unit: attached by uaudio on the same interface
+		 * walk the camera's video-control interface rides */
+		device_t adev = device_lookup(&audio_cd, 0);
+
+		if (adev != NULL) {
+			printf("uvc: %s at %s (audio(4) + uaudio)\n",
+			    adev->dv_xname, "uaudio0");
+		}
+	}
+#endif
 	printf("uvc: usage: uvc video on [WxH] [FCCC] [fps] | off | stats\n");
 	return 0;
 }
@@ -217,38 +233,87 @@ cmd_uvc(int argc, char **argv)
 		(void) av_video_read_probe(0, count);
 		return 0;
 	}
+#if UAC_BUILD
+	if (argc >= 3 && strcmp(argv[1], "audio") == 0) {
+		if (strcmp(argv[2], "on") == 0) {
+			unsigned rate = argc > 3
+			    ? (unsigned) atoi(argv[3]) : 0;
+			unsigned ch = argc > 4
+			    ? (unsigned) atoi(argv[4]) : 0;
+
+			if (rate != 0) {
+				(void) av_audio_open(0);
+				if (av_audio_set_format(0, rate,
+				    ch != 0 ? ch : 1) != 0) {
+					printf("uvc audio: S16_LE %uHz/%uch "
+					    "rejected\n", rate, ch);
+					return 0;
+				}
+			}
+			(void) av_audio_capture_start(0);
+			return 0;
+		}
+		if (strcmp(argv[2], "off") == 0) {
+			av_audio_capture_stop();
+			printf("uvc audio: capture stopped\n");
+			return 0;
+		}
+		if (strcmp(argv[2], "info") == 0) {
+			av_audio_info_dump();
+			return 0;
+		}
+		if (strcmp(argv[2], "stats") == 0) {
+			av_audio_stats_dump();
+			return 0;
+		}
+		printf("uvc: usage: uvc audio on [rate] [ch] | off | info | "
+		    "stats\n");
+		return 0;
+	}
+#endif
 	if (argc >= 2 && strcmp(argv[1], "dump") == 0) {
 		/* raw byte stream off the board; the host side is
 		 * tools/host/av_stream_recv.py.  Default direction is the
-		 * board listening (the host dials 192.168.0.249:<port>, no
+		 * board listening (the host dials 192.168.0.49:<port>, no
 		 * Windows inbound rule needed); the client form is there for
-		 * the other lab path. */
-		if (argc >= 3 && strcmp(argv[2], "off") == 0) {
-			av_dump_stop(AV_DUMP_VIDEO);
+		 * the other lab path.  A channel selector picks video (chan
+		 * 0, default, port 9100) or audio PCM (chan 1, port 9101). */
+		int chan = AV_DUMP_VIDEO;
+		int argi = 2;
+
+		if (argc >= 3 && strcmp(argv[2], "audio") == 0) {
+			chan = AV_DUMP_AUDIO;
+			argi = 3;
+		} else if (argc >= 3 && strcmp(argv[2], "video") == 0) {
+			argi = 3;
+		}
+		if (argc > argi && strcmp(argv[argi], "off") == 0) {
+			av_dump_stop(chan);
 			return 0;
 		}
-		if (argc >= 4 && strcmp(argv[2], "listen") == 0) {
-			if (av_dump_start(AV_DUMP_VIDEO, AV_DUMP_SERVER,
-			    argv[3]) != 0) {
+		if (argc > argi + 1 && strcmp(argv[argi], "listen") == 0) {
+			if (av_dump_start(chan, AV_DUMP_SERVER,
+			    argv[argi + 1]) != 0) {
 				printf("uvc: dump listen failed (want a port, "
-				    "e.g. 9100)\n");
+				    "e.g. 9100 video / 9101 audio)\n");
 			}
 			return 0;
 		}
-		if (argc >= 3) {
-			if (av_dump_start(AV_DUMP_VIDEO, AV_DUMP_CLIENT,
-			    argv[2]) != 0) {
+		if (argc > argi) {
+			if (av_dump_start(chan, AV_DUMP_CLIENT,
+			    argv[argi]) != 0) {
 				printf("uvc: dump start failed (want <ip>:<port>, "
 				    "e.g. 192.168.0.18:9100)\n");
 			}
 			return 0;
 		}
-		printf("uvc: usage: uvc dump listen <port> | "
-		    "dump <ip>:<port> | dump off\n");
+		printf("uvc: usage: uvc dump [video|audio] listen <port> | "
+		    "[video|audio] <ip>:<port> | [video|audio] off\n");
 		return 0;
 	}
 	printf("usage: uvc list | video on [WxH] [FCCC] [fps] | "
-	    "video off | stats | read [n] | bufs | dump [<ip>:<port>|off] | "
+	    "video off | audio on [rate] [ch] | audio off | audio info | "
+	    "stats | read [n] | bufs | dump [video|audio] [<ip>:<port>|off] | "
 	    "qdump | dbg [uv] [vd]\n");
 	return 0;
 }

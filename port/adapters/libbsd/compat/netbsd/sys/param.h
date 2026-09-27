@@ -31,6 +31,7 @@
 #define howmany(n, d) ((((n) % (d)) == 0) ? ((n) / (d)) : (((n) / (d)) + 1))
 #define roundup2(x, y) (((x)+((y)-1)) & ~((y)-1))
 #define roundup(x, y) ((((x) + ((y) - 1)) / (y)) * (y))
+#define rounddown(x, y) (((x) / (y)) * (y))
 #define powerof2(x) ((((x) - 1) & (x)) == 0)
 
 #define Hz 100

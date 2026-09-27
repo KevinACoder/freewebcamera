@@ -16,6 +16,19 @@ typedef unsigned short u_short;
 typedef unsigned int u_int;
 typedef unsigned long u_long;
 
+/* SysV-compat spelling upstream sys/types.h carries and audiodef.h's
+ * rwlock shape uses */
+typedef unsigned int uint;
+
+/* upstream sys/types.h's boolean spellings (uaudio's format walk is the
+ * consumer of these) */
+#ifndef TRUE
+#define TRUE	1
+#endif
+#ifndef FALSE
+#define FALSE	0
+#endif
+
 typedef uint8_t u_int8_t;
 typedef uint16_t u_int16_t;
 typedef uint32_t u_int32_t;

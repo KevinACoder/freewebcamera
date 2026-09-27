@@ -468,7 +468,10 @@ bus_dmatag_destroy(bus_dma_tag_t tag)
 	(void) tag;
 }
 
-int boothowto; /* boot flags: none (sys/reboot.h vocabulary) */
+/* Boot flags.  AB_VERBOSE is set: upstream's bootverbose macro keys off
+ * this word, and the audio line's attach prints its mixer-control count
+ * only under bootverbose (the one place the bit still matters here). */
+int boothowto = 0x00020000; /* AB_VERBOSE (sys/reboot.h) */
 
 /* ------------------------------------------------------------------
  * pool_cache(9): no free lists - allocate/release straight through

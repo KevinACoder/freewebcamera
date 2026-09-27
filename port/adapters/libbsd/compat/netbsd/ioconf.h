@@ -18,5 +18,9 @@ extern struct cfdriver urtwn_cd;
 extern struct cfdriver uvideo_cd;
 extern struct cfdriver video_cd;
 #endif
+#if UAC_BUILD
+extern struct cfdriver uaudio_cd;
+extern struct cfdriver audio_cd;
+#endif
 
 #endif /* _IOCONF_H_ */

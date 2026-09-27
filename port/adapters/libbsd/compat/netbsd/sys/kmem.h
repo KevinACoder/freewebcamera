@@ -14,6 +14,9 @@
 #define KM_NOSLEEP M_NOWAIT
 #define KM_ZERO M_ZERO
 
+/* kmem(9) reaches uaudio.c through <sys/malloc.h>, which upstream chains
+ * here; this header must therefore provide the whole vocabulary that
+ * file's kmem_alloc/kmem_zalloc calls name, not just the flags above */
 void *kmem_intr_alloc(size_t size, int flags);
 void kmem_intr_free(void *p, size_t size);
 void *kmem_intr_zalloc(size_t size, int flags);

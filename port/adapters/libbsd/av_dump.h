@@ -29,7 +29,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* channels: 0 = video (mjpg), 1 = audio (reserved for the uaudio line) */
+/* channels: 0 = video (mjpg), 1 = audio (raw PCM from the uaudio line) */
 #define AV_DUMP_VIDEO	0
 #define AV_DUMP_AUDIO	1
 #define AV_DUMP_CHANNELS 2
@@ -48,9 +48,11 @@ void av_dump_stop(int chan);
 
 /* Hand one raw payload to the channel.  Whole frames only (a partial
  * frame is dropped and counted - the ring never splits a frame across a
- * loss); called from the capture worker. */
+ * loss); called from the capture worker.  The audio channel's payload is
+ * one read's PCM chunk, which is the same whole-or-drop shape. */
 void av_dump_put(int chan, const void *buf, size_t len);
 void av_dump_put_video(const void *buf, size_t len);
+void av_dump_put_audio(const void *buf, size_t len);
 
 int av_dump_running(int chan);
 void av_dump_stats_dump(void);

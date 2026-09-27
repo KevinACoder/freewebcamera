@@ -63,4 +63,33 @@ static inline unsigned int atomic_cas_uint(volatile unsigned int *p,
 	return old;
 }
 
+/* audio(4)'s track lock is an xchg spinlock: atomic_swap_uint stores the
+ * new value and returns the previous one (upstream shape), and the
+ * release/acquire pair brackets the critical section.  The builtins carry
+ * the ordering; the membar names are the architectural form. */
+static inline unsigned int atomic_swap_uint(volatile unsigned int *p,
+	unsigned int v) {
+	return __atomic_exchange_n(p, v, __ATOMIC_ACQ_REL);
+}
+
+static inline void atomic_store_release(volatile unsigned int *p,
+	unsigned int v) {
+	__atomic_store_n(p, v, __ATOMIC_RELEASE);
+}
+
+static inline void membar_acquire(void) {
+	__atomic_thread_fence(__ATOMIC_ACQUIRE);
+	__asm__ volatile("dmb ish" ::: "memory");
+}
+
+static inline void membar_release(void) {
+	__atomic_thread_fence(__ATOMIC_RELEASE);
+	__asm__ volatile("dmb ish" ::: "memory");
+}
+
+static inline void membar_sync(void) {
+	__atomic_thread_fence(__ATOMIC_SEQ_CST);
+	__asm__ volatile("dmb ish" ::: "memory");
+}
+
 #endif /* _COMPAT_SYS_ATOMIC_H_ */

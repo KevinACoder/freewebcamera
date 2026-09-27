@@ -1,32 +1,41 @@
 #!/usr/bin/env python3
-"""Raw A/V stream receiver for the freewebcamera UVC dump.
+"""Raw A/V stream receiver for the freewebcamera UVC/UAC dump.
 
-The board's `uvc dump listen <port>` waits for this script to dial in
-(192.168.0.249 is the board), or `uvc dump <ip>:<port>` can dial out to a
-listening instance here.  Either way the board writes the capture bytes with
-no in-band framing at all: what lands in the output file is exactly what the
-capture side read out of the video(4) read method.  For MJPG that means JPEG
-SOI/EOI markers are the only structure - --split-jpg carves them.
+The board's `uvc dump [video|audio] listen <port>` waits for this script to
+dial in (192.168.0.249 is the board), or `uvc dump [video|audio]
+<ip>:<port>` can dial out to a listening instance here.  Either way the
+board writes the capture bytes with no in-band framing at all: what lands
+in the output file is exactly what the capture side read out of the
+middle layer.  For MJPG that means JPEG SOI/EOI markers are the only
+structure - --split-jpg carves them; for the audio channel the bytes are
+raw PCM (S16_LE from the UAC microphone) and --wav wraps them in a RIFF
+header so players/ffprobe can open the file.
 
 The connection is re-made as needed (the board reconnects, or --connect
 retries), and every connection appends to the same output file, so a long
 run is one file plus a line per (re)connection.
 
 usage:
-  av_stream_recv.py <port> [-c <board-ip>] [-l <listen-ip>] [-o out.mjpg]
-                    [--split-jpg <dir>] [--stats] [--wait <seconds>]
+  av_stream_recv.py <port> [-c <board-ip>] [-l <listen-ip>] [-o out.bin]
+                    [--split-jpg <dir>] [--wav <out.wav> --rate <hz>
+                    --channels <n>] [--stats] [--wait <seconds>]
 
 examples:
   python3 tools/host/av_stream_recv.py 9100 -c 192.168.0.249 -o video.mjpg
   # board: uvc video on 640x480 MJPG 15 ; uvc dump listen 9100
   python3 tools/host/av_stream_recv.py 9100 -o video.mjpg --split-jpg frames/
+  python3 tools/host/av_stream_recv.py 9101 -c 192.168.0.249 -o audio.pcm \\
+        --wav audio.wav --rate 48000 --channels 2
+  # board: uvc audio on ; uvc dump audio listen 9101
 """
 
 import argparse
 import os
 import socket
+import struct
 import sys
 import time
+import wave
 
 SOI = b"\xff\xd8\xff"
 EOI = b"\xff\xd9"
@@ -59,6 +68,33 @@ def split_jpg(path, outdir):
         print("split-jpg: first=%d min=%d max=%d mean=%d bytes"
               % (frames[0], min(frames), max(frames), total // n))
     return n
+
+
+def wrap_wav(pcm_path, wav_path, rate, channels, width=2):
+    """Wrap a raw PCM dump in a RIFF/WAVE header.
+
+    The board streams the microphone's samples with no header (that would
+    be in-band framing), so the format is whatever `uvc audio info`
+    negotiated - pass it in.  Everything here is little-endian S16 unless
+    --width says otherwise.
+    """
+    with open(pcm_path, "rb") as f:
+        pcm = f.read()
+    if width != 2:
+        # wave only writes the standard widths; trim to a whole frame and
+        # let the header carry the truth
+        pass
+    with wave.open(wav_path, "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(width)
+        w.setframerate(rate)
+        w.writeframes(pcm)
+    samples = len(pcm) // max(1, width * channels)
+    print("wav: %s <- %s (%d bytes, %.2f s, %d Hz, %d ch, %d-bit)"
+          % (wav_path, pcm_path, len(pcm),
+             samples / float(rate) if rate else 0.0,
+             rate, channels, width * 8))
+    return wav_path
 
 
 def dial(host, port, wait_s):
@@ -112,6 +148,15 @@ def main():
                     help="raw byte output file (default stream.bin)")
     ap.add_argument("--split-jpg", metavar="DIR",
                     help="afterwards carve the bytes into DIR/frame-NNNN.jpg")
+    ap.add_argument("--wav", metavar="OUT.wav",
+                    help="afterwards wrap the raw bytes as a RIFF/WAVE file "
+                         "(the audio channel; needs --rate and --channels)")
+    ap.add_argument("--rate", type=int, default=48000,
+                    help="PCM sample rate for --wav (default 48000)")
+    ap.add_argument("--channels", type=int, default=2,
+                    help="PCM channel count for --wav (default 2)")
+    ap.add_argument("--width", type=int, default=2,
+                    help="PCM bytes per sample for --wav (default 2 = 16-bit)")
     ap.add_argument("--stats", action="store_true",
                     help="print a progress line every ~1 MB")
     ap.add_argument("--wait", type=int, default=120,
@@ -155,6 +200,8 @@ def main():
 
     if args.split_jpg:
         split_jpg(args.out, args.split_jpg)
+    if args.wav:
+        wrap_wav(args.out, args.wav, args.rate, args.channels, args.width)
     return 0
 
 
