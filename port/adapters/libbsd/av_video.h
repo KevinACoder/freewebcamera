@@ -26,6 +26,12 @@ device_t av_video_device(int unit);
 
 int av_video_open(int unit);
 int av_video_close(int unit);
+/* open-once: S_FMT's probe/commit needs the streaming interface claimed */
+int av_video_ensure_open(int unit);
+/* nonblocking open + probe loop: EAGAIN means the middle layer has no
+ * completed frame, a byte count means the egress ring had one waiting */
+int av_video_open_nonblock(int unit);
+int av_video_read_probe(int unit, unsigned count);
 int av_video_get_format(int unit, uint32_t *w, uint32_t *h, uint32_t *pixfmt);
 int av_video_set_format(int unit, uint32_t w, uint32_t h, uint32_t pixfmt);
 int av_video_set_framerate(int unit, uint32_t fps);

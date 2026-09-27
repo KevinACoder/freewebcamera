@@ -153,18 +153,31 @@ static void shell_rearm_rx(void)
 	(void)Driver_USART_Console.Receive(rx_chunk, SHELL_RX_CHUNK);
 }
 
+/* Forensics counters for the console-input chain (avmon prints them):
+ * event_calls/event_bytes sit at the USART callback -> ring end,
+ * read_bytes at the ring -> readline end.  A byte counted in the uart
+ * driver's counters but not here died before the ring; one counted here
+ * but never echoed died in the readline/echo half. */
+volatile unsigned shell_task_wakes;
+volatile unsigned shell_event_calls;
+volatile unsigned shell_event_bytes;
+volatile unsigned shell_read_bytes;
+
 /* ARM_USART_SignalEvent_t: called from the RX interrupt. */
 static void shell_usart_event(uint32_t event)
 {
 	if ((event & ARM_USART_EVENT_RECEIVE_COMPLETE) == 0U) {
 		return;
 	}
+	shell_event_calls++;
 
 		/* Pull whatever arrived into the ring. The driver hands us one byte per
 		 * reception, but reading the count it actually stored is more robust
 		 * than assuming, and costs nothing. */
 		{
 			uint32_t got = Driver_USART_Console.GetRxCount();
+
+			shell_event_bytes += got;
 
 			for (uint32_t i = 0; i < got; i++) {
 				/* 0x03 is the gdb stub's break-in byte (board_console_break_hook,
@@ -223,6 +236,7 @@ static uint16_t shell_sget(chry_readline_t *rl, void *data, uint16_t size)
 	}
 
 	got = chry_ringbuffer_read(&rx_ring, data, size);
+	shell_read_bytes += got;
 	return (uint16_t)got;
 }
 
@@ -235,6 +249,7 @@ static chry_shell_t shell;
 static char shell_history[1024];
 static char shell_prompt_buf[64];
 static char shell_line_buf[CONFIG_CSH_LNBUFF_SIZE];
+
 
 static void shell_task(void *argument)
 {
@@ -250,6 +265,7 @@ static void shell_task(void *argument)
 		 * to sleep. */
 		(void)osThreadFlagsWait(SHELL_INPUT_FLAG, osFlagsWaitAny,
 					SHELL_RX_POLL_MS);
+		shell_task_wakes++;
 
 		/* Auto-recovery for the uart driver's storm defence: when the
 		 * heuristic has armed RX off (real line-status storm, not the

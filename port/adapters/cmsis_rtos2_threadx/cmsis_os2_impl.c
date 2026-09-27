@@ -930,7 +930,7 @@ osStatus_t osEventFlagsDelete(osEventFlagsId_t ef_id)
  * usbd_transfer's while (!xfer->ux_done) loop instead of blocking for
  * its completion.  Bigger pools, and a failure that says so.
  */
-#define MAX_MUTEXES	96
+#define MAX_MUTEXES	192
 
 typedef struct {
 	TX_MUTEX     mutex;
@@ -1040,7 +1040,7 @@ osStatus_t osMutexDelete(osMutexId_t mutex_id)
 
 /* --- semaphores ------------------------------------------------------------ */
 
-#define MAX_SEMAPHORES	160
+#define MAX_SEMAPHORES	192
 
 typedef struct {
 	TX_SEMAPHORE sem;

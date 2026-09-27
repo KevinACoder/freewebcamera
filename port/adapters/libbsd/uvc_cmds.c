@@ -90,9 +90,16 @@ uvc_capture(int unit, int on, const char *geom, const char *fmt,
 		printf("uvc: capture stopped\n");
 		return;
 	}
+	/* open first: uvideo's S_FMT runs UVC probe/commit control
+	 * transfers on the streaming interface, which open claims */
+	if (av_video_ensure_open(unit) != 0) {
+		printf("uvc: video%d open failed\n", unit);
+		return;
+	}
 	if (geom != NULL) {
 		unsigned w = 0, h = 0;
 		const char *x = strchr(geom, 'x');
+		int err;
 
 		if (x != NULL) {
 			w = (unsigned) atoi(geom);
@@ -102,9 +109,10 @@ uvc_capture(int unit, int on, const char *geom, const char *fmt,
 			printf("uvc: bad geometry %s (want WxH)\n", geom);
 			return;
 		}
-		if (av_video_set_format(unit, w, h,
-		    uvc_fourcc(fmt)) != 0) {
-			printf("uvc: S_FMT %s rejected\n", geom);
+		err = av_video_set_format(unit, w, h, uvc_fourcc(fmt));
+		if (err != 0) {
+			printf("uvc: S_FMT %s %s rejected (errno %d)\n",
+			    geom, fmt != NULL ? fmt : "MJPG", -err);
 			return;
 		}
 	}
@@ -145,8 +153,14 @@ cmd_uvc(int argc, char **argv)
 		av_video_stats_dump();
 		return 0;
 	}
+	if (argc >= 2 && strcmp(argv[1], "read") == 0) {
+		unsigned count = argc > 2 ? (unsigned) atoi(argv[2]) : 10;
+
+		(void) av_video_read_probe(0, count);
+		return 0;
+	}
 	printf("usage: uvc list | video on [WxH] [FCCC] [fps] | "
-	    "video off | stats\n");
+	    "video off | stats | read [n]\n");
 	return 0;
 }
 

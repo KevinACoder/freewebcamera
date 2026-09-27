@@ -575,6 +575,14 @@ static void console_rx_arm_off(uint32_t intid)
 	}
 }
 
+/* RX-path liveness counters that outlive the three-entry boot trace and
+ * need no console input to observe: the avmon thread prints them.  An
+ * input byte that never shows here never reached the part (host/serial
+ * side); a byte counted here that the shell never echoes died in the
+ * handoff. */
+volatile unsigned uart_rx_isr_entries;
+volatile unsigned uart_rx_bytes_seen;
+
 void usart_rx_irq_handler(void)
 {
 	static uint32_t unexpected_reports;
@@ -583,6 +591,8 @@ void usart_rx_irq_handler(void)
 	uint32_t guard = 0u;
 	uint32_t intid = console_intid;
 	uint32_t iir = reg_read(REG_IIR) & IIR_ID_MASK;
+
+	uart_rx_isr_entries++;
 
 	/* M0 bring-up trace: make ISR activity observable even when the
 	 * reason turns out to be benign. Three entries, then silence.
@@ -736,6 +746,7 @@ void usart_rx_irq_handler(void)
 		}
 
 		rx_buf[rx_completed] = byte;
+		uart_rx_bytes_seen++;
 		rx_completed++;
 		rx_remaining--;
 
@@ -777,6 +788,7 @@ static void usart_rx_drain(void)
 
 		if (rx_active && rx_remaining > 0u) {
 			rx_buf[rx_completed] = byte;
+		uart_rx_bytes_seen++;
 			rx_completed++;
 			rx_remaining--;
 		}

@@ -188,19 +188,32 @@ static struct ehci_softc usb_ehci_sc[USBH_EHCI_NUM];
 static struct device usb_ehci_dev[USBH_EHCI_NUM];
 static bool s_usb_ehci_attached;
 
-/* the CMSIS IRQ front hands no argument; keep the one softc we armed */
-static struct ehci_softc *usb_ehci_isr_sc;
+/* the CMSIS IRQ front hands no argument, and re-reading the INTID in the
+ * handler is not an option: the trampoline has already ACKed this one and
+ * ICC_IAR1 answers spurious until the EOI, so the dispatch would silently
+ * drop every interrupt (the wedged-second-boot round).  One handler per
+ * instance instead. */
+static struct ehci_softc *usb_ehci_isr_sc[USBH_EHCI_NUM];
+static uint32_t usb_ehci_irq(int id);
 volatile unsigned usb_ehci_irq_count;
 volatile unsigned usb_ehci_irq_last_sts;
 
-static void usb_ehci_isr(void)
+static void usb_ehci_isr_instance(int id)
 {
+	struct ehci_softc *sc = usb_ehci_isr_sc[id];
+
+	if (sc == NULL) {
+		return;
+	}
 	usb_ehci_irq_count++;
 	/* USBSTS is an operational register: an EREAD here reads the
 	 * capability window (HCSPARAMS) and says nothing about the irq */
-	usb_ehci_irq_last_sts = EOREAD4(usb_ehci_isr_sc, EHCI_USBSTS);
-	(void) ehci_intr(usb_ehci_isr_sc);
+	usb_ehci_irq_last_sts = EOREAD4(sc, EHCI_USBSTS);
+	(void) ehci_intr(sc);
 }
+
+static void usb_ehci_isr_0(void) { usb_ehci_isr_instance(0); }
+static void usb_ehci_isr_1(void) { usb_ehci_isr_instance(1); }
 
 static uint32_t usb_ehci_irq(int id)
 {
@@ -254,8 +267,9 @@ static int usb_ehci_attach(int id)
 	sc->sc_offs = EREAD1(sc, EHCI_CAPLENGTH);
 	EOWRITE4(sc, EHCI_USBINTR, 0);
 
-	IRQ_SetHandler((IRQn_ID_t) irq, usb_ehci_isr);
-	usb_ehci_isr_sc = sc;
+	IRQ_SetHandler((IRQn_ID_t) irq,
+	    (id == 0) ? usb_ehci_isr_0 : usb_ehci_isr_1);
+	usb_ehci_isr_sc[id] = sc;
 	IRQ_SetPriority((IRQn_ID_t) irq, BOARD_IRQ_PRIORITY_API_CALL_RAW);
 	IRQ_Enable((IRQn_ID_t) irq);
 	printf("ehci%d: interrupting on INTID %u\n", id, irq);
@@ -539,9 +553,21 @@ int usb_platform_init(void)
 	if (error != 0) {
 		return error;
 	}
-	error = usb_ehci_attach(1); /* the panel Type-A pair (CH334P hub) */
+	/* Both panel lines come up: each EHCI feeds its own onboard
+	 * CH334P hub behind one Type-A connector.  The camera lives on
+	 * the fd800000 group (uhub port4, native-fork evidence), urtwn
+	 * on the fd880000 group - the u2phy1 domain is shared and its
+	 * init is once-guarded, so only the attach order follows the
+	 * device tree (fd800000 first). */
+	error = usb_ehci_attach(1); /* the proven panel line first */
 	if (error != 0) {
 		return error;
 	}
+	printf("usb: ehci1 up, attaching ehci0 (camera group)\n");
+	error = usb_ehci_attach(0);
+	if (error != 0) {
+		return error;
+	}
+	printf("usb: ehci0 up\n");
 	return 0;
 }

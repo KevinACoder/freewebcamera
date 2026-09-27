@@ -62,6 +62,11 @@ WLAN_HAVE_SDIO := $(if $(filter $(WLAN_NIC),rtw8189f all),1,0)
 # cfdrivers and cfentries are all guarded).  Switching UVC needs
 # `make clean` for the same stale-object reason as WLAN_NIC.
 UVC ?= 1
+# UVC_DEBUG=1 compiles the imported driver's own diagnostics (UVIDEO_DEBUG:
+# payload-path counters, the first-8-packet header dump, and EHCI's isoc iTD
+# ctl dump).  Bring-up forensics only; the pin stays untouched because the
+# switch is a build define, not a source change.
+UVC_DEBUG ?= 0
 
 # Debug-carrier optimization profile (D57): symbols plus near-no optimization,
 # so gdb's line table places breakpoints on addresses code actually reaches.
@@ -313,6 +318,16 @@ LIBBSD_BSD_CFG := -D_KERNEL -D_KERNEL_OPT -DDIAGNOSTIC \
 # USBHIST_SIZE is usb.c's history ring (the imported default is 50000
 # records, which is ~3 MB of .bss here); 4096 x 64 B keeps a whole
 # enumeration trail with room to spare.
+
+# UVC_DEBUG=1: the imported UVC line's own forensics (see above).
+# LIBBSD_SUB_CFG is an immediate expansion of LIBBSD_BSD_CFG (it freezes
+# the value at its `:=` line), so the switch has to feed both.  Sliding
+# this switch needs `make clean` too (same untracked -D as WLAN_NIC; a
+# stale uvideo.o silently keeps -DUVIDEO_DEBUG).
+ifeq ($(UVC_DEBUG),1)
+LIBBSD_BSD_CFG += -DUVIDEO_DEBUG
+LIBBSD_SUB_CFG += -DUVIDEO_DEBUG
+endif
 # _KERNEL_OPT makes this build behave like a config(8) kernel for the
 # imported sources: every `#ifdef _KERNEL_OPT #include "opt_*.h"` and
 # `#include "<device>.h"` fires, so the compat tree's stand-ins for the
