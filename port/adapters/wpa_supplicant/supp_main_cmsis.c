@@ -37,9 +37,13 @@
 #include "wpa_port_api.h"
 #include "wpa_supplicant/wmm_ac.h"
 
+/* The build configuration (generated); the supplicant's call chains
+ * (scan/assoc/crypto) are the deepest in the image. */
+#include "config.h"
+
 #define WPA_QUEUE_LEN 32
 #define WPA_IFNAME "wlan0"
-#define WPA_TASK_STACK_BYTES (64 * 1024)
+#define WPA_TASK_STACK_BYTES ((unsigned) CONFIG_WPA_THREAD_STACK)
 /* above the usbdi workers; the scan state machine spins on the worker
  * threads and would starve a default-priority supplicant */
 #define WPA_TASK_PRIORITY osPriorityAboveNormal

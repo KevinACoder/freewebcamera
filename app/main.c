@@ -28,10 +28,22 @@
 #include "shell.h"
 #include "net.h"
 
+/* The build configuration (generated): the banner names it, and the two
+ * bring-up tasks below exist only when the block that needs them is built. */
+#include "config.h"
+
 #include "dbg_scenario.h"
 
-/* Image identity on the console and in the TFTP staging log. */
-#define IMAGE_BANNER	"\nfreewebcamera trunk - RK3568 ThreadX UP + gdb stub + shell\n"
+/* Image identity on the console and in the TFTP staging log.  The
+ * configuration name rides the banner so images from different configs are
+ * tellable apart in one terminal log (they share the TFTP staging name). */
+#if CONFIG_NET
+#define IMAGE_BANNER	"\nfreewebcamera trunk - RK3568 ThreadX UP - config " \
+			CONFIG_NAME " (shell + network world)\n"
+#else
+#define IMAGE_BANNER	"\nfreewebcamera trunk - RK3568 ThreadX UP - config " \
+			CONFIG_NAME " (shell, no network world)\n"
+#endif
 
 /* Console handle. Taken from the interface, never from the driver's header. */
 extern ARM_DRIVER_USART Driver_USART_Console;
@@ -59,7 +71,7 @@ static void spi_probe_handler(void)
 	spi_hits++;
 }
 
-/* --- shell bring-up task --------------------------------------------------- */
+/* --- boot anchor task ------------------------------------------------------- */
 
 /* A task, not a call from board_main: shell_start() arms the console receive
  * interrupt, whose path ends in osThreadFlagsSetFromISR - which needs a
@@ -68,8 +80,10 @@ static void spi_probe_handler(void)
  *
  * The boot anchors run here too, ahead of the shell: its_selftest() takes
  * milliseconds, and none of that belongs between the banner and the first
- * log line a person can interrupt. */
-static void task_shell_start(void *argument)
+ * log line a person can interrupt.  They run in every configuration - a
+ * SHELL=0 image has no console commands, but the ITS/LPI and GIC paths are
+ * still worth proving at boot. */
+static void task_boot_anchors(void *argument)
 {
 	uint32_t delivered = 0U;
 
@@ -87,11 +101,13 @@ static void task_shell_start(void *argument)
 		board_log("app: SPI SOFTTRIG OK\n");
 	}
 
+#if CONFIG_SHELL
 	if (shell_start() != 0) {
 		board_log("shell: FAIL\n");
 		return;
 	}
 	board_log("shell: READY\n");
+#endif
 
 	/* Nothing left to do: the shell owns its own task from here. Terminating
 	 * rather than idling keeps the stack and the slot free. */
@@ -103,6 +119,7 @@ static void task_shell_start(void *argument)
 /* Separate from the shell task: the "net: READY" anchor should not depend on
  * shell timing, and a stack start failure must not keep the console from
  * coming up. net_start() runs once and the task leaves. */
+#if CONFIG_NET
 static void task_net_start(void *argument)
 {
 	(void)argument;
@@ -112,6 +129,7 @@ static void task_net_start(void *argument)
 	}
 	osThreadTerminate(osThreadGetId());
 }
+#endif /* CONFIG_NET */
 
 /* --- boot ----------------------------------------------------------------- */
 
@@ -145,17 +163,21 @@ void board_main(void)
 		return;
 	}
 
-	if (osThreadNew(task_shell_start, 0, &(osThreadAttr_t){ .name = "shstart",
-			.stack_size = 2048, .priority = osPriorityHigh }) == 0) {
-		board_log("fatal: thread shell\n");
+	if (osThreadNew(task_boot_anchors, 0, &(osThreadAttr_t){ .name = "shstart",
+			.stack_size = CONFIG_APP_START_STACK,
+			.priority = osPriorityHigh }) == 0) {
+		board_log("fatal: thread anchors\n");
 		return;
 	}
 
+#if CONFIG_NET
 	if (osThreadNew(task_net_start, 0, &(osThreadAttr_t){ .name = "netstart",
-			.stack_size = 2048, .priority = osPriorityNormal }) == 0) {
+			.stack_size = CONFIG_APP_START_STACK,
+			.priority = osPriorityNormal }) == 0) {
 		board_log("fatal: thread net\n");
 		return;
 	}
+#endif
 
 	/* Pend the probe SPI. It stays pending until interrupts are unmasked,
 	 * so the first handler entry proves the whole path: distributor enable,

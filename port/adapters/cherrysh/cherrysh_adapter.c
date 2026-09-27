@@ -75,6 +75,10 @@
 #include "cmsis_os2_ext.h"
 #include "gicv3_its.h"
 #include "shell.h"
+
+/* The build configuration (generated): the shell task's stack is a key. */
+#include "config.h"
+
 #include "chry_ringbuffer.h"
 
 /* Its own header: shell_start()'s declaration and the CSH_FROM_ARGV convention
@@ -649,7 +653,7 @@ int cherrysh_init(void)
 	 * matters is that it can be preempted. */
 	id = osThreadNew(shell_task, NULL,
 			 &(osThreadAttr_t){ .name = "shell",
-					    .stack_size = 4096,
+					    .stack_size = CONFIG_SHELL_STACK,
 					    .priority = osPriorityNormal });
 	if (id == NULL) {
 		return -1;

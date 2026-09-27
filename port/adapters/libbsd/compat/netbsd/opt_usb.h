@@ -14,12 +14,23 @@
 #ifndef _OPT_USB_H_
 #define _OPT_USB_H_
 
+/* The build configuration (generated): the three history-log levels are keys.
+ * 0 leaves the corresponding _DEBUG define out, which is the quiet
+ * production shape the original comment asks for. */
+#include "config.h"
+
+#if CONFIG_USB_DEBUG_DEFAULT
 #define USB_DEBUG 1
-#define USB_DEBUG_DEFAULT 10
+#define USB_DEBUG_DEFAULT CONFIG_USB_DEBUG_DEFAULT
+#endif
+#if CONFIG_EHCI_DEBUG_DEFAULT
 #define EHCI_DEBUG 1
-#define EHCI_DEBUG_DEFAULT 10
+#define EHCI_DEBUG_DEFAULT CONFIG_EHCI_DEBUG_DEFAULT
+#endif
+#if CONFIG_XHCI_DEBUG_DEFAULT
 #define XHCI_DEBUG 1
-#define XHCI_DEBUG_DEFAULT 10
+#define XHCI_DEBUG_DEFAULT CONFIG_XHCI_DEBUG_DEFAULT
+#endif
 /* the bus provides 8-byte accessors and the board maps the controller
  * Device-nGnRE, so the driver's Qword register writes (CRCR et al) go
  * out as single 8-byte stores - the two-Dword fallback leaves the

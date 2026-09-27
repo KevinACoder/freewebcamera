@@ -32,6 +32,12 @@
 #ifndef TX_USER_H
 #define TX_USER_H
 
+/* The build configuration (generated): the timer thread stack is a key
+ * (CONFIG_TX_TIMER_STACK).  tx_user.h is force-included on every kernel TU
+ * through -DTX_INCLUDE_USER_DEFINE_FILE, so it is the natural seam for the
+ * kernel's own tunables. */
+#include "config.h"
+
 /* Backlink from each thread control block to the CMSIS adapter's slot, set
  * by cmsis_os2_impl.c right after tx_thread_create. Thread flags need the
  * per-thread TX_EVENT_FLAGS_GROUP that lives in the slot; walking a 16-entry
@@ -46,7 +52,7 @@
 /* The net80211 callouts (urtwn watchdog, ieee80211 state machines) run on
  * the kernel timer thread via the CMSIS osTimer bridge - a driver-depth
  * call chain that the 4 KB default stack cannot hold. */
-#define TX_TIMER_THREAD_STACK_SIZE			16384
+#define TX_TIMER_THREAD_STACK_SIZE			CONFIG_TX_TIMER_STACK
 
 /* Pattern-fill every thread stack at creation and bounds-check the stack
  * pointer on each suspend/resume (tx_glue.c registers the notify handler

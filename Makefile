@@ -18,9 +18,163 @@
 # need something it has to come through include/. tools/check-deps.sh checks
 # the same rule statically.
 
+# =============================================================================
+# Build configuration (configs/)
+# =============================================================================
+# The image is described by a config file, configs/<CONFIG>.conf (default
+# full).  Every config includes configs/base.conf - the key table, with the
+# defaults and the documentation - and adds configs/fragments/* for the
+# capabilities it wants, so a new configuration is a short list of includes
+# rather than a copy of the defaults:
+#
+#   make                 build CONFIG=full (all three wireless lines + camera)
+#   make CONFIG=min      kernel + shell only (the trim proof)
+#   make configs         list the available configurations
+#   make show-config     the resolved key table + this image's artifact paths
+#
+# Keys are make variables named CONFIG_*; the same names become macros in the
+# generated <build>/config.h, which is the only place C code reads them.  The
+# pre-config command-line switches keep working as aliases (WLAN_NIC=iwm|
+# urtwn|rtw8189f|all, UVC=, UAC=, UVC_DEBUG=, UC_OPT=) - see the alias block.
+#
+# Two different switches, two different costs:
+#   * CONFIG=<other>    picks another build directory; no clean needed.
+#   * CONFIG_<KEY>=<v>  changes a value inside one config.  The -D defines and
+#                       vendored-world flags are invisible to the dependency
+#                       files, so the stamp below refuses to build over
+#                       objects from a different key set: run `make
+#                       clean-config` (or `make clean`) first.
+CONFIG_DIR := configs
+CONFIG ?= full
+CONFIG_NAME ?= $(CONFIG)
+
+CONFIG_FILE := $(CONFIG_DIR)/$(CONFIG).conf
+ifeq ($(wildcard $(CONFIG_FILE)),)
+$(error unknown CONFIG=$(CONFIG); available: $(patsubst $(CONFIG_DIR)/%.conf,%,$(wildcard $(CONFIG_DIR)/*.conf)))
+endif
+include $(CONFIG_FILE)
+
+# The table: every key the build understands.  check-config fails on a key
+# that appears in a config file but not here (a typo, usually) and on drift
+# between this list and the config.h.in template.
+CONFIG_KEYS := CONFIG_NAME CONFIG_BOARD CONFIG_SMP_CORES CONFIG_OPT \
+	CONFIG_SHELL CONFIG_NET CONFIG_UVC CONFIG_UAC \
+	CONFIG_BUS_USB CONFIG_BUS_PCIE CONFIG_BUS_SDIO \
+	CONFIG_NIC_IWM CONFIG_NIC_URTWN CONFIG_NIC_RTW8189F \
+	CONFIG_BSD_DIAGNOSTIC CONFIG_IWM_DEBUG \
+	CONFIG_USB_DEBUG_DEFAULT CONFIG_EHCI_DEBUG_DEFAULT CONFIG_XHCI_DEBUG_DEFAULT \
+	CONFIG_USBHIST_SIZE CONFIG_UVC_DEBUG \
+	CONFIG_HEAP_BASE CONFIG_HEAP_BYTES \
+	CONFIG_TX_TIMER_STACK CONFIG_LWIP_THREAD_STACK CONFIG_WLAN_WORKER_STACK \
+	CONFIG_WPA_THREAD_STACK CONFIG_SHELL_STACK CONFIG_APP_START_STACK \
+	CONFIG_LWIP_MEM_SIZE CONFIG_LWIP_PBUF_POOL_SIZE CONFIG_LWIP_PBUF_BUFSIZE \
+	CONFIG_AV_DUMP_RING_BYTES CONFIG_BASE_LOADED
+
+# Keys that become macros in the generated header.  CONFIG_OPT is a build flag
+# rather than an image property, and CONFIG_BASE_LOADED is an internal guard
+# for the include chain - neither belongs in the header.
+CONFIG_HDR_KEYS := $(filter-out CONFIG_OPT CONFIG_BASE_LOADED,$(CONFIG_KEYS))
+
+# --- legacy aliases ----------------------------------------------------------
+# The pre-config switches translate into keys.  Passing the old switch and the
+# new key at the same time is ambiguous, so it is rejected rather than
+# silently resolved one way; a value the old switch never accepted is too.
+ifeq ($(origin WLAN_NIC),command line)
+ifneq ($(filter command line,$(foreach k,CONFIG_NIC_IWM CONFIG_NIC_URTWN CONFIG_NIC_RTW8189F,$(origin $(k)))),)
+$(error WLAN_NIC= and CONFIG_NIC_*= are both set; pass one or the other)
+endif
+ifeq ($(filter $(WLAN_NIC),iwm urtwn rtw8189f all),)
+$(error WLAN_NIC must be one of: iwm, urtwn, rtw8189f, all)
+endif
+CONFIG_NIC_IWM := $(if $(filter $(WLAN_NIC),iwm all),1,0)
+CONFIG_NIC_URTWN := $(if $(filter $(WLAN_NIC),urtwn all),1,0)
+CONFIG_NIC_RTW8189F := $(if $(filter $(WLAN_NIC),rtw8189f all),1,0)
+endif
+
+ifeq ($(origin UVC),command line)
+ifneq ($(origin CONFIG_UVC),command line)
+ifeq ($(filter $(UVC),0 1),)
+$(error UVC must be 0 or 1)
+endif
+CONFIG_UVC := $(UVC)
+endif
+endif
+
+ifeq ($(origin UAC),command line)
+ifneq ($(origin CONFIG_UAC),command line)
+ifeq ($(filter $(UAC),0 1),)
+$(error UAC must be 0 or 1)
+endif
+CONFIG_UAC := $(UAC)
+endif
+endif
+
+ifeq ($(origin UVC_DEBUG),command line)
+ifneq ($(origin CONFIG_UVC_DEBUG),command line)
+ifeq ($(filter $(UVC_DEBUG),0 1),)
+$(error UVC_DEBUG must be 0 or 1)
+endif
+CONFIG_UVC_DEBUG := $(UVC_DEBUG)
+endif
+endif
+
+ifeq ($(origin UC_OPT),command line)
+ifneq ($(origin CONFIG_OPT),command line)
+CONFIG_OPT := $(UC_OPT)
+endif
+endif
+
+# --- implications ------------------------------------------------------------
+# A wireless line selects the bus it sits on and the network world it runs in;
+# the camera and the microphone are USB devices; the network world needs a
+# shell to be driven from.  Setting a bus key by hand can add a bus (a future
+# USB-only image) but cannot remove one a line needs.
+ifeq ($(CONFIG_NIC_IWM),1)
+CONFIG_BUS_PCIE := 1
+endif
+ifeq ($(CONFIG_NIC_URTWN),1)
+CONFIG_BUS_USB := 1
+endif
+ifeq ($(CONFIG_NIC_RTW8189F),1)
+CONFIG_BUS_SDIO := 1
+endif
+ifneq ($(filter 1,$(CONFIG_NIC_IWM) $(CONFIG_NIC_URTWN) $(CONFIG_NIC_RTW8189F) $(CONFIG_UVC) $(CONFIG_UAC)),)
+CONFIG_NET := 1
+endif
+ifneq ($(filter 1,$(CONFIG_UVC) $(CONFIG_UAC)),)
+CONFIG_BUS_USB := 1
+endif
+# UAC rides on the UVC block: the audio shell commands (`uvc audio ...`) and
+# the raw-stream dump channel both live there today, so CONFIG_UAC=1 with
+# CONFIG_UVC=0 would not link.  configs/fragments/uac.conf selects UVC for
+# this reason; an explicit UVC=0 against a UAC=1 is a contradiction the user
+# should resolve, not something to silently override (auto-enabling the camera
+# block would build video code nobody asked for).  Splitting uvc_cmds.c into a
+# video and an audio command TU is a registered follow-up that retires this.
+ifeq ($(CONFIG_UAC),1)
+ifeq ($(CONFIG_UVC),0)
+$(error CONFIG_UAC=1 needs the UVC block (the `uvc audio ...` commands and the dump channel live in it): pass CONFIG_UVC=1 as well, or set CONFIG_UAC=0. A config that includes $(CONFIG_DIR)/fragments/uac.conf gets UVC automatically)
+endif
+endif
+ifeq ($(CONFIG_NET),1)
+CONFIG_SHELL := 1
+endif
+
+# --- validation --------------------------------------------------------------
+# A config file that forgets its includes would silently build the minimal
+# image; base.conf sets this marker as its last line.
+ifneq ($(CONFIG_BASE_LOADED),1)
+$(error $(CONFIG_FILE) does not include $(CONFIG_DIR)/base.conf (the key defaults and documentation))
+endif
+# The secondaries park in the UP image; the SMP line is a separate branch.
+# Better a hard error here than a half-SMP image that mis-programs the GIC.
+ifneq ($(CONFIG_SMP_CORES),1)
+$(error CONFIG_SMP_CORES=$(CONFIG_SMP_CORES) is not supported on this trunk (UP image only; the SMP line is feat/threadx-smp). See AGENTS.md)
+endif
+
 # Board selection: port/board/<board>/ supplies board_conf.h (register bases,
 # interrupt numbers, MMU windows) and the link script.
-BOARD ?= rk3568
+BOARD := $(CONFIG_BOARD)
 
 # Bare-metal toolchain, set explicitly (non-interactive shells do not source
 # ~/.bashrc - silently picking up a Linux-targeted compiler links against
@@ -31,56 +185,14 @@ CC      := $(CROSS_COMPILE)gcc
 OBJCOPY := $(CROSS_COMPILE)objcopy
 SIZE    := $(CROSS_COMPILE)size
 
-BUILD   := build/$(BOARD)-threadx-uc
+# One build directory per configuration: switching CONFIG= never reuses the
+# previous image's objects, so no clean is needed between configs.
+BUILD   := build/$(BOARD)-threadx-uc-$(CONFIG_NAME)
 TARGET  := $(BUILD)/threadx-uc
-
-# Wireless NIC line selection (build-time, not runtime): which wireless
-# stacks this image carries at all.  A NIC that is not built contributes no
-# code, no threads, no buffers and no bring-up, so a driver being debugged
-# is never coupled to the other one - neither through the shared 4 MB heap
-# (iwm's RX ring alone is ~1.1 MB) nor through the bus bring-up order.
-#   make WLAN_NIC=iwm      PCIe line only:  DW host + iwm + iwlwifi ucode
-#   make WLAN_NIC=urtwn    USB line only:   netbsd usb di/hcd + urtwn + rtl fw
-#   make WLAN_NIC=rtw8189f SDIO line only:  dw-mmc host + fsl sdmmc + rtw8189f
-#   make WLAN_NIC=all      all three (default)
-# WLAN_NIC_USB/WLAN_NIC_PCIE/WLAN_NIC_SDIO reach the sources as defines; the
-# gated source lists below are the other half of the mechanism.  Switching
-# WLAN_NIC needs `make clean` first: the -D defines are not tracked in the
-# dependency files, so stale objects from the previous selection survive.
-WLAN_NIC ?= all
-ifeq ($(filter $(WLAN_NIC),iwm urtwn rtw8189f all),)
-$(error WLAN_NIC must be one of: iwm, urtwn, rtw8189f, all)
-endif
-WLAN_HAVE_USB  := $(if $(filter $(WLAN_NIC),urtwn all),1,0)
-WLAN_HAVE_PCIE := $(if $(filter $(WLAN_NIC),iwm all),1,0)
-WLAN_HAVE_SDIO := $(if $(filter $(WLAN_NIC),rtw8189f all),1,0)
-
-# UVC line (feat/libbsd_uvc): NetBSD uvideo (USB video class, isochronous)
-# behind the video(4) middle layer, both compiled straight from the
-# submodule tree; the adapter side is the cdev consumer shim (av_video.c)
-# and the shell command.  UVC=0 compiles the line out entirely (sources,
-# cfdrivers and cfentries are all guarded).  Switching UVC needs
-# `make clean` for the same stale-object reason as WLAN_NIC.
-UVC ?= 1
-# UVC_DEBUG=1 compiles the imported driver's own diagnostics (UVIDEO_DEBUG:
-# payload-path counters, the first-8-packet header dump, and EHCI's isoc iTD
-# ctl dump).  Bring-up forensics only; the pin stays untouched because the
-# switch is a build define, not a source change.
-UVC_DEBUG ?= 0
-
-# UAC line (S2 of feat/libbsd_uvc): NetBSD audio(4) middle layer + the
-# audio converters it links against, plus uaudio (USB audio class), all
-# compiled straight from the submodule tree; the adapter side is the
-# fileops consumer shim (av_audio.c).  uaudio is a USB device driver, so
-# UAC=1 needs a USB-carrying WLAN_NIC - same coupling UVC already has.
-# UAC=0 compiles the line out entirely (sources, cfdrivers and cfentries
-# are all guarded).  Switching UAC needs `make clean` like UVC/WLAN_NIC.
-UAC ?= 1
-
-# Debug-carrier optimization profile (D57): symbols plus near-no optimization,
-# so gdb's line table places breakpoints on addresses code actually reaches.
-# UC_OPT=-O0 reproduces the reference SDK's CONFIG_DEBUG_NOOPT exact-noopt shape.
-UC_OPT ?= -Og
+# The generated header every world includes, and the stamp that ties the tree
+# to one resolved key set.
+CONFIG_HDR   := $(BUILD)/config.h
+CONFIG_STAMP := $(BUILD)/.config-stamp
 
 # -mgeneral-regs-only: the port saves no FP state, so any FP instruction is a
 #   bug we want the compiler to prevent rather than discover as corruption.
@@ -89,23 +201,28 @@ UC_OPT ?= -Og
 # -mno-outline-atomics: a -nostdlib image has no library for __aarch64_*
 #   helpers; inlined LDXR/STXR loops need none.
 # -DTX_INCLUDE_USER_DEFINE_FILE: the kernel reads the adapter's tx_user.h.
-CFLAGS := $(UC_OPT) -g3 -std=c11 -Wall -Wextra \
+# The feature switches are NOT here any more: they live in the generated
+# config.h (see configs/).  Only the flags the compiler itself needs, plus the
+# SMP core count that startup assembly reads, stay on the command line.
+CFLAGS := $(CONFIG_OPT) -g3 -std=c11 -Wall -Wextra \
 	-ffreestanding -nostdlib -fno-builtin -fno-stack-protector \
 	-march=armv8-a -mgeneral-regs-only -mstrict-align -mno-outline-atomics \
-	-DGUEST -DEL1 -DSMP_CORES=1 \
-	-DWLAN_NIC_USB=$(WLAN_HAVE_USB) -DWLAN_NIC_PCIE=$(WLAN_HAVE_PCIE) \
-	-DUVC_BUILD=$(UVC) -DUAC_BUILD=$(UAC) \
+	-DGUEST -DEL1 -DSMP_CORES=$(CONFIG_SMP_CORES) \
 	-DTHREADX_BUILD=1 -DTHREADX_UP_BUILD=1 \
-	-DTX_INCLUDE_USER_DEFINE_FILE \
-	-DWLAN_NIC_USB=$(WLAN_HAVE_USB) -DWLAN_NIC_PCIE=$(WLAN_HAVE_PCIE) \
-	-DWLAN_NIC_SDIO=$(WLAN_HAVE_SDIO)
+	-DTX_INCLUDE_USER_DEFINE_FILE
 
 LDFLAGS = -nostdlib -static -T port/board/$(BOARD)/$(BOARD).ld \
 	-Wl,--build-id=none -Wl,--no-warn-rwx-segments -Wl,-Map=$(TARGET).map
 
 # --- include paths -----------------------------------------------------------
 
-INC_COMMON := -Iinclude -Iport/board -Iport/aarch64 -Iport/board/$(BOARD) -Idrivers
+# $(BUILD) first: the generated config.h lives there and every project TU that
+# reads a key includes it by name.  The vendored trees have no config.h on
+# their include paths (verified for libbsd, lwip, netutils, sdmmc; wpa's own
+# config.h sits in wpa_supplicant/ and src/utils/ and is only ever reached by
+# quote-include from those directories), so the extra -I cannot shadow
+# anything upstream compiles against.
+INC_COMMON := -I$(BUILD) -Iinclude -Iport/board -Iport/aarch64 -Iport/board/$(BOARD) -Idrivers
 
 # Adapters only: they are the only layer allowed to touch vendored code and
 # kernel internals. cmsis_os2_ext.h (osThreadFlagsSetFromISR) lives with the
@@ -158,21 +275,32 @@ ARCH_SRCS := \
 	port/aarch64/itsdump.c \
 	port/aarch64/tick.c
 
-ADAPTER_SRCS := \
-	port/adapters/cmsis_rtos2_threadx/cmsis_os2_impl.c \
+# Shell adapter + cherrysh itself.  SHELL=0 drops the shell and every command
+# TU with it (commands register through the FSymTab section, so a command is
+# compiled in iff its translation unit is).
+ADAPTER_SRCS := port/adapters/cmsis_rtos2_threadx/cmsis_os2_impl.c
+
+ifeq ($(CONFIG_SHELL),1)
+ADAPTER_SRCS += \
 	port/adapters/cherrysh/cherrysh_adapter.c \
 	third-party/cherrysh/chry_shell.c \
 	third-party/cherrysh/builtin/help.c \
 	third-party/cherrysh/builtin/clear.c \
 	third-party/cherrysh/builtin/shsize.c \
 	third-party/cherrysh/cherryrl/chry_readline.c \
-	third-party/cherryrb/chry_ringbuffer.c \
+	third-party/cherryrb/chry_ringbuffer.c
+endif
+
+# netutils (ping/tftp/iperf3/ntp/telnet) is part of the network world.
+ifeq ($(CONFIG_NET),1)
+ADAPTER_SRCS += \
 	port/adapters/netutils/netutils_shim.c \
 	port/adapters/netutils/tftp_port.c \
 	port/adapters/netutils/iperf3_port.c \
 	port/adapters/netutils/iperf3_cmd.c \
 	port/adapters/netutils/ntp_port.c \
 	port/adapters/netutils/telnet_port.c
+endif
 
 DRIVER_SRCS := drivers/uart_ns16550.c
 
@@ -181,14 +309,26 @@ DRIVER_SRCS := drivers/uart_ns16550.c
 BOARD_SRCS :=
 BOARD_PCIE_SRCS := port/board/$(BOARD)/rk3568_pcie.c
 
-ifeq ($(WLAN_HAVE_PCIE),1)
-ADAPTER_SRCS += port/adapters/pcie/pcie_cmds.c
+# Bus lines: the driver + board data each bus brings up.  The bus keys are set
+# by the wireless lines (and by UVC/UAC for USB) through the implications
+# above; gating the sources on them keeps a bus out of an image that has no
+# line needing it (the SDIO host + fsl_sdmmc stack are a sizeable slab).
+ifeq ($(CONFIG_BUS_PCIE),1)
 DRIVER_SRCS  += drivers/dwc_pcie.c drivers/pci_msix.c
 BOARD_SRCS   += $(BOARD_PCIE_SRCS)
 endif
-ifeq ($(WLAN_HAVE_SDIO),1)
+ifeq ($(CONFIG_BUS_SDIO),1)
 DRIVER_SRCS  += drivers/dwc_mmc.c
 BOARD_SRCS   += port/board/$(BOARD)/rk3568_sdmmc.c
+endif
+
+# Command TUs register through the shell's command table; without a shell they
+# would drag the shell headers in for nothing.  (The sdmmc command TU rides
+# with the rest of the SDIO adapter units in SDMMC_ADAPTER_SRCS below.)
+ifeq ($(CONFIG_SHELL),1)
+ifeq ($(CONFIG_BUS_PCIE),1)
+ADAPTER_SRCS += port/adapters/pcie/pcie_cmds.c
+endif
 endif
 
 APP_SRCS := app/main.c app/dbg_scenario.c
@@ -202,8 +342,13 @@ APP_SRCS := app/main.c app/dbg_scenario.c
 # CFATTACH glue stays intact. The adapter impl units (bus_dma/autoconf/osal
 # backends) compile in the same world; the shell-facing adapter files compile
 # like any other adapter code.
+#
+# CONFIG_NET=0 drops this world entirely: net80211, the BSD port core, every
+# bus line, the camera and the microphone.  The per-line and per-bus groups
+# below stay named so a future finer split (lwIP alone, wpa alone) has the
+# lists ready, but only CONFIG_NET=1 accumulates them into the build.
 
-LIBBSD_BSD_SRCS := \
+LIBBSD_NET80211_SRCS := \
 	third-party/libbsd/sys/net80211/ieee80211.c \
 	third-party/libbsd/sys/net80211/ieee80211_amrr.c \
 	third-party/libbsd/sys/net80211/ieee80211_crypto.c \
@@ -221,7 +366,8 @@ LIBBSD_BSD_SRCS := \
 	third-party/libbsd/sys/crypto/aes/aes_ct_dec.c \
 	third-party/libbsd/sys/crypto/aes/aes_ct_enc.c
 
-# The USB host stack (usbdi + hub + ehci/xhci): the urtwn line's bus.
+# The USB host stack (usbdi + hub + ehci/xhci): the urtwn line's bus, and the
+# bus the camera and the microphone sit on.
 LIBBSD_USB_SRCS := \
 	third-party/libbsd/sys/dev/usb/usbdi.c \
 	third-party/libbsd/sys/dev/usb/usbdi_util.c \
@@ -234,11 +380,7 @@ LIBBSD_USB_SRCS := \
 	third-party/libbsd/sys/dev/usb/ehci.c \
 	third-party/libbsd/sys/dev/usb/xhci.c
 
-ifeq ($(WLAN_HAVE_USB),1)
-LIBBSD_BSD_SRCS += $(LIBBSD_USB_SRCS)
-endif
-
-LIBBSD_IMPL_SRCS := \
+LIBBSD_IMPL_CORE_SRCS := \
 	port/adapters/libbsd/aes_impl_compat.c \
 	port/adapters/libbsd/bsd_bus.c \
 	port/adapters/libbsd/bsd_autoconf.c \
@@ -250,7 +392,7 @@ LIBBSD_IMPL_SRCS := \
 	port/adapters/libbsd/net/bsd_mbuf.c \
 	port/adapters/libbsd/net/bsd_ifnet.c
 
-LIBBSD_ADAPTER_SRCS := \
+LIBBSD_ADAPTER_CORE_SRCS := \
 	port/adapters/libbsd/wlan_adapter.c \
 	port/adapters/libbsd/wlan_console.c \
 	port/adapters/libbsd/wlan_cmds.c
@@ -258,9 +400,16 @@ LIBBSD_ADAPTER_SRCS := \
 # One line, one driver TU set: the bus glue + platform + firmware blob of
 # each wireless line (the driver .c compiles inside the *_reg.c wrapper so
 # its static CFATTACH glue stays intact).
-LIBBSD_USB_ADAPTER_SRCS := \
+#
+# The USB platform bring-up is bus-level, not urtwn-level: the EHCI/xHCI
+# host composition is what the camera enumerates behind, so an iwm+UVC
+# image (no USB wireless driver at all) still needs it.  Only the RTL
+# firmware blob belongs to the urtwn line itself.
+LIBBSD_USB_PLATFORM_SRCS := \
 	port/adapters/libbsd/usb_platform.c \
-	port/adapters/libbsd/usb_xhci_platform.c \
+	port/adapters/libbsd/usb_xhci_platform.c
+
+LIBBSD_URTWN_ADAPTER_SRCS := \
 	port/adapters/libbsd/fw_rtl8188eufw.c
 
 LIBBSD_PCIE_ADAPTER_SRCS := \
@@ -286,19 +435,33 @@ LIBBSD_SDIO_ADAPTER_SRCS := \
 	port/adapters/libbsd/fw_rtw8189ffw.c \
 	port/adapters/libbsd/wlan_sdio_claim.c
 
-ifeq ($(WLAN_HAVE_USB),1)
-LIBBSD_IMPL_SRCS    += port/adapters/libbsd/urtwn_reg.c
-LIBBSD_ADAPTER_SRCS += $(LIBBSD_USB_ADAPTER_SRCS)
+LIBBSD_BSD_SRCS :=
+LIBBSD_IMPL_SRCS :=
+LIBBSD_ADAPTER_SRCS :=
+
+ifeq ($(CONFIG_NET),1)
+LIBBSD_BSD_SRCS     := $(LIBBSD_NET80211_SRCS)
+LIBBSD_IMPL_SRCS    := $(LIBBSD_IMPL_CORE_SRCS)
+LIBBSD_ADAPTER_SRCS := $(LIBBSD_ADAPTER_CORE_SRCS)
 endif
-ifeq ($(WLAN_HAVE_PCIE),1)
+
+ifeq ($(CONFIG_BUS_USB),1)
+LIBBSD_BSD_SRCS += $(LIBBSD_USB_SRCS)
+LIBBSD_ADAPTER_SRCS += $(LIBBSD_USB_PLATFORM_SRCS)
+endif
+ifeq ($(CONFIG_NIC_URTWN),1)
+LIBBSD_IMPL_SRCS    += port/adapters/libbsd/urtwn_reg.c
+LIBBSD_ADAPTER_SRCS += $(LIBBSD_URTWN_ADAPTER_SRCS)
+endif
+ifeq ($(CONFIG_NIC_IWM),1)
 LIBBSD_ADAPTER_SRCS += $(LIBBSD_PCIE_ADAPTER_SRCS)
 endif
-ifeq ($(WLAN_HAVE_SDIO),1)
+ifeq ($(CONFIG_NIC_RTW8189F),1)
 LIBBSD_BSD_SRCS     += $(LIBBSD_SDIO_BSD_SRCS)
 LIBBSD_IMPL_SRCS    += $(LIBBSD_SDIO_IMPL_SRCS)
 LIBBSD_ADAPTER_SRCS += $(LIBBSD_SDIO_ADAPTER_SRCS)
 endif
-ifeq ($(UVC),1)
+ifeq ($(CONFIG_UVC),1)
 LIBBSD_BSD_SRCS     += third-party/libbsd/sys/dev/video.c \
 	third-party/libbsd/sys/dev/usb/uvideo.c
 LIBBSD_ADAPTER_SRCS += port/adapters/libbsd/av_video.c \
@@ -309,7 +472,7 @@ endif
 # The audio line: audio.c is the audio(4) middle layer and its converter
 # TUs (linear/mulaw/alaw) are link-time dependencies of it; uaudio is the
 # USB audio class driver that hands the microphone's endpoints to it.
-ifeq ($(UAC),1)
+ifeq ($(CONFIG_UAC),1)
 LIBBSD_BSD_SRCS     += third-party/libbsd/sys/dev/audio/audio.c \
 	third-party/libbsd/sys/dev/audio/linear.c \
 	third-party/libbsd/sys/dev/audio/mulaw.c \
@@ -318,7 +481,7 @@ LIBBSD_BSD_SRCS     += third-party/libbsd/sys/dev/audio/audio.c \
 LIBBSD_ADAPTER_SRCS += port/adapters/libbsd/av_audio.c
 endif
 
-LIBBSD_INC := -Iinclude \
+LIBBSD_INC := -I$(BUILD) -Iinclude \
 	-Iport/adapters/libbsd/compat/netbsd \
 	-Ithird-party/libbsd/sys \
 	-Ithird-party/libbsd/sys/arch \
@@ -327,11 +490,21 @@ LIBBSD_INC := -Iinclude \
 	-Iport/adapters/libbsd \
 	-Ithird-party/tlsf
 
-LIBBSD_BSD_CFG := -D_KERNEL -D_KERNEL_OPT -DDIAGNOSTIC \
-	-DIWM_DEBUG \
+# The feature defines reach the frozen import from here rather than from the
+# generated header: a force-included config.h inside the vendored world would
+# be the one place the layering rule (only the adapter knows upstream) breaks.
+# They are derived from the keys, so the config files stay the single source.
+LIBBSD_BSD_CFG := -D_KERNEL -D_KERNEL_OPT \
 	-D_COMPAT_SYS_SYSCTL_H_ -include stdarg.h \
-	-DUSBHIST_SIZE=4096 -include port/adapters/libbsd/compat/netbsd/opt_usb.h \
+	-DUSBHIST_SIZE=$(CONFIG_USBHIST_SIZE) \
+	-include port/adapters/libbsd/compat/netbsd/opt_usb.h \
 	-include port/adapters/libbsd/port_config_bsd.h
+ifeq ($(CONFIG_BSD_DIAGNOSTIC),1)
+LIBBSD_BSD_CFG += -DDIAGNOSTIC
+endif
+ifeq ($(CONFIG_IWM_DEBUG),1)
+LIBBSD_BSD_CFG += -DIWM_DEBUG
+endif
 # IWM_DEBUG compiles in iwm_nic_error()/iwm_nic_umac_error() and the
 # tx/rx-ring + 802.11-state dump that run on the fatal-firmware-error
 # interrupt (if_iwm.c iwm_softintr). Runtime traces behind it stay gated
@@ -342,15 +515,6 @@ LIBBSD_BSD_CFG := -D_KERNEL -D_KERNEL_OPT -DDIAGNOSTIC \
 # records, which is ~3 MB of .bss here); 4096 x 64 B keeps a whole
 # enumeration trail with room to spare.
 
-# UVC_DEBUG=1: the imported UVC line's own forensics (see above).
-# LIBBSD_SUB_CFG is an immediate expansion of LIBBSD_BSD_CFG (it freezes
-# the value at its `:=` line), so the switch has to feed both.  Sliding
-# this switch needs `make clean` too (same untracked -D as WLAN_NIC; a
-# stale uvideo.o silently keeps -DUVIDEO_DEBUG).
-ifeq ($(UVC_DEBUG),1)
-LIBBSD_BSD_CFG += -DUVIDEO_DEBUG -DVIDEO_DEBUG=0 -DUVC_PORT_DIAG
-LIBBSD_SUB_CFG += -DUVIDEO_DEBUG -DVIDEO_DEBUG=0 -DUVC_PORT_DIAG
-endif
 # VIDEO_DEBUG=0 (not bare): the middle layer compiles its DPRINTF paths in
 # but leaves videodebug=0, so 'uvc dbg <n>' can turn them on at runtime
 # without a rebuild.  A bare -DVIDEO_DEBUG would print from the start.
@@ -371,9 +535,16 @@ endif
 # block anywhere in the compiled set (audited), and it also switches on
 # the DIAGNOSTIC-only prints (uhub's "port %d, device not enabled", the
 # ehci xfer dumps).
-# the pinned upstream sources compile with warnings silenced (-w): they are
-# frozen imports, edited only through patches/
+# The UVC line's own forensics (CONFIG_UVC_DEBUG=1): the imported driver's
+# counters, the first-8-packet header dump and EHCI's isoc iTD ctl dump.
+# LIBBSD_SUB_CFG is an immediate expansion of LIBBSD_BSD_CFG (it freezes the
+# value at its `:=` line), so a switch added after that line has to feed both;
+# asserting here that it is empty catches a future key wired to only one.
 LIBBSD_SUB_CFG := -w $(LIBBSD_BSD_CFG)
+ifeq ($(CONFIG_UVC_DEBUG),1)
+LIBBSD_BSD_CFG += -DUVIDEO_DEBUG -DVIDEO_DEBUG=0 -DUVC_PORT_DIAG
+LIBBSD_SUB_CFG += -DUVIDEO_DEBUG -DVIDEO_DEBUG=0 -DUVC_PORT_DIAG
+endif
 
 # --- lwip + wlan netif bridge (feat/wpa_supplicant + feat/netutils) -------------
 # lwIP 2.2.1 (pinned submodule). The set follows upstream src/Filelists.mk for
@@ -431,7 +602,7 @@ LWIP_SRCS := \
 	port/adapters/lwip/lwip_diag.c \
 	port/adapters/lwip/net_cmd.c
 
-LWIP_INC := -Iport/adapters/lwip/include \
+LWIP_INC := -I$(BUILD) -Iport/adapters/lwip/include \
 	-Iport/adapters/lwip/cmsis/include \
 	-Ithird-party/lwip/src/include \
 	-Iport/adapters/libbsd
@@ -452,7 +623,7 @@ NETUTILS_VENDORED_SRCS := \
 	third-party/netutils/netio/netio.c \
 	third-party/netutils/tcpdump/tcpdump.c \
 
-NETUTILS_INC := -Iport/adapters/netutils/shim \
+NETUTILS_INC := -I$(BUILD) -Iport/adapters/netutils/shim \
 	-Iport/adapters/netutils \
 	-Ithird-party/netutils/ping \
 	-Ithird-party/netutils/tftp \
@@ -529,7 +700,7 @@ WPA_PORT_SRCS := \
 	port/adapters/wpa_supplicant/l2_packet_net80211.c \
 	port/adapters/wpa_supplicant/driver_net80211.c
 
-WPA_INC := -Iport/adapters/wpa_supplicant/shim \
+WPA_INC := -I$(BUILD) -Iport/adapters/wpa_supplicant/shim \
 	-Ithird-party/wpa_supplicant \
 	-Ithird-party/wpa_supplicant/src \
 	-Ithird-party/wpa_supplicant/src/utils \
@@ -566,7 +737,7 @@ SDMMC_ADAPTER_SRCS := \
 	port/adapters/sdmmc/sdmmc_glue_irq.c \
 	port/adapters/sdmmc/sdmmc_cmds.c
 
-SDMMC_INC := -Iport/adapters/sdmmc/shadow \
+SDMMC_INC := -I$(BUILD) -Iport/adapters/sdmmc/shadow \
 	-Iport/adapters/sdmmc \
 	-Ithird-party/sdmmc/common \
 	-Ithird-party/sdmmc/sd \
@@ -574,7 +745,7 @@ SDMMC_INC := -Iport/adapters/sdmmc/shadow \
 	-Ithird-party/sdmmc/mmc \
 	-Ithird-party/sdmmc/sdio
 
-ifeq ($(WLAN_HAVE_SDIO),1)
+ifeq ($(CONFIG_BUS_SDIO),1)
 SDMMC_OBJS := $(addprefix $(BUILD)/,$(SDMMC_SRCS:.c=.o)) \
 	$(addprefix $(BUILD)/,$(SDMMC_ADAPTER_SRCS:.c=.o))
 endif
@@ -593,14 +764,26 @@ ASM_SRCS := \
 C_SRCS := $(KERNEL_SRCS) $(ARCH_SRCS) $(ADAPTER_SRCS) $(DRIVER_SRCS) $(BOARD_SRCS) $(APP_SRCS)
 LIBBSD_IMPL_OBJS := $(addprefix $(BUILD)/,$(LIBBSD_IMPL_SRCS:.c=.o))
 LIBBSD_ADAPTER_OBJS := $(addprefix $(BUILD)/,$(LIBBSD_ADAPTER_SRCS:.c=.o))
+# The three stack worlds ride together with CONFIG_NET: lwIP's netif bridge
+# calls the wlan port hooks, wpa runs on net80211 and netutils' sockets
+# resolve through lwIP, so a partial set would not link.
+ifeq ($(CONFIG_NET),1)
 LWIP_OBJS := $(addprefix $(BUILD)/,$(LWIP_SRCS:.c=.o))
 NETUTILS_OBJS := $(addprefix $(BUILD)/,$(NETUTILS_VENDORED_SRCS:.c=.o))
 WPA_OBJS := $(addprefix $(BUILD)/,$(WPA_CORE_SRCS:.c=.o) $(WPA_PORT_SRCS:.c=.o))
+endif
 OBJS := $(addprefix $(BUILD)/,$(C_SRCS:.c=.o)) $(addprefix $(BUILD)/,$(ASM_SRCS:.S=.o)) \
 	$(addprefix $(BUILD)/,$(LIBBSD_BSD_SRCS:.c=.o)) \
 	$(LIBBSD_IMPL_OBJS) $(LIBBSD_ADAPTER_OBJS) \
 	$(LWIP_OBJS) $(WPA_OBJS) $(NETUTILS_OBJS) $(SDMMC_OBJS)
 DEPS := $(OBJS:.o=.d)
+
+# Order-only, for the parallel build: config.h must exist before any object
+# compiles (tx_user.h and the adapter shadow headers include it).  Rebuilding
+# on a *change* to it needs no rule here - -MMD records it in the .d files of
+# every TU that includes it, which is the same mechanism every other header
+# uses.
+$(OBJS): | $(CONFIG_HDR)
 
 # Kernel and adapters see the vendored trees; board, drivers and app do not.
 $(BUILD)/third-party/%.o: third-party/%.c
@@ -618,7 +801,12 @@ $(LIBBSD_IMPL_OBJS): $(BUILD)/port/adapters/libbsd/%.o: port/adapters/libbsd/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(LIBBSD_INC) $(LIBBSD_BSD_CFG) -MMD -MP -c $< -o $@
 
-$(LIBBSD_ADAPTER_OBJS): $(BUILD)/port/adapters/libbsd/%.o: port/adapters/libbsd/%.c
+# The SDIO claim layer and the raw A/V dump have their own rules below (extra
+# include worlds); excluding them here keeps the static pattern from claiming
+# them and make from warning about an overridden recipe.
+LIBBSD_ADAPTER_GENERIC_OBJS := $(filter-out %/wlan_sdio_claim.o %/av_dump.o,$(LIBBSD_ADAPTER_OBJS))
+
+$(LIBBSD_ADAPTER_GENERIC_OBJS): $(BUILD)/port/adapters/libbsd/%.o: port/adapters/libbsd/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(LIBBSD_INC) \
 		$(LIBBSD_BSD_CFG) -MMD -MP -c $< -o $@
@@ -736,7 +924,7 @@ $(BUILD)/third-party/threadx/%.o: third-party/threadx/%.S
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) -MMD -MP -c $< -o $@
 
-$(TARGET).elf: $(OBJS)
+$(TARGET).elf: $(OBJS) | $(CONFIG_HDR) $(CONFIG_STAMP)
 	$(CC) $(CFLAGS) $(OBJS) $(LDFLAGS) -o $@
 	$(SIZE) $@
 
@@ -744,29 +932,103 @@ $(TARGET).bin: $(TARGET).elf
 	$(OBJCOPY) -O binary $< $@
 	@printf 'image: %s (%s bytes)\n' $@ "$$(stat -c%s $@)"
 	@sha256sum $@
+	@printf 'config: CONFIG=%s (%s)\n' "$(CONFIG)" "$(abspath $(CONFIG_HDR))"
+
+# --- generated configuration header ------------------------------------------
+# configs/config.h.in with every @KEY@ replaced by the resolved value.  Values
+# are substituted with $(foreach) + sed rather than make's own $(subst) so a
+# value containing characters make would treat specially (the -Og profile is a
+# build flag and not in the template, but a future string key could be) is
+# never re-parsed.  The file is only rewritten when the content changes, so an
+# unchanged config does not invalidate every object through -MMD.
+CONFIG_HDR_VARS := $(foreach k,$(CONFIG_HDR_KEYS),-e 's|@$(k)@|$(subst |,|,$($(k)))|g')
+
+# The stamp is a prerequisite of the header so a key mismatch is reported
+# before config.h is rewritten: the tree keeps the key set its objects were
+# actually built with until the clean happens.
+# FORCE so a key change is re-examined every run; the cmp keeps the mtime
+# (and therefore the objects that include it) untouched when nothing changed.
+$(CONFIG_HDR): $(CONFIG_DIR)/config.h.in $(CONFIG_FILE) $(CONFIG_STAMP) FORCE
+	@mkdir -p $(BUILD)
+	@sed $(CONFIG_HDR_VARS) $< > $@.new
+	@if [ -f $@ ] && cmp -s $@ $@.new; then rm -f $@.new; else \
+		mv -f $@.new $@; \
+		echo "config: $(CONFIG_HDR) updated (CONFIG=$(CONFIG))"; \
+	fi
+
+# --- stale-object guard ------------------------------------------------------
+# The -D defines and the vendored-world flags are invisible to the dependency
+# files, so an incremental tree that changed keys links objects from two
+# different images (2026-09-27: half iwm, half urtwn, undefined iwm_ca/usb_cd).
+# The stamp is the whole resolved key set; a mismatch is a hard, self-explaining
+# error instead.  Switching CONFIG= picks another build directory and needs no
+# clean; changing a key inside one config does.
+$(CONFIG_STAMP): FORCE
+	@mkdir -p $(BUILD)
+	@printf '%s\n' "$(foreach k,$(CONFIG_KEYS),$(k)=$($(k)))" | sha256sum | cut -d' ' -f1 > $@.new
+	@if [ -f $@ ] && ! cmp -s $@ $@.new; then \
+		echo "ERROR: $(BUILD) holds objects built with a different configuration; run 'make clean-config' (or 'make clean') before changing keys in CONFIG=$(CONFIG)"; \
+		echo "       the previous key set differs from the current one; 'make show-config' prints this one"; \
+		rm -f $@.new; exit 1; \
+	fi
+	@mv -f $@.new $@
 
 # Without this the first explicit target (the ELF rule) would be the default,
 # so a bare `make` builds no image at all - which silently leaves a stale
 # binary on the TFTP root and makes a failed rebuild look like a boot failure.
 .DEFAULT_GOAL := all
 
-.PHONY: all deploy modules sync gates clean FORCE
+.PHONY: all deploy modules sync gates clean clean-config configs show-config check-config FORCE
 
-# WLAN_NIC rides the command line, so make cannot see a switch through
-# header dependencies: an incremental tree then links half iwm, half
-# urtwn objects and dies on undefined iwm_ca/usb_cd (2026-09-27). Make
-# the mismatch a hard, self-explaining error instead.
-build/.nic: FORCE
-	@mkdir -p $(BUILD); printf '%s' "$(WLAN_NIC)" > $@.new; \
-	if [ -f $@ ] && ! cmp -s $@ $@.new; then \
-		echo "ERROR: build tree holds WLAN_NIC=$$(cat $@) objects; run 'make clean' before switching to WLAN_NIC=$(WLAN_NIC)"; \
-		rm -f $@.new; exit 1; \
-	fi; mv -f $@.new $@
+all: $(CONFIG_HDR) $(CONFIG_STAMP) $(TARGET).bin
 
-all: build/.nic $(TARGET).bin
+# The available configurations, and what this tree would build right now.
+configs:
+	@printf 'available configurations (%s/*.conf):\n' "$(CONFIG_DIR)"
+	@for f in $(CONFIG_DIR)/*.conf; do \
+		name=$$(basename "$$f" .conf); \
+		desc=$$(sed -n '1s/^# //p' "$$f"); \
+		case "$$name" in \
+		base) printf '  %-10s %s [the key table; every config includes it]\n' "$$name" "$$desc"; continue ;; \
+		esac; \
+		if [ "$$name" = "$(CONFIG)" ]; then mark=' <- current (CONFIG=$(CONFIG))'; else mark=''; fi; \
+		printf '  %-10s %s%s\n' "$$name" "$$desc" "$$mark"; \
+	done
+	@printf '\nfragments (%s/fragments/*.conf):\n' "$(CONFIG_DIR)"
+	@for f in $(CONFIG_DIR)/fragments/*.conf; do \
+		printf '  %-16s %s\n' "$$(basename "$$f" .conf)" "$$(sed -n '1s/^# //p' "$$f")"; \
+	done
+
+show-config:
+	@printf 'CONFIG=%s  (build directory: %s)\n\n' "$(CONFIG)" "$(BUILD)"
+	@printf 'keys:\n'
+	@$(foreach k,$(CONFIG_KEYS),printf '  %-30s %s\n' '$(k)' '$($(k))';)
+	@printf '\nartifacts:\n  binary  %s\n  elf     %s\n  config  %s\n' \
+		"$(TARGET).bin" "$(TARGET).elf" "$(CONFIG_HDR)"
+
+# Guard against the three key lists drifting apart: the table (configs/*.conf),
+# the Makefile's CONFIG_KEYS, and the config.h.in template.
+check-config:
+	@fail=0; \
+	for f in $(CONFIG_DIR)/*.conf $(CONFIG_DIR)/fragments/*.conf; do \
+		[ -e "$$f" ] || continue; \
+		for key in $$(sed -n 's/^\(CONFIG_[A-Z0-9_]*\)[[:space:]]*[:?]*=.*/\1/p' "$$f"); do \
+			case " $(CONFIG_KEYS) " in *" $$key "*) ;; \
+			*) echo "  FAIL  $$f sets unknown key $$key"; fail=1 ;; esac; \
+		done; \
+	done; \
+	for key in $(CONFIG_HDR_KEYS); do \
+		grep -q "@$$key@" $(CONFIG_DIR)/config.h.in || { echo "  FAIL  config.h.in is missing @$$key@"; fail=1; }; \
+	done; \
+	for tok in $$(sed -n 's/.*@\(CONFIG_[A-Z0-9_]*\)@.*/\1/p' $(CONFIG_DIR)/config.h.in); do \
+		case " $(CONFIG_HDR_KEYS) " in *" $$tok "*) ;; \
+		*) echo "  FAIL  config.h.in has @$$tok@ which is not a known key"; fail=1 ;; esac; \
+	done; \
+	if [ "$$fail" -eq 0 ]; then echo 'check-config: PASS'; else echo 'check-config: FAIL'; exit 1; fi
 
 # Copy to the TFTP root under the name the board's boot profile expects
-# (oslab `rtos` profile -> rtos.bin; the banner tells the images apart).
+# (oslab `rtos` profile -> rtos.bin; the banner names the configuration so
+# images from different configs are tellable apart in a terminal log).
 # Records the hash before and after so the transfer is verifiable.
 deploy: $(TARGET).bin
 	@printf 'before: '; sha256sum /mnt/d/tftpboot/rtos.bin 2>/dev/null || echo '(absent)'
@@ -880,5 +1142,11 @@ gates:
 
 clean:
 	rm -rf build
+
+# Drop only this configuration's objects: the fix for a key change inside one
+# config (see the stamp guard), without disturbing the other configs' builds.
+clean-config:
+	rm -rf $(BUILD)
+	@printf 'removed %s (CONFIG=%s)\n' "$(BUILD)" "$(CONFIG)"
 
 -include $(DEPS)
