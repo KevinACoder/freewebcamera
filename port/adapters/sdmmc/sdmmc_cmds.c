@@ -58,9 +58,9 @@ static int cmd_sdio(int argc, char **argv)
 	const sdio_card_t *card;
 
 	if ((argc >= 2) && (strcmp(argv[1], "reinit") == 0)) {
-		csh_printf(csh, "sdio: re-enumerating\r\n");
+		csh_printf(csh, "sdio: re-enumerating\n");
 		if (sdio_restart() != 0) {
-			csh_printf(csh, "sdio: init failed\r\n");
+			csh_printf(csh, "sdio: init failed\n");
 		}
 		sdio_print(csh);
 		return 0;
@@ -69,10 +69,10 @@ static int cmd_sdio(int argc, char **argv)
 	if ((argc >= 2) && (strcmp(argv[1], "cis") == 0)) {
 		card = sdio_card_get();
 		if (card == NULL) {
-			csh_printf(csh, "sdio: no card\r\n");
+			csh_printf(csh, "sdio: no card\n");
 			return -1;
 		}
-		csh_printf(csh, "common cis: mID %04x mInfo %04x fnid %u fn0blk %u speed %02x\r\n",
+		csh_printf(csh, "common cis: mID %04x mInfo %04x fnid %u fn0blk %u speed %02x\n",
 			   card->commonCIS.mID, card->commonCIS.mInfo,
 			   card->commonCIS.funcID,
 			   card->commonCIS.fn0MaxBlkSize,
@@ -81,7 +81,7 @@ static int cmd_sdio(int argc, char **argv)
 			if (card->ioFBR[i].ioStdFunctionCode == 0U) {
 				continue;
 			}
-			csh_printf(csh, "fbr[%u]: std fn %u, ext %02x, cis %08x, blk %u\r\n",
+			csh_printf(csh, "fbr[%u]: std fn %u, ext %02x, cis %08x, blk %u\n",
 				   i, card->ioFBR[i].ioStdFunctionCode,
 				   card->ioFBR[i].ioExtFunctionCode,
 				   card->ioFBR[i].ioPointerToCIS,
@@ -91,7 +91,7 @@ static int cmd_sdio(int argc, char **argv)
 	}
 
 	if (!sdio_card_up()) {
-		csh_printf(csh, "usage: sdio [reinit|cis]\r\n");
+		csh_printf(csh, "usage: sdio [reinit|cis]\n");
 		return -1;
 	}
 

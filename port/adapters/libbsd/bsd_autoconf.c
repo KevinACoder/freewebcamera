@@ -578,8 +578,18 @@ config_attach_internal(device_t parent, cfdata_t cf, void *aux,
 		return NULL;
 	}
 
+	/* NetBSD's attach line is printed by the autoconf itself, as
+	 * "<child> at <parent>", and the cfprint is then called with pnp ==
+	 * NULL - a cfprint only spells out the auxiliary path for the
+	 * UNCONFIGURED case, which config_found's failure path handles below.
+	 * The port used to call print(aux, device_xname(dev)), so every USB
+	 * attach read "usb at usb0" (child name in the parent slot) and the
+	 * child's own continuation (": USB revision 2.0", ": <devinfo>") came
+	 * out headless on the next line.  The console line assembler joins the
+	 * head and the continuation into the one line NetBSD shows. */
+	printf("%s at %s", device_xname(dev), device_xname(parent));
 	if (print != NULL) {
-		print(aux, device_xname(dev));
+		(void) print(aux, NULL);
 	}
 
 	ca->ca_attach(parent, dev, aux);

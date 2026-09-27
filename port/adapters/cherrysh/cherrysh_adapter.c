@@ -215,15 +215,23 @@ static void shell_usart_event(uint32_t event)
 	shell_rearm_rx();
 }
 
-/* CherrySH output callback. Blocking Send is honest for this UART and keeps
- * command output from being interleaved by another task mid-line. */
+/* CherrySH output callback. Raw and unstamped by design (the prompt, the echo
+ * and every redraw carry ANSI escapes that must reach the wire byte-for-byte),
+ * but under the console's print lock so interactive output never lands inside
+ * a driver line - the shell used to drive the CMSIS Send directly, on no lock
+ * at all, which is how prompts ended up spliced into attach logs.
+ *
+ * Newline contract (AGENTS.md "打印纪律"): shell output writes '\n' only; the
+ * polled writer expands it to CRLF, and board_console_write_raw drops a CR
+ * that precedes an LF, so a legacy "\n" string still reaches the wire as one
+ * CRLF instead of CR CR LF. */
 static uint16_t shell_sput(chry_readline_t *rl, const void *data, uint16_t size)
 {
 	(void)rl;
 	if (data == NULL || size == 0U) {
 		return 0U;
 	}
-	(void)Driver_USART_Console.Send(data, (uint32_t)size);
+	board_console_write_raw((const char *)data, (unsigned int)size);
 	return size;
 }
 
@@ -323,11 +331,11 @@ static int cmd_version(int argc, char **argv)
 	(void)argc;
 	(void)argv;
 	csh_printf(csh,
-		   "freewebcamera\r\n"
-		   "  repo      freewebcamera (BSD-2)\r\n"
-		   "  target    RK3568 E4AP5G1-ITX, cortex-a55\r\n"
-		   "  kernel    %s\r\n"
-		   "  api       CMSIS-RTOS2\r\n",
+		   "freewebcamera\n"
+		   "  repo      freewebcamera (BSD-2)\n"
+		   "  target    RK3568 E4AP5G1-ITX, cortex-a55\n"
+		   "  kernel    %s\n"
+		   "  api       CMSIS-RTOS2\n",
 		   kernel);
 	return 0;
 }
@@ -346,7 +354,7 @@ static int cmd_uptime(int argc, char **argv)
 
 	board_uptime_parts(&usec, &ums);
 	csh_printf(csh,
-		   "uptime: %u.%03u s (cntvct); tick %u at %u Hz = %u.%03u s\r\n",
+		   "uptime: %u.%03u s (cntvct); tick %u at %u Hz = %u.%03u s\n",
 		   (unsigned)usec, (unsigned)ums,
 		   (unsigned)ticks, (unsigned)hz,
 		   (unsigned)((hz != 0U) ? (ticks / hz) : 0U),
@@ -364,10 +372,10 @@ static int cmd_tick(int argc, char **argv)
 	 * running, this would hang - which is itself the answer. */
 	osDelay(100U);
 	t1 = osKernelGetTickCount();
-	csh_printf(csh, "tick advanced %u in 100 ms of osDelay\r\n",
+	csh_printf(csh, "tick advanced %u in 100 ms of osDelay\n",
 		   (unsigned)(t1 - t0));
 	if ((t1 - t0) == 0U) {
-		csh_printf(csh, "TICK NOT RUNNING\r\n");
+		csh_printf(csh, "TICK NOT RUNNING\n");
 		return -1;
 	}
 	return 0;
@@ -386,29 +394,29 @@ static int cmd_rtos(int argc, char **argv)
 	int32_t rc = 0;
 
 	if (sem == NULL || mq == NULL || mtx == NULL) {
-		csh_printf(csh, "rtos: object creation failed\r\n");
+		csh_printf(csh, "rtos: object creation failed\n");
 		rc = -1;
 		goto done;
 	}
 	if (osSemaphoreRelease(sem) != osOK ||
 	    osSemaphoreAcquire(sem, 10U) != osOK) {
-		csh_printf(csh, "rtos: semaphore round trip failed\r\n");
+		csh_printf(csh, "rtos: semaphore round trip failed\n");
 		rc = -1;
 		goto done;
 	}
 	if (osMessageQueuePut(mq, &v, 0U, 0U) != osOK ||
 	    osMessageQueueGet(mq, &out, NULL, 0U) != osOK ||
 	    out != v) {
-		csh_printf(csh, "rtos: queue round trip failed\r\n");
+		csh_printf(csh, "rtos: queue round trip failed\n");
 		rc = -1;
 		goto done;
 	}
 	if (osMutexAcquire(mtx, 10U) != osOK || osMutexRelease(mtx) != osOK) {
-		csh_printf(csh, "rtos: mutex round trip failed\r\n");
+		csh_printf(csh, "rtos: mutex round trip failed\n");
 		rc = -1;
 		goto done;
 	}
-	csh_printf(csh, "rtos: semaphore/queue/mutex OK\r\n");
+	csh_printf(csh, "rtos: semaphore/queue/mutex OK\n");
 
 done:
 	if (sem != NULL) {
@@ -430,12 +438,12 @@ static int cmd_its(int argc, char **argv)
 	chry_shell_t *csh = CSH_FROM_ARGV(argc, argv);
 	uint32_t delivered = 0U;
 
-	csh_printf(csh, "its: running the ladder...\r\n");
+	csh_printf(csh, "its: running the ladder...\n");
 	if (its_selftest(&delivered) != 0) {
-		csh_printf(csh, "its: FAIL (see the boot log for the rung)\r\n");
+		csh_printf(csh, "its: FAIL (see the boot log for the rung)\n");
 		return -1;
 	}
-	csh_printf(csh, "its: LPI OK, %u deliveries observed\r\n",
+	csh_printf(csh, "its: LPI OK, %u deliveries observed\n",
 		   (unsigned)delivered);
 	return 0;
 }
@@ -448,7 +456,7 @@ static int cmd_itsdump(int argc, char **argv)
 {
 	chry_shell_t *csh = CSH_FROM_ARGV(argc, argv);
 
-	csh_printf(csh, "itsdump:\r\n");
+	csh_printf(csh, "itsdump:\n");
 	(void)its_dump_cmd(argc, argv);
 	return 0;
 }
@@ -461,7 +469,7 @@ static int cmd_uartint(int argc, char **argv)
 
 	if (argc < 2) {
 		csh_printf(csh, "uartint: console RX on INTID %u"
-			   " (usage: uartint <intid>)\r\n",
+			   " (usage: uartint <intid>)\n",
 			   uart_console_irq_id());
 		return 0;
 	}
@@ -470,13 +478,13 @@ static int cmd_uartint(int argc, char **argv)
 		int intid = atoi(argv[1]);
 
 		if ((intid <= 0) || (uart_console_irq_rebind((unsigned int)intid) != 0)) {
-			csh_printf(csh, "uartint: rebind to %d failed\r\n",
+			csh_printf(csh, "uartint: rebind to %d failed\n",
 				   intid);
 			return -1;
 		}
 	}
 	csh_printf(csh, "uartint: console RX moved to INTID %u - type"
-		   " to test\r\n",
+		   " to test\n",
 		   uart_console_irq_id());
 	return 0;
 }
@@ -495,7 +503,7 @@ static int cmd_gicdiag(int argc, char **argv)
 
 	board_gicv3_diag(&pmr, &rpr);
 	csh_printf(csh,
-		   "gicdiag: PMR=%02x RPR=%02x console-intid=%u rx-down=%d\r\n",
+		   "gicdiag: PMR=%02x RPR=%02x console-intid=%u rx-down=%d\n",
 		   (unsigned)pmr, (unsigned)rpr,
 		   (unsigned)BOARD_CONSOLE_INTID,
 		   uart_console_rx_down());
@@ -512,9 +520,9 @@ static int cmd_dbg(int argc, char **argv)
 
 	(void)argc;
 	(void)argv;
-	csh_printf(csh, "dbg: BRK - gdb 'continue' resumes\r\n");
+	csh_printf(csh, "dbg: BRK - gdb 'continue' resumes\n");
 	dbg_probe_breakpoint();
-	csh_printf(csh, "dbg: probe word = 0x%lx\r\n", dbg_probe_word);
+	csh_printf(csh, "dbg: probe word = 0x%lx\n", dbg_probe_word);
 	return 0;
 }
 
@@ -532,7 +540,7 @@ static int cmd_heap(int argc, char **argv)
 
 	(void)argc;
 	(void)argv;
-	csh_printf(csh, "heap free=%lu B\r\n",
+	csh_printf(csh, "heap free=%lu B\n",
 		   (unsigned long) xPortGetFreeHeapSize());
 	wlan_heap_census();
 	return 0;
@@ -555,13 +563,13 @@ static int cmd_reboot(int argc, char **argv)
 
 	(void)argc;
 	(void)argv;
-	csh_printf(csh, "reboot: PSCI SYSTEM_RESET\r\n");
+	csh_printf(csh, "reboot: PSCI SYSTEM_RESET\n");
 	osDelay(20U);
 
 	ret = board_system_reset();
 	/* only reachable when the firmware refused (PSCI NOT_SUPPORTED / an
 	 * invalid call): the board is still running */
-	csh_printf(csh, "reboot: firmware refused the reset (%d)\r\n", ret);
+	csh_printf(csh, "reboot: firmware refused the reset (%d)\n", ret);
 	return ret;
 }
 

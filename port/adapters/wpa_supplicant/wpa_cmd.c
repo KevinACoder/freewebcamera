@@ -22,7 +22,7 @@ static int sscanf_bssid(const char *s, unsigned int b[6]);
 static void usage(chry_shell_t *csh) {
 	csh_printf(csh,
 		   "usage: wpa start | status | connect <ssid> <psk> [bssid] | "
-		   "disconnect\r\n");
+		   "disconnect\n");
 }
 
 static int cmd_wpa(int argc, char **argv) {
@@ -36,14 +36,14 @@ static int cmd_wpa(int argc, char **argv) {
 
 	if (strcmp(argv[1], "start") == 0) {
 		ret = wpa_port_start();
-		csh_printf(csh, "wpa: start %s\r\n",
+		csh_printf(csh, "wpa: start %s\n",
 			   ret == 0 ? "ok" : "failed");
 		return 0;
 	}
 	if (strcmp(argv[1], "status") == 0) {
 		ret = wpa_port_status();
 		if (ret != 0) {
-			csh_printf(csh, "wpa: supplicant busy\r\n");
+			csh_printf(csh, "wpa: supplicant busy\n");
 		}
 		return 0;
 	}
@@ -68,7 +68,7 @@ static int cmd_wpa(int argc, char **argv) {
 				ret = wpa_port_connect_bssid(argv[2],
 				    argv[3], mac);
 			} else {
-				csh_printf(csh, "wpa: bad bssid %s\r\n",
+				csh_printf(csh, "wpa: bad bssid %s\n",
 					   argv[4]);
 				return 1;
 			}
@@ -76,16 +76,16 @@ static int cmd_wpa(int argc, char **argv) {
 			ret = wpa_port_connect(argv[2], argv[3]);
 		}
 		if (ret == 0) {
-			csh_printf(csh, "wpa: connecting to \"%s\"\r\n",
+			csh_printf(csh, "wpa: connecting to \"%s\"\n",
 				   argv[2]);
 		} else {
-			csh_printf(csh, "wpa: connect failed (%d)\r\n", ret);
+			csh_printf(csh, "wpa: connect failed (%d)\n", ret);
 		}
 		return 0;
 	}
 	if (strcmp(argv[1], "disconnect") == 0) {
 		ret = wpa_port_disconnect();
-		csh_printf(csh, "wpa: disconnect %s\r\n",
+		csh_printf(csh, "wpa: disconnect %s\n",
 			   ret == 0 ? "ok" : "failed/busy");
 		return 0;
 	}

@@ -60,7 +60,7 @@ static int pcie_cfg_rd(chry_shell_t *csh, uint32_t bus, uint32_t devfn,
 
 	*val = 0xffffffffu;
 	if (Driver_PCIe.ConfigRead(&acc) != ARM_DRIVER_OK && csh != NULL) {
-		csh_printf(csh, "  bus %u devfn %u reg %02x: read failed\r\n",
+		csh_printf(csh, "  bus %u devfn %u reg %02x: read failed\n",
 		    bus, devfn, off);
 		return -1;
 	}
@@ -84,7 +84,7 @@ static void pcie_dump_function(chry_shell_t *csh, uint32_t bus,
 	(void) pcie_cfg_rd(csh, bus, devfn, PCIE_CFG_CLASS, &class);
 	(void) pcie_cfg_rd(csh, bus, devfn, PCIE_CFG_COMMAND, &cmd);
 
-	csh_printf(csh, "  %02x:%02x.%u %04x:%04x class %02x%02x cmd %04x\r\n",
+	csh_printf(csh, "  %02x:%02x.%u %04x:%04x class %02x%02x cmd %04x\n",
 	    bus, devfn >> 3, devfn & 7u, id & 0xffffu, id >> 16,
 	    (class >> 24) & 0xffu, (class >> 16) & 0xffu, cmd & 0xffffu);
 
@@ -92,7 +92,7 @@ static void pcie_dump_function(chry_shell_t *csh, uint32_t bus,
 	for (uint32_t i = 0; i < 6u; i++) {
 		if (pcie_cfg_rd(csh, bus, devfn,
 		    PCIE_CFG_BAR0 + 4u * i, &bar[i]) == 0 && bar[i] != 0) {
-			csh_printf(csh, "    BAR%u = %08x%s\r\n", i, bar[i],
+			csh_printf(csh, "    BAR%u = %08x%s\n", i, bar[i],
 			    (bar[i] & 0x1u) ? " (io)" :
 			    ((bar[i] & 0x6u) == 0x4u) ? " (mem64)" : " (mem)");
 			printed = 1;
@@ -103,20 +103,20 @@ static void pcie_dump_function(chry_shell_t *csh, uint32_t bus,
 	}
 	if (!printed) {
 		csh_printf(csh, "    (BARs unassigned - firmware sizing step"
-		    " missing?)\r\n");
+		    " missing?)\n");
 	}
 
 	/* capability walk (mirrors the driver's own scan) */
 	next = 0;
 	(void) pcie_cfg_rd(csh, bus, devfn, PCIE_CFG_CAP_PTR, &next);
-	csh_printf(csh, "    cap ptr = %02x\r\n", next & 0xfcu);
+	csh_printf(csh, "    cap ptr = %02x\n", next & 0xfcu);
 	next &= 0xfcu;
 	for (guard = 0; guard < 48u && next != 0; guard++) {
 		uint32_t hdr, id_lo;
 
 		if (next < 0x40u || next >= 0x100u) {
 			csh_printf(csh, "    cap walk: out-of-range next=%02x,"
-			    " stopping\r\n", next);
+			    " stopping\n", next);
 			break;
 		}
 		if (pcie_cfg_rd(csh, bus, devfn, next, &hdr) != 0) {
@@ -124,17 +124,17 @@ static void pcie_dump_function(chry_shell_t *csh, uint32_t bus,
 		}
 		id_lo = hdr & 0xffu;
 		if (id_lo == PCIE_CAP_ID_MSI) {
-			csh_printf(csh, "    cap MSI   @%02x (ctrl %04x)\r\n",
+			csh_printf(csh, "    cap MSI   @%02x (ctrl %04x)\n",
 			    next, (hdr >> 16) & 0xffffu);
 		} else if (id_lo == PCIE_CAP_ID_MSIX) {
 			uint32_t tbl;
 
 			(void) pcie_cfg_rd(csh, bus, devfn, next + 4u, &tbl);
 			csh_printf(csh, "    cap MSI-X @%02x (ctrl %04x table"
-			    " BAR%u+%08x)\r\n", next, hdr >> 16,
+			    " BAR%u+%08x)\n", next, hdr >> 16,
 			    tbl & 7u, tbl & ~7u);
 		} else {
-			csh_printf(csh, "    cap id %02x @%02x\r\n", id_lo,
+			csh_printf(csh, "    cap id %02x @%02x\n", id_lo,
 			    next);
 		}
 		/* the next pointer is bits 15:8 of the same dword (reading
@@ -152,7 +152,7 @@ static int cmd_pcie(int argc, char **argv)
 		for (uint32_t i = 0; i < PCIE_INSTANCES; i++) {
 			int32_t ret = Driver_PCIe.Initialize(i, NULL);
 
-			csh_printf(csh, "pcie%u: initialize %s\r\n", i,
+			csh_printf(csh, "pcie%u: initialize %s\n", i,
 			    ret == ARM_DRIVER_OK ? "ok (link inherited)" :
 			    "no link (run U-Boot 'pci enum' first)");
 		}
@@ -160,7 +160,7 @@ static int cmd_pcie(int argc, char **argv)
 	}
 
 	if (argc < 2 || strcmp(argv[1], "dump") != 0) {
-		csh_printf(csh, "usage: pcie init | dump\r\n");
+		csh_printf(csh, "usage: pcie init | dump\n");
 		return 0;
 	}
 
@@ -172,7 +172,7 @@ static int cmd_pcie(int argc, char **argv)
 
 		if (Driver_PCIe.Initialize(i, NULL) != ARM_DRIVER_OK) {
 			csh_printf(csh, "pcie%u: no link inherited"
-			    " (LTSSM says firmware never trained it)\r\n", i);
+			    " (LTSSM says firmware never trained it)\n", i);
 			continue;
 		}
 		(void) Driver_PCIe.GetLinkState(i, &ltssm);
@@ -181,7 +181,7 @@ static int cmd_pcie(int argc, char **argv)
 		(void) Driver_PCIe.MapWindow(i, 0, &cpu_addr, &size);
 
 		csh_printf(csh, "pcie%u: ltssm=%08x gen%u x%u,"
-		    " devices %u, mem window %08x+%x\r\n",
+		    " devices %u, mem window %08x+%x\n",
 		    i, ltssm, caps.link_speed, caps.max_lanes, count,
 		    cpu_addr, size);
 
@@ -194,7 +194,7 @@ static int cmd_pcie(int argc, char **argv)
 			uint32_t bar0 = 0;
 
 			csh_printf(csh, "    intx status=%08x mask=%08x,"
-			    " glue irq=%lu spurious=%lu\r\n",
+			    " glue irq=%lu spurious=%lu\n",
 			    apb[PCIE_CLIENT_INT_STATUS / 4u],
 			    apb[PCIE_CLIENT_INT_MASK / 4u], nirq, spurious);
 
@@ -212,7 +212,7 @@ static int cmd_pcie(int argc, char **argv)
 
 				csh_printf(csh, "    radio bar0 %08x mmio:"
 				    " 000=%08x 00c=%08x"
-				    " 024=%08x 028=%08x\r\n",
+				    " 024=%08x 028=%08x\n",
 				    (uint32_t)(uintptr_t) b,
 				    b[0x000 / 4], b[0x00c / 4],
 				    b[0x024 / 4], b[0x028 / 4]);
@@ -225,7 +225,7 @@ static int cmd_pcie(int argc, char **argv)
 				    0xf4300000UL;
 
 				csh_printf(csh, "    nvme bar0 mmio:"
-				    " 000=%08x 008=%08x\r\n", n[0], n[2]);
+				    " 000=%08x 008=%08x\n", n[0], n[2]);
 			}
 		}
 

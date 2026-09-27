@@ -32,11 +32,11 @@ static int cmd_iperf3(int argc, char **argv)
 
 	if (argc >= 2 && strcmp(argv[1], "stop") == 0) {
 		if (!iperf3_client_is_running()) {
-			csh_printf(csh, "iperf3: not running\r\n");
+			csh_printf(csh, "iperf3: not running\n");
 			return 0;
 		}
 		iperf3_client_stop();
-		csh_printf(csh, "iperf3: stop requested\r\n");
+		csh_printf(csh, "iperf3: stop requested\n");
 		return 0;
 	}
 
@@ -51,11 +51,11 @@ static int cmd_iperf3(int argc, char **argv)
 		} else if (strcmp(argv[i], "-r") == 0) {
 			cfg.reverse = 1;
 		} else if (argv[i][0] == '-') {
-			csh_printf(csh, "iperf3: unknown option %s\r\n", argv[i]);
+			csh_printf(csh, "iperf3: unknown option %s\n", argv[i]);
 			return 0;
 		} else if (!have_ip) {
 			if (!ip4addr_aton(argv[i], &parsed)) {
-				csh_printf(csh, "iperf3: bad address %s\r\n", argv[i]);
+				csh_printf(csh, "iperf3: bad address %s\n", argv[i]);
 				return 0;
 			}
 			cfg.dest_ip = parsed.addr;	/* network byte order */
@@ -69,18 +69,18 @@ static int cmd_iperf3(int argc, char **argv)
 
 	if (!have_ip) {
 		csh_printf(csh, "usage: iperf3 <ip> [sec] [-u] [-r] | stop"
-			   "   (-u UDP, -r reverse = server sends)\r\n");
+			   "   (-u UDP, -r reverse = server sends)\n");
 		return 0;
 	}
 	if (iperf3_client_is_running()) {
-		csh_printf(csh, "iperf3: test already running\r\n");
+		csh_printf(csh, "iperf3: test already running\n");
 		return 0;
 	}
 	if (iperf3_client_start(&cfg) != 0) {
-		csh_printf(csh, "iperf3: failed to start\r\n");
+		csh_printf(csh, "iperf3: failed to start\n");
 		return 0;
 	}
-	csh_printf(csh, "iperf3: %s-%s test vs %s started, reports on console\r\n",
+	csh_printf(csh, "iperf3: %s-%s test vs %s started, reports on console\n",
 		   cfg.udp ? "udp" : "tcp", cfg.reverse ? "reverse" : "forward",
 		   argv[1]);
 	return 0;

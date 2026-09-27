@@ -85,7 +85,7 @@ int fflush(FILE *stream) {
 
 int puts(const char *s) {
 	console_emit(s);
-	console_emit("\r\n");
+	console_emit("\n");
 	return 0;
 }
 

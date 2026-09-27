@@ -230,7 +230,7 @@ static void telnet_session_task(void *arg)
 	netutils_shim_bind_session(&s->shell);
 	csh_printf(&s->shell,
 		   "freewebcamera telnet - commands run on the board shell; "
-		   "'help' lists them\r\n");
+		   "'help' lists them\n");
 
 	while (1) {
 		int n = recv(s->sock, buf, sizeof(buf), MSG_DONTWAIT);
@@ -360,25 +360,25 @@ static int cmd_telnetd(int argc, char *argv[])
 
 	if (argc > 1 && strcmp(argv[1], "--stop") == 0) {
 		if (listen_sock < 0) {
-			csh_printf(csh, "telnetd: not running\r\n");
+			csh_printf(csh, "telnetd: not running\n");
 			return -1;
 		}
 		listener_stop = 1;
 		lwip_close(listen_sock);	/* unblocks accept */
 		listen_sock = -1;
-		csh_printf(csh, "telnetd: listener stopped\r\n");
+		csh_printf(csh, "telnetd: listener stopped\n");
 		return 0;
 	}
 
 	if (listen_sock >= 0) {
-		csh_printf(csh, "telnetd: already running on port %d\r\n",
+		csh_printf(csh, "telnetd: already running on port %d\n",
 			   TELNET_PORT);
 		return -1;
 	}
 
 	listen_sock = socket(AF_INET, SOCK_STREAM, 0);
 	if (listen_sock < 0) {
-		csh_printf(csh, "telnetd: socket failed\r\n");
+		csh_printf(csh, "telnetd: socket failed\n");
 		return -1;
 	}
 	memset(&addr, 0, sizeof(addr));
@@ -386,7 +386,7 @@ static int cmd_telnetd(int argc, char *argv[])
 	addr.sin_port = htons(TELNET_PORT);
 	if (bind(listen_sock, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
 	    listen(listen_sock, TELNET_SESSION_MAX) != 0) {
-		csh_printf(csh, "telnetd: bind/listen failed\r\n");
+		csh_printf(csh, "telnetd: bind/listen failed\n");
 		lwip_close(listen_sock);
 		listen_sock = -1;
 		return -1;
@@ -400,10 +400,10 @@ static int cmd_telnetd(int argc, char *argv[])
 	if (task == NULL) {
 		lwip_close(listen_sock);
 		listen_sock = -1;
-		csh_printf(csh, "telnetd: task failed\r\n");
+		csh_printf(csh, "telnetd: task failed\n");
 		return -1;
 	}
-	csh_printf(csh, "telnetd: listening on port %d\r\n", TELNET_PORT);
+	csh_printf(csh, "telnetd: listening on port %d\n", TELNET_PORT);
 	return 0;
 }
 CSH_CMD_EXPORT_ALIAS_FULL(cmd_telnetd, telnetd, "telnetd [--stop]",
