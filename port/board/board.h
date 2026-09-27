@@ -255,6 +255,15 @@ uint32_t board_smp_up_count(void);
  * composite form 0xMMmmmm (e.g. 0x10001 = PSCI 1.1). */
 uint32_t board_smp_psci_version(void);
 
+/* PSCI SYSTEM_RESET through the same conduit: reset the SoC back to the
+ * firmware (U-Boot) without touching the UStone power switch, which is the
+ * board's expensive, wearing path to the same state. A reset that works never
+ * returns; a return value is the firmware's refusal (PSCI_NOT_SUPPORTED = -1
+ * and friends), so a caller that gets one is still running and may report it.
+ * Task context; the caller drains the console before calling - this layer has
+ * no kernel clock to wait on. */
+int board_system_reset(void);
+
 /* GICv3 per-core additions for SMP. board_gicv3_secondary_init() runs ON a
  * secondary core and brings up ITS OWN redistributor and CPU interface (the
  * distributor stays a boot-core-only concern); board_gicv3_send_sgi() raises

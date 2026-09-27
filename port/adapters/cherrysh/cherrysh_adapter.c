@@ -541,6 +541,33 @@ static int cmd_heap(int argc, char **argv)
 CSH_CMD_EXPORT_ALIAS_FULL(cmd_heap, heap, "heap",
 			  "system heap: free bytes + live blocks >= 2 KB");
 
+/* Warm reset back to the firmware prompt, the board discipline's preferred
+ * way to the U-Boot prompt (the UStone cold cycle stays the crash path).
+ * The 20 ms pause is for the console, not the SoC: the line above is queued
+ * in the DW-UART's FIFO, and at 115200 baud a few characters need a
+ * millisecond or two to leave the wire - without the wait they would die
+ * with the SoC. Then the SMC: on this board it resets, and this task never
+ * runs again. */
+static int cmd_reboot(int argc, char **argv)
+{
+	chry_shell_t *csh = CSH_FROM_ARGV(argc, argv);
+	int ret;
+
+	(void)argc;
+	(void)argv;
+	csh_printf(csh, "reboot: PSCI SYSTEM_RESET\r\n");
+	osDelay(20U);
+
+	ret = board_system_reset();
+	/* only reachable when the firmware refused (PSCI NOT_SUPPORTED / an
+	 * invalid call): the board is still running */
+	csh_printf(csh, "reboot: firmware refused the reset (%d)\r\n", ret);
+	return ret;
+}
+
+CSH_CMD_EXPORT_ALIAS_FULL(cmd_reboot, reboot, "reboot",
+			  "warm reset to U-Boot through PSCI SYSTEM_RESET");
+
 CSH_CMD_EXPORT_ALIAS_FULL(cmd_version, version, "version",
 			  "print build and target info");
 CSH_CMD_EXPORT_ALIAS_FULL(cmd_uptime, uptime, "uptime",

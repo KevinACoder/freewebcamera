@@ -188,6 +188,33 @@ static struct ehci_softc usb_ehci_sc[USBH_EHCI_NUM];
 static struct device usb_ehci_dev[USBH_EHCI_NUM];
 static bool s_usb_ehci_attached;
 
+/* The usbus registry (see usb_platform.h): every bus handed to the usb
+ * driver, in attach order.  Capacity covers the four buses this platform can
+ * bring up - two EHCI roots plus the xHCI's two. */
+#define USB_PLATFORM_MAX_BUSES	4U
+static struct usbd_bus *s_usb_buses[USB_PLATFORM_MAX_BUSES];
+static unsigned int s_usb_nbuses;
+
+/* Shared with usb_xhci_platform.c, which attaches the xHCI's two buses and
+ * must record them through the same registry (single writer per call site,
+ * no locking: both run from usb_platform_init() before any consumer exists). */
+void usb_platform_bus_record(struct usbd_bus *bus)
+{
+	if (bus != NULL && s_usb_nbuses < USB_PLATFORM_MAX_BUSES) {
+		s_usb_buses[s_usb_nbuses++] = bus;
+	}
+}
+
+unsigned int usb_platform_bus_count(void)
+{
+	return s_usb_nbuses;
+}
+
+struct usbd_bus *usb_platform_bus_at(unsigned int index)
+{
+	return (index < s_usb_nbuses) ? s_usb_buses[index] : NULL;
+}
+
 /* the CMSIS IRQ front hands no argument, and re-reading the INTID in the
  * handler is not an option: the trampoline has already ACKed this one and
  * ICC_IAR1 answers spurious until the EOI, so the dispatch would silently
@@ -289,6 +316,7 @@ static int usb_ehci_attach(int id)
 		printf("ehci%d: usbus attach failed\n", id);
 		return ENODEV;
 	}
+	usb_platform_bus_record(&sc->sc_bus);
 	s_usb_ehci_attached = true;
 	return 0;
 }
