@@ -11,9 +11,14 @@ set pagination off
 set architecture aarch64
 set breakpoint pending on
 
-# This image is -mgeneral-regs-only: the target description declares only
+# The image path carries the configuration name (configs/): every config
+# builds into its own directory, so point this at the one you booted.  The
+# default below is CONFIG=full; `make show-config` prints the path for any
+# other config (e.g. build/rk3568-threadx-uc-min/threadx-uc.elf).
+#
+# The image is -mgeneral-regs-only: the target description declares only
 # the 34 core registers; do not expect FP registers.
-file build/rk3568-threadx-uc/threadx-uc.elf
+file build/rk3568-threadx-uc-full/threadx-uc.elf
 
 # Breakpoint classes on this board (D57 triage): the boot chain (BL31 +
 # OP-TEE + U-Boot) never delivers self-hosted debug events other than BRK

@@ -21,7 +21,10 @@
 
 #include "av_video.h"
 #include "av_dump.h"
-#if UAC_BUILD
+/* The build configuration (generated): the audio shell verbs exist only when
+ * the microphone line is compiled in. */
+#include "config.h"
+#if CONFIG_UAC
 #include "av_audio.h"
 extern struct cfdriver audio_cd;
 #endif
@@ -82,7 +85,7 @@ uvc_list(void)
 		}
 		av_video_close(unit);
 	}
-#if UAC_BUILD
+#if CONFIG_UAC
 	{
 		/* the audio(4) unit: attached by uaudio on the same interface
 		 * walk the camera's video-control interface rides */
@@ -233,7 +236,7 @@ cmd_uvc(int argc, char **argv)
 		(void) av_video_read_probe(0, count);
 		return 0;
 	}
-#if UAC_BUILD
+#if CONFIG_UAC
 	if (argc >= 3 && strcmp(argv[1], "audio") == 0) {
 		if (strcmp(argv[2], "on") == 0) {
 			unsigned rate = argc > 3

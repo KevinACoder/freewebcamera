@@ -20,6 +20,11 @@
 
 #include "cmsis_os2.h"
 
+/* The build configuration (generated).  The bus-level bring-up below keys on
+ * CONFIG_BUS_* and the per-driver work on CONFIG_NIC_*: the camera rides the
+ * USB bus without needing any USB wireless driver. */
+#include "config.h"
+
 #include "board.h"
 
 #include "port.h"
@@ -52,7 +57,7 @@ void *wlan_port_thread_create(void (*run)(void *), void *arg) {
 	static const osThreadAttr_t attr = {
 		.name = "wlan-work",
 		.priority = osPriorityBelowNormal,
-		.stack_size = 8192,
+		.stack_size = CONFIG_WLAN_WORKER_STACK,
 	};
 
 	return (void *) osThreadNew((osThreadFunc_t) run, arg, &attr);
@@ -62,19 +67,19 @@ void *wlan_port_thread_create(void (*run)(void *), void *arg) {
 /* firmware: the blobs embedded at build time (generated from the
  * net80211 submodule's realtek dist by tools/gen_firmware_array.py,
  * and the Intel 7260 ucode carried alongside them). Each line's
- * bring-up compiles only when the image carries it (WLAN_NIC at
- * build time - see the Makefile block). */
+ * bring-up compiles only when the image carries it (CONFIG_NIC_* at
+ * build time - see configs/). */
 
-#if WLAN_NIC_USB
+#if CONFIG_NIC_URTWN
 extern const uint8_t rtl8188eufw_data[];
 extern const size_t rtl8188eufw_size;
 #endif
 
-#if WLAN_NIC_PCIE
+#if CONFIG_NIC_IWM
 extern int pcie_glue_init(void);
 #endif
 
-#if WLAN_NIC_SDIO
+#if CONFIG_NIC_RTW8189F
 #include "sdio.h"
 
 extern const uint8_t rtw8189ffw_data[];
@@ -116,21 +121,28 @@ int wlan_start(void) {
 	}
 	wlan_osal_cmsis_init();
 	wlan_console_ready();
-#if WLAN_NIC_USB
-		/* the netbsd usb history log level for the bring-up rounds
-		 * (ehci's level comes from EHCI_DEBUG_DEFAULT) */
-		{
-			extern int usbdebug;
+	/* the netbsd usb history log level for the bring-up rounds
+	 * (ehci's level comes from EHCI_DEBUG_DEFAULT); the bus is up
+	 * whenever anything rides it - a wireless line or the camera.
+	 * usbdebug is usb.c's variable: it exists only when the bus and
+	 * the history machinery are both compiled in. */
+#if CONFIG_BUS_USB
+#if CONFIG_USB_DEBUG_DEFAULT
+	{
+		extern int usbdebug;
 
-			usbdebug = 10;
-		}
+		usbdebug = CONFIG_USB_DEBUG_DEFAULT;
+	}
+#endif
+#endif
+#if CONFIG_NIC_URTWN
 	if (wlan_port_firmware_register("rtl8188eufw.bin", rtl8188eufw_data,
 		(size_t) rtl8188eufw_size) != 0) {
 		printf("wlan: firmware registration failed\n");
 		return -1;
 	}
 #endif
-#if WLAN_NIC_PCIE
+#if CONFIG_NIC_IWM
 	{
 		extern const uint8_t iwlwifi7260_17_ucode_data[];
 		extern const size_t iwlwifi7260_17_ucode_size;
@@ -143,7 +155,7 @@ int wlan_start(void) {
 		}
 	}
 #endif
-#if WLAN_NIC_SDIO
+#if CONFIG_NIC_RTW8189F
 	if (wlan_port_firmware_register("rtw8189f_fw.bin", rtw8189ffw_data,
 	    (size_t) rtw8189ffw_size) != 0) {
 		printf("wlan: rtw8189f firmware registration failed\n");
@@ -155,13 +167,13 @@ int wlan_start(void) {
 	 * hub exploration and urtwn attach (with its firmware load) run
 	 * on the calling thread and the threads the chain spawns.
 	 *
-	 * Each line is brought up only if the image carries it (WLAN_NIC at
+	 * Each line is brought up only if the image carries it (CONFIG_NIC_* at
 	 * build time); in a both-lines image the `wlan nic` preference can
 	 * skip one of them, which is a convenience, not the mechanism - a
 	 * debug image is built for exactly one line, so neither the 4 MB
 	 * heap (iwm's RX ring alone is ~1.1 MB) nor the bring-up order
 	 * couples the two. */
-#if WLAN_NIC_USB
+#if CONFIG_BUS_USB
 	if (wlan_nic_pref != NULL && strcmp(wlan_nic_pref, "iwm") == 0) {
 		printf("wlan: usb line skipped (preference: %s)\n",
 		    wlan_nic_pref);
@@ -174,7 +186,7 @@ int wlan_start(void) {
 	 * order.  A pcie failure must not flip the started flag back - the
 	 * usb world is already up and a re-run would re-init the EHCI/xHCI
 	 * hosts. */
-#if WLAN_NIC_PCIE
+#if CONFIG_NIC_IWM
 	if (wlan_nic_pref != NULL && strcmp(wlan_nic_pref, "urtwn") == 0) {
 		printf("wlan: pcie line skipped (preference: %s)\n",
 		    wlan_nic_pref);
@@ -183,7 +195,7 @@ int wlan_start(void) {
 		    " reboot to retry pcie)\n");
 	}
 #endif
-#if WLAN_NIC_SDIO
+#if CONFIG_NIC_RTW8189F
 	/* The SDIO line: enumerate the slot, then run the explicit claim
 	 * probe. The started flag goes up first: the probe's readiness
 	 * gate reads it. */

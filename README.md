@@ -48,19 +48,41 @@ tools/                宿主侧工具（gdbinit.uc 等）
 
 ## 构建与部署
 
+镜像由一份配置描述，配置文件在 `configs/`（默认 `full`）：
+
 ```sh
-make all      # build/rk3568-threadx-uc/threadx-uc.bin（默认目标）
-make deploy   # 拷贝到 TFTP 根 /mnt/d/tftpboot/rtos.bin，前后 sha256 对拍
-make modules  # submodule init + sparse-checkout + 重放 patches/
-make sync     # patches 物化为 submodule 内 fwc/<组件> 提交（改 patches / 收尾前必跑）
-make gates    # clean-room 厂商痕迹扫描 + 分层依赖方向检查（提交前必跑）
-make clean
+make                  # 构建 CONFIG=full：三条无线线 + 摄像头 + 麦克风
+make CONFIG=min       # 换一份配置（各自独立的构建目录，无需 clean）
+make configs          # 列出可选配置与片段；make show-config 打印解析后的键值
+make deploy           # 拷贝到 TFTP 根 /mnt/d/tftpboot/rtos.bin，前后 sha256 对拍
+make modules          # submodule init + sparse-checkout + 重放 patches/
+make sync             # patches 物化为 submodule 内 fwc/<组件> 提交（改 patches / 收尾前必跑）
+make gates            # clean-room 厂商痕迹扫描 + 分层依赖方向检查（提交前必跑）
+make clean            # 清掉全部配置的产物；make clean-config 只清当前配置
 ```
 
+一份配置 = `configs/<名字>.conf`：`include configs/base.conf`（键表：全部键的默认值
+与说明）+ 若干 `configs/fragments/*.conf`（一项能力一个片段）。首批配置：
+
+| 配置 | 内容 | 镜像 |
+|---|---|---|
+| `full`（默认） | iwm(PCIe) + urtwn(USB) + rtw8189f(SDIO) + UVC + UAC | 2,420,152 B |
+| `min` | 仅内核 + shell（无网络栈/USB/摄像头），裁剪验证用 | 124,136 B |
+| `iwm-uvc` | PCIe 无线 + 摄像头（采集不经 SDIO 出口） | 2,243,432 B |
+
+键值既可由配置文件给出，也可命令行覆盖：`make CONFIG=full CONFIG_HEAP_BYTES=…`。
+产物在 `build/rk3568-threadx-uc-<配置>/`（`threadx-uc.bin`/`.elf`/`config.h`）。
+改动配置内的键需要 `make clean-config` 后再构建——`-D` 与各世界的编译参数不进依赖
+文件，构建目录里的 stamp 会在键集变化时直接报错，不会混链接两份镜像的对象。
+
+旧的命令行开关仍然可用，等价关系如下（实现见 `configs/base.conf` 与 Makefile 的
+alias 段）：`WLAN_NIC=iwm|urtwn|rtw8189f|all`、`UVC=`、`UAC=`、`UVC_DEBUG=`、
+`UC_OPT=`。注意语义修正：UVC/UAC 现在会自动带上 USB 总线（相机是 USB 设备），所以
+`make WLAN_NIC=iwm` 得到的镜像包含 USB 主机栈 —— 即"PCIe 无线 + 相机"那条组合。
+
 工具链：xpack `aarch64-none-elf-gcc 13.2.1`（`AARCH64_CROSS_PATH` 可覆盖）。
-`WLAN_NIC=iwm|urtwn|all` 编译期选择无线线（`make clean` 后切换）。镜像为平铺 raw
-bin，加载地址 = 链接地址 = `0xa000000`；板上经 U-Boot `tftp` 至 `0xa000000` 后 `go`
-启动，串口 115200 进入 cherrysh。
+镜像为平铺 raw bin，加载地址 = 链接地址 = `0xa000000`；板上经 U-Boot `tftp` 至
+`0xa000000` 后 `go` 启动，串口 115200 进入 cherrysh；banner 会打印配置名以便区分镜像。
 
 ## 测试方法
 

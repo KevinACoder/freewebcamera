@@ -25,6 +25,12 @@
 
 #include "cmsis_os2.h"
 
+/* The build configuration (generated).  Bus-level switches (CONFIG_BUS_*)
+ * gate the host stacks, line-level ones (CONFIG_NIC_*, CONFIG_UVC/UAC) the
+ * drivers that ride them - a distinction that matters because the camera
+ * needs the USB stack without any USB wireless driver. */
+#include "config.h"
+
 #include <sys/types.h>
 #include <sys/device.h>
 #include <sys/errno.h>
@@ -95,16 +101,18 @@ struct usb_subr_copy_30_hook_t usb_subr_copy_30_hook = { .hooked = false };
 
 /* usb shells: ehci1's usbus + the xHCI's two buses (USB3 + USB2);
  * roothub shells: one per usbus, same count */
-#if WLAN_NIC_USB
+#if CONFIG_BUS_USB
 static device_t usb_devs[4];
 static device_t uroothub_devs[4];
 static device_t uhub_devs[4];
 static device_t ehci_devs[2];
 static device_t xhci_devs[2];
+#endif
+#if CONFIG_NIC_URTWN
 static device_t urtwn_devs[2];
 #endif
 
-#if WLAN_NIC_USB
+#if CONFIG_BUS_USB
 struct cfdriver usb_cd = {
 	.cd_devs = usb_devs,
 	.cd_name = "usb",
@@ -142,17 +150,18 @@ struct cfdriver xhci_cd = {
 	.cd_class = DV_DULL,
 	.cd_ndevs = 2,
 };
+#endif /* CONFIG_BUS_USB */
 
+#if CONFIG_NIC_URTWN
 struct cfdriver urtwn_cd = {
 	.cd_devs = urtwn_devs,
 	.cd_name = "urtwn",
 	.cd_class = DV_NET,
 	.cd_ndevs = 2,
 };
+#endif /* CONFIG_NIC_URTWN */
 
-#endif /* WLAN_NIC_USB */
-
-#if UVC_BUILD
+#if CONFIG_UVC
 /* the UVC line: uvideo claims the video-control interface (usbifif) and
  * hands each stream to the video(4) middle layer over videobus */
 static device_t uvideo_devs[2];
@@ -171,9 +180,9 @@ struct cfdriver video_cd = {
 	.cd_class = DV_DULL,
 	.cd_ndevs = 2,
 };
-#endif /* UVC_BUILD */
+#endif /* CONFIG_UVC */
 
-#if UAC_BUILD
+#if CONFIG_UAC
 /* the UAC line: uaudio claims the audio-control interface (the same
  * usbifif walk uvideo rides) and attaches audio(4) on top of it over
  * audiobus */
@@ -193,18 +202,20 @@ struct cfdriver audio_cd = {
 	.cd_class = DV_AUDIODEV,
 	.cd_ndevs = 2,
 };
-#endif /* UAC_BUILD */
+#endif /* CONFIG_UAC */
 
-#if WLAN_NIC_USB
+#if CONFIG_BUS_USB
 extern const struct cfattach usb_ca;
 extern const struct cfattach uroothub_ca;
 extern const struct cfattach uhub_ca;
+#endif
+#if CONFIG_NIC_URTWN
 extern const struct cfattach urtwn_ca;
 #endif
 
 /* the port's post-attach hook (urtwn_reg.c): registers the driver with
- * the shell-facing adapter table.  Only the USB line defines it. */
-#if WLAN_NIC_USB
+ * the shell-facing adapter table.  Only the urtwn line defines it. */
+#if CONFIG_NIC_URTWN
 void wlan_port_post_attach(device_t dev);
 #endif
 
@@ -345,7 +356,7 @@ struct cfentry {
 
 static int dlocs_zero[1] = { -1 };
 
-#if WLAN_NIC_USB
+#if CONFIG_BUS_USB
 static struct cfdata cfdata_usb = {
 	.cf_name = "usb", .cf_atname = "usb",
 	.cf_fstate = FSTATE_STAR, .cf_loc = dlocs_zero,
@@ -360,14 +371,16 @@ static struct cfdata cfdata_uhub = {
 	.cf_name = "uhub", .cf_atname = "uhub",
 	.cf_fstate = FSTATE_STAR, .cf_loc = dlocs_zero,
 };
+#endif /* CONFIG_BUS_USB */
 
+#if CONFIG_NIC_URTWN
 static struct cfdata cfdata_urtwn = {
 	.cf_name = "urtwn", .cf_atname = "urtwn",
 	.cf_fstate = FSTATE_STAR, .cf_loc = dlocs_zero,
 };
-#endif /* WLAN_NIC_USB */
+#endif /* CONFIG_NIC_URTWN */
 
-#if UVC_BUILD
+#if CONFIG_UVC
 static struct cfdata cfdata_uvideo = {
 	.cf_name = "uvideo", .cf_atname = "uvideo",
 	.cf_fstate = FSTATE_STAR, .cf_loc = dlocs_zero,
@@ -377,9 +390,9 @@ static struct cfdata cfdata_video = {
 	.cf_name = "video", .cf_atname = "video",
 	.cf_fstate = FSTATE_STAR, .cf_loc = dlocs_zero,
 };
-#endif /* UVC_BUILD */
+#endif /* CONFIG_UVC */
 
-#if UAC_BUILD
+#if CONFIG_UAC
 static struct cfdata cfdata_uaudio = {
 	.cf_name = "uaudio", .cf_atname = "uaudio",
 	.cf_fstate = FSTATE_STAR, .cf_loc = dlocs_zero,
@@ -389,9 +402,9 @@ static struct cfdata cfdata_audio = {
 	.cf_name = "audio", .cf_atname = "audio",
 	.cf_fstate = FSTATE_STAR, .cf_loc = dlocs_zero,
 };
-#endif /* UAC_BUILD */
+#endif /* CONFIG_UAC */
 
-#if WLAN_NIC_PCIE
+#if CONFIG_NIC_IWM
 /* the pcie endpoint: the native glue (pcie_glue.c) drives the DesignWare
  * host directly through include/pcie.h and config_founds only the radio
  * driver - no fdt world, no pci bus core, no ppb descent */
@@ -407,23 +420,25 @@ static struct cfdata cfdata_iwm = {
 	.cf_name = "iwm", .cf_atname = "iwm",
 	.cf_fstate = FSTATE_STAR, .cf_loc = dlocs_zero,
 };
-#endif /* WLAN_NIC_PCIE */
+#endif /* CONFIG_NIC_IWM */
 
 static struct cfentry cfentries[] = {
-#if WLAN_NIC_USB
+#if CONFIG_BUS_USB
 	{ "usbus", &cfdata_usb, &usb_cd },
 	{ "usbroothubif", &cfdata_uroothub, &uroothub_cd },
 	{ "usbdevif", &cfdata_uhub, &uhub_cd },
+#endif
+#if CONFIG_NIC_URTWN
 	{ "usbdevif", &cfdata_urtwn, &urtwn_cd },
 #endif
-#if UVC_BUILD
+#if CONFIG_UVC
 	/* uvideo matches on the video-control interface class, the same
 	 * usbifif config_found usb_subr does per unclaimed interface */
 	{ "usbifif", &cfdata_uvideo, &uvideo_cd },
 	/* video_attach_mi config_founds the middle layer per stream */
 	{ "videobus", &cfdata_video, &video_cd },
 #endif
-#if UAC_BUILD
+#if CONFIG_UAC
 	/* uaudio matches on the audio-control interface class: same iattr,
 	 * the earlier video entry answers NONE for it and the walk falls
 	 * through to this one */
@@ -431,7 +446,7 @@ static struct cfentry cfentries[] = {
 	/* audio_attach_mi config_founds the middle layer over audiobus */
 	{ "audiobus", &cfdata_audio, &audio_cd },
 #endif
-#if WLAN_NIC_PCIE
+#if CONFIG_NIC_IWM
 	{ "pci", &cfdata_iwm, &iwm_cd },
 #endif
 };
@@ -473,7 +488,7 @@ dev_alloc(struct cfdriver *cd, cfdata_t cf)
 static struct cfattach *
 cfattach_lookup(const char *atname)
 {
-#if WLAN_NIC_USB
+#if CONFIG_BUS_USB
 	if (strcmp(atname, "usb") == 0) {
 		return __DECONST(struct cfattach *, &usb_ca);
 	}
@@ -483,11 +498,13 @@ cfattach_lookup(const char *atname)
 	if (strcmp(atname, "uhub") == 0) {
 		return __DECONST(struct cfattach *, &uhub_ca);
 	}
+#endif
+#if CONFIG_NIC_URTWN
 	if (strcmp(atname, "urtwn") == 0) {
 		return __DECONST(struct cfattach *, &urtwn_ca);
 	}
 #endif
-#if WLAN_NIC_PCIE
+#if CONFIG_NIC_IWM
 	if (strcmp(atname, "iwm") == 0) {
 		/* CFATTACH_DECL_NEW(iwm, ...) inside iwm_reg.c's compiled
 		 * import of if_iwm.c */
@@ -496,7 +513,7 @@ cfattach_lookup(const char *atname)
 		return __DECONST(struct cfattach *, &iwm_ca);
 	}
 #endif
-#if UVC_BUILD
+#if CONFIG_UVC
 	if (strcmp(atname, "uvideo") == 0) {
 		/* CFATTACH_DECL2_NEW(uvideo, ...) inside the verbatim
 		 * uvideo.c (compiled straight from the submodule tree) */
@@ -512,7 +529,7 @@ cfattach_lookup(const char *atname)
 		return __DECONST(struct cfattach *, &video_ca);
 	}
 #endif
-#if UAC_BUILD
+#if CONFIG_UAC
 	if (strcmp(atname, "uaudio") == 0) {
 		/* CFATTACH_DECL2_NEW(uaudio, ...) inside the verbatim
 		 * uaudio.c (compiled straight from the submodule tree) */
@@ -575,9 +592,9 @@ config_attach_internal(device_t parent, cfdata_t cf, void *aux,
 	 * healthy in the log while `wlan scan` answered "no adapter": the
 	 * device attached, nothing told the port core.
 	 *
-	 * The hook lives with the USB line's adapter TU; the PCIe line's glue
+	 * The hook lives with the urtwn line's adapter TU; the PCIe line's glue
 	 * calls its own registration directly (pcie_glue.c). */
-#if WLAN_NIC_USB
+#if CONFIG_NIC_URTWN
 	wlan_port_post_attach(dev);
 #endif
 	return dev;

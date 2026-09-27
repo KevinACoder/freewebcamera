@@ -23,7 +23,11 @@
 
 #include "wlan_adapter.h"
 
-#if WLAN_NIC_USB
+/* The build configuration (generated): the USB/xHCI dumps are bus-level,
+ * the urtwn/rtw8189f register access is per-driver. */
+#include "config.h"
+
+#if CONFIG_BUS_USB
 extern void usb_platform_dump(void);
 extern void usb_platform_qh_dump(void);
 extern void usb_platform_reg_dump(void);
@@ -31,8 +35,10 @@ extern void usb_platform_hist_dump(unsigned int max);
 extern void usb_platform_delay_test(void);
 extern void usb_xhci_dump(void);
 extern void usb_xhci_reg_dump(void);
+#endif
 
-/* register-level debug access (urtwn adapter) */
+#if CONFIG_NIC_URTWN
+/* register-level debug access (urtwn adapter TU) */
 extern int wlan_urtwn_reg_read(unsigned addr, unsigned *val);
 extern int wlan_urtwn_reg_write(unsigned addr, unsigned val);
 extern void wlan_urtwn_txq_dump(void);
@@ -130,7 +136,7 @@ static int cmd_wlan(int argc, char **argv)
 		csh_printf(csh, "heap free=%lu B\r\n",
 		    (unsigned long) xPortGetFreeHeapSize());
 		wlan_port_status_dump();
-#if WLAN_NIC_USB
+#if CONFIG_BUS_USB
 		usb_platform_dump();
 #endif
 		return 0;
@@ -157,7 +163,7 @@ static int cmd_wlan(int argc, char **argv)
 		return 0;
 	}
 
-#if WLAN_NIC_USB
+#if CONFIG_BUS_USB
 	if (argc >= 2 && strcmp(argv[1], "dump") == 0) {
 		usb_platform_dump();
 		usb_platform_qh_dump();
@@ -200,7 +206,9 @@ static int cmd_wlan(int argc, char **argv)
 		return 0;
 	}
 
-	/* the urtwn driver's register windows */
+	/* the urtwn driver's register windows (the urtwn line's adapter TU
+	 * provides the accessors, so this needs the line, not just the bus) */
+#if CONFIG_NIC_URTWN
 	if (argc >= 2 && strcmp(argv[1], "reg") == 0) {
 		unsigned long addr;
 		unsigned val;
@@ -233,9 +241,10 @@ static int cmd_wlan(int argc, char **argv)
 			   "wlan reg write <hexaddr> <hexval> | wlan reg txq\r\n");
 		return 0;
 	}
-#endif /* WLAN_NIC_USB */
+#endif /* CONFIG_NIC_URTWN */
+#endif /* CONFIG_BUS_USB */
 
-#if WLAN_NIC_SDIO
+#if CONFIG_NIC_RTW8189F
 	/* the rtw8189f driver's register windows + SDIO-local state */
 	if (argc >= 2 && strcmp(argv[1], "reg") == 0) {
 		unsigned long addr;
@@ -292,7 +301,7 @@ static int cmd_wlan(int argc, char **argv)
 		    rtw8189f_data_rate_get());
 		return 0;
 	}
-#endif /* WLAN_NIC_SDIO */
+#endif /* CONFIG_NIC_RTW8189F */
 
 	if (argc >= 2 && strcmp(argv[1], "calib") == 0) {
 		if (argc > 2) {
@@ -317,7 +326,7 @@ static int cmd_wlan(int argc, char **argv)
 
 	/* scan state machine + channel bitmap + host cmd ring: the
 	 * parked-first-scan state in one screen */
-#if WLAN_NIC_USB
+#if CONFIG_NIC_URTWN
 	if (argc >= 2 && strcmp(argv[1], "chanmap") == 0) {
 		wlan_urtwn_chanmap_dump();
 		return 0;
@@ -332,9 +341,12 @@ static int cmd_wlan(int argc, char **argv)
 		return 0;
 	}
 
-	/* runtime usb history level (wlan_start pins it to 10; the full
-	 * ring flood drowns the interesting records) */
-#if WLAN_NIC_USB
+	/* runtime usb history level (wlan_start pins it to the configured
+	 * default; the full ring flood drowns the interesting records).
+	 * usbdebug lives in usb.c, which only compiles when the history
+	 * machinery is on (CONFIG_USB_DEBUG_DEFAULT != 0). */
+#if CONFIG_BUS_USB
+#if CONFIG_USB_DEBUG_DEFAULT
 	if (argc >= 2 && strcmp(argv[1], "usbdebug") == 0) {
 		extern int usbdebug;
 
@@ -345,11 +357,29 @@ static int cmd_wlan(int argc, char **argv)
 		return 0;
 	}
 #endif
+#endif
 
-#if WLAN_NIC_USB
+#if CONFIG_BUS_USB
+#if CONFIG_USB_DEBUG_DEFAULT
+#define USBBUG_TAIL " | usbdebug <n>"
+#else
+#define USBBUG_TAIL ""
+#endif
+#else
+#define USBBUG_TAIL ""
+#endif
+/* The reg/chanmap verbs need the urtwn line's register accessors even though
+ * they are reached through the USB bus's command block. */
+#if CONFIG_NIC_URTWN
+#define URTWN_TAIL " | reg read|write|txq | chanmap"
+#else
+#define URTWN_TAIL ""
+#endif
+
+#if CONFIG_BUS_USB
 #define WLAN_CMD_TAIL \
-	" | dump | hist [n] | delaytest | reg read|write|txq | calib [0|1]" \
-	" | callouts | chanmap | cv | usbdebug <n>"
+	" | dump | hist [n] | delaytest | calib [0|1]" \
+	" | callouts | cv" URTWN_TAIL USBBUG_TAIL
 #else
 #define WLAN_CMD_TAIL ""
 #endif

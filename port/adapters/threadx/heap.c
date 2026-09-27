@@ -32,6 +32,12 @@
 
 #include "tlsf.h"
 
+/* The arena's base and size are the build configuration's keys
+ * (CONFIG_HEAP_BASE / CONFIG_HEAP_BYTES): it is the first thing to run out
+ * when a line lands and the first thing to break a boot when it is placed
+ * over a fixed region, so it is a knob rather than a constant. */
+#include "config.h"
+
 extern void board_early_print(const char *s);
 
 /* The port assembly's protection primitives (tx_thread_smp_protect.S /
@@ -40,7 +46,7 @@ extern void board_early_print(const char *s);
 extern unsigned int _tx_thread_smp_protect(void);
 extern void _tx_thread_smp_unprotect(unsigned int save);
 
-/* 100 MB, one shot: the working lines no longer fit in 4 MB and the
+/* 100 MB by default, one shot: the working lines no longer fit in 4 MB and the
  * failures are silent-until-fatal (iwm's RX ring ~1.1 MB, then the
  * supplicant's association took the last ~100 KB and the UVC dump path
  * had nothing left: "heap: alloc FAIL len=712 maxfree=152").
@@ -54,23 +60,34 @@ extern void _tx_thread_smp_unprotect(unsigned int save);
  * MMU maps [0x0a000000, 0xc0000000) Normal cacheable (mmu.c: L1[0]'s
  * 2 MiB blocks plus two 1 GiB Normal blocks), so the whole arena is
  * ordinary cacheable RAM.  heap_ram_probe() proves it at boot. */
-#define HEAP_BASE	0x20000000ULL
-#define HEAP_BYTES	(100u * 1024u * 1024u)
+#define HEAP_BASE	((uint64_t) CONFIG_HEAP_BASE)
+#define HEAP_BYTES	((size_t) CONFIG_HEAP_BYTES)
 
 static uint8_t *const heap_region = (uint8_t *) (uintptr_t) HEAP_BASE;
 static tlsf_t heap_tlsf;
 
 /* One-shot RAM probe, run on the first allocation (i.e. during boot):
  * write/read a pattern across the arena so a mapping or DDR hole shows up
- * as a line in the boot log, not as a mysterious later fault. */
+ * as a line in the boot log, not as a mysterious later fault.
+ *
+ * The offsets are derived from the configured size rather than fixed at
+ * 0/32/64/96 MB: the arena is a key now, and a small one (the trim-proof
+ * build) would otherwise be probed past its end. */
 static void
 heap_ram_probe(void)
 {
-	static const size_t offs[] = { 0u, 32u << 20, 64u << 20, 96u << 20 };
+	size_t offs[5];
 	char msg[160];
+	size_t n = 0;
 	unsigned i;
 
-	for (i = 0; i < sizeof(offs) / sizeof(offs[0]); i++) {
+	offs[n++] = 0u;
+	offs[n++] = HEAP_BYTES / 4u;
+	offs[n++] = HEAP_BYTES / 2u;
+	offs[n++] = (HEAP_BYTES * 3u) / 4u;
+	offs[n++] = HEAP_BYTES - sizeof(uint32_t);
+
+	for (i = 0; i < n; i++) {
 		volatile uint32_t *p =
 		    (volatile uint32_t *) (void *) (heap_region + offs[i]);
 		uint32_t v = 0xa5a50000u | i;
@@ -78,16 +95,16 @@ heap_ram_probe(void)
 		*p = v;
 		if (*p != v) {
 			(void)snprintf(msg, sizeof(msg),
-			    "heap: RAM probe FAIL at +%uMB (%p): wrote %08x "
-			    "read %08x\n", (unsigned) (offs[i] >> 20),
+			    "heap: RAM probe FAIL at +%uKB (%p): wrote %08x "
+			    "read %08x\n", (unsigned) (offs[i] >> 10),
 			    (void *) p, v, (unsigned) *p);
 			board_early_print(msg);
 			return;
 		}
 	}
 	(void)snprintf(msg, sizeof(msg),
-	    "heap: RAM probe OK, arena %uMB at %p..%p\n",
-	    (unsigned) (HEAP_BYTES >> 20), (void *) heap_region,
+	    "heap: RAM probe OK, arena %uKB at %p..%p\n",
+	    (unsigned) (HEAP_BYTES >> 10), (void *) heap_region,
 	    (void *) (heap_region + HEAP_BYTES));
 	board_early_print(msg);
 }

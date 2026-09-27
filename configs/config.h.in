@@ -1,0 +1,80 @@
+/*
+ * @file   config.h.in
+ * @brief  Template for the generated build-configuration header.
+ *
+ * The top-level Makefile substitutes every @KEY@ below with the resolved
+ * value from configs/<CONFIG>.conf and writes <build>/config.h.  The
+ * generated header is what C code includes; nothing in the source tree is
+ * edited to change a configuration.
+ *
+ * Adding a key: put the default + documentation in configs/base.conf, add
+ * the @KEY@ line here, and add the name to CONFIG_KEYS in the Makefile.
+ * `make check-config` fails if the three lists drift apart.
+ *
+ * Keys are uppercase with a CONFIG_ prefix; bool keys expand to 1 or 0 so
+ * they can be used directly in #if.
+ */
+
+#ifndef FREEWEBCAMERA_CONFIG_H
+#define FREEWEBCAMERA_CONFIG_H
+
+/* --- build / platform ------------------------------------------------------ */
+
+#define CONFIG_NAME			"@CONFIG_NAME@"
+#define CONFIG_BOARD			"@CONFIG_BOARD@"
+#define CONFIG_SMP_CORES		@CONFIG_SMP_CORES@
+
+/* --- feature blocks -------------------------------------------------------- */
+
+#define CONFIG_SHELL			@CONFIG_SHELL@
+#define CONFIG_NET			@CONFIG_NET@
+#define CONFIG_UVC			@CONFIG_UVC@
+#define CONFIG_UAC			@CONFIG_UAC@
+
+/* --- buses ----------------------------------------------------------------- */
+
+#define CONFIG_BUS_USB			@CONFIG_BUS_USB@
+#define CONFIG_BUS_PCIE			@CONFIG_BUS_PCIE@
+#define CONFIG_BUS_SDIO			@CONFIG_BUS_SDIO@
+
+/* --- wireless lines -------------------------------------------------------- */
+
+#define CONFIG_NIC_IWM			@CONFIG_NIC_IWM@
+#define CONFIG_NIC_URTWN		@CONFIG_NIC_URTWN@
+#define CONFIG_NIC_RTW8189F		@CONFIG_NIC_RTW8189F@
+
+/* --- diagnostics ----------------------------------------------------------- */
+
+#define CONFIG_BSD_DIAGNOSTIC		@CONFIG_BSD_DIAGNOSTIC@
+#define CONFIG_IWM_DEBUG		@CONFIG_IWM_DEBUG@
+#define CONFIG_USB_DEBUG_DEFAULT	@CONFIG_USB_DEBUG_DEFAULT@
+#define CONFIG_EHCI_DEBUG_DEFAULT	@CONFIG_EHCI_DEBUG_DEFAULT@
+#define CONFIG_XHCI_DEBUG_DEFAULT	@CONFIG_XHCI_DEBUG_DEFAULT@
+#define CONFIG_USBHIST_SIZE		@CONFIG_USBHIST_SIZE@
+#define CONFIG_UVC_DEBUG		@CONFIG_UVC_DEBUG@
+
+/* --- memory ---------------------------------------------------------------- */
+
+#define CONFIG_HEAP_BASE		@CONFIG_HEAP_BASE@
+#define CONFIG_HEAP_BYTES		@CONFIG_HEAP_BYTES@
+
+/* --- thread stacks --------------------------------------------------------- */
+
+#define CONFIG_TX_TIMER_STACK		@CONFIG_TX_TIMER_STACK@
+#define CONFIG_LWIP_THREAD_STACK	@CONFIG_LWIP_THREAD_STACK@
+#define CONFIG_WLAN_WORKER_STACK	@CONFIG_WLAN_WORKER_STACK@
+#define CONFIG_WPA_THREAD_STACK		@CONFIG_WPA_THREAD_STACK@
+#define CONFIG_SHELL_STACK		@CONFIG_SHELL_STACK@
+#define CONFIG_APP_START_STACK		@CONFIG_APP_START_STACK@
+
+/* --- lwIP tuning ----------------------------------------------------------- */
+
+#define CONFIG_LWIP_MEM_SIZE		@CONFIG_LWIP_MEM_SIZE@
+#define CONFIG_LWIP_PBUF_POOL_SIZE	@CONFIG_LWIP_PBUF_POOL_SIZE@
+#define CONFIG_LWIP_PBUF_BUFSIZE	@CONFIG_LWIP_PBUF_BUFSIZE@
+
+/* --- camera ---------------------------------------------------------------- */
+
+#define CONFIG_AV_DUMP_RING_BYTES	@CONFIG_AV_DUMP_RING_BYTES@
+
+#endif /* FREEWEBCAMERA_CONFIG_H */

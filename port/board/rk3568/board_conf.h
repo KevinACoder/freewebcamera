@@ -21,16 +21,20 @@
 
 /* HOW MANY CORES THIS IMAGE RUNS ON, and where the number comes from.
  *
- * Single source of truth: the SMP_CORES make flag (Makefile passes
- * -DSMP_CORES=$(SMP_CORES); default 4). Every consumer derives from it -
- * the kernel's configNUMBER_OF_CORES, the port's portNUM_CORES, the app's
- * task fan-out and this file's tick selection - so a `make SMP_CORES=1`
- * comparator image really is single-core everywhere. An earlier layout
- * pinned BOARD_SMP_CORES to a literal 4 here and never forwarded the make
- * flag to the compiler, so the "single-core comparator" silently built
- * four-core. */
+ * Single source of truth: the CONFIG_SMP_CORES build key (configs/), which
+ * the Makefile forwards as -DSMP_CORES so this header, the kernel port and
+ * the startup assembly all derive from one number.  The key is validated to
+ * be 1 on this trunk: the secondaries park in the UP image and the SMP line
+ * is a separate branch (feat/threadx-smp).  The fallback below is only a
+ * guard for a direct -DSMP_CORES build that bypasses the config system.
+ * Every consumer derives from it - the kernel's configNUMBER_OF_CORES, the
+ * port's portNUM_CORES, the app's task fan-out and this file's tick
+ * selection - so a single-core image really is single-core everywhere. An
+ * earlier layout pinned BOARD_SMP_CORES to a literal 4 here and never
+ * forwarded the make flag to the compiler, so the "single-core comparator"
+ * silently built four-core. */
 #ifndef SMP_CORES
-#define SMP_CORES		4
+#define SMP_CORES		1
 #endif
 /* No cast here: this macro is evaluated in #if directives (the tick
  * selection below), and the preprocessor rejects C casts. */

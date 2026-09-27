@@ -31,7 +31,11 @@
 
 #include "av_dump.h"
 
-#define AV_DUMP_RING_SIZE	(512u * 1024u)
+/* The build configuration (generated): the per-channel ring size is a key
+ * (CONFIG_AV_DUMP_RING_BYTES); the rest are protocol constants. */
+#include "config.h"
+
+#define AV_DUMP_RING_SIZE	((unsigned) CONFIG_AV_DUMP_RING_BYTES)
 #define AV_DUMP_STAGE		8192u
 #define AV_DUMP_POLL_MS		5u
 #define AV_DUMP_STUCK_MS	5000u

@@ -40,6 +40,12 @@
 #ifndef FREEWEBCAMERA_LWIPOPTS_H
 #define FREEWEBCAMERA_LWIPOPTS_H
 
+/* The build configuration (generated): MEM_SIZE, the pbuf pool sizing and the
+ * tcpip thread stack are keys (CONFIG_LWIP_*).  lwipopts.h is reached from
+ * lwip/opt.h in every TU of this world, so it is the seam for lwIP's own
+ * tunables. */
+#include "config.h"
+
 /* --- OS integration ------------------------------------------------------- */
 
 #define NO_SYS                          0
@@ -63,17 +69,17 @@
 /* The bridge stages a received frame into a PBUF_RAM from this heap while
  * still in the usbdi worker; 64K made RX bursts fail the allocation under
  * concurrent traffic. */
-#define MEM_SIZE                        (128 * 1024)
+#define MEM_SIZE                        (CONFIG_LWIP_MEM_SIZE)
 /* 8, not lwIP's 4-byte default: aarch64 pointers are 8 bytes and mem_malloc
  * must hand back 8-aligned blocks or every pbuf's pointer fields are asked to
  * be read unaligned. */
 #define MEM_ALIGNMENT                   8
 #define MEMP_OVERFLOW_CHECK             0
 #define MEMP_SANITY_CHECK               0
-#define PBUF_POOL_SIZE                  40
+#define PBUF_POOL_SIZE                  CONFIG_LWIP_PBUF_POOL_SIZE
 /* Large enough for a 1518-byte frame plus link header, with headroom: a
  * jumbo-ish single-pbuf receive must never need a chain. */
-#define PBUF_POOL_BUFSIZE               1600
+#define PBUF_POOL_BUFSIZE               CONFIG_LWIP_PBUF_BUFSIZE
 #define LWIP_NETIF_TX_SINGLE_PBUF       1
 
 /* --- protocols ------------------------------------------------------------ */
@@ -147,7 +153,7 @@
 /* 4096 overflowed under sustained iperf load (socket layer + netif chains
  * on top of the whole lwIP stack); same class of crash the net80211
  * callout thread hit with the timer thread's 4 KB default. */
-#define TCPIP_THREAD_STACKSIZE          8192
+#define TCPIP_THREAD_STACKSIZE          CONFIG_LWIP_THREAD_STACK
 /* Band 4 (osPriorityAboveNormal): above its feeders, below the shell. */
 #define TCPIP_THREAD_PRIO               4
 #define TCPIP_MBOX_SIZE                 64
