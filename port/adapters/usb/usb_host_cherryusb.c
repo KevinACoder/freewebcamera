@@ -195,6 +195,31 @@ usbh_cherryusb_GetDeviceInfo(uint32_t index, USB_HOST_DEVICE *info)
  * control transfers
  */
 
+/* DMA staging.  The interface's CONTRACT says the caller's buffer is ordinary
+ * memory (cacheable, possibly stack) and the backend owns the DMA-visible
+ * staging; CherryUSB's EHCI path requires the opposite - it asserts that both
+ * the setup packet and the transfer buffer are 64-byte aligned and DMAs
+ * straight out of them (usb_hc_ehci.c:1245 under CONFIG_USB_DCACHE_ENABLE).
+ * A caller buffer straight from the shell's argv or a stack frame trips the
+ * assert (found on the board: `usbreq desc 3 18` under feat/cherryusb_ehci).
+ * So this backend keeps one aligned staging block, sized like
+ * CONFIG_USBHOST_REQUEST_BUFFER_LEN, and copies in/out around the transfer -
+ * the same service usbdi.c performs for the NetBSD backend, done here because
+ * this stack leaves it to the caller.
+ *
+ * One block, no lock: the interface is task-context-only and the callers in
+ * tree (the `usbreq` command, a driver's probe path) are serialized by their
+ * own context. */
+#define USBH_BOUNCE_LEN	CONFIG_USBHOST_REQUEST_BUFFER_LEN
+
+/* Two separate objects, each aligned on its own: the setup packet is 8 bytes,
+ * so a payload placed after it inside one struct would start at offset 8 and
+ * still fail the 64-byte check (the first board round did exactly that). */
+static struct usb_setup_packet usbh_ctrl_setup
+	__attribute__((aligned(CONFIG_USB_ALIGN_SIZE)));
+static uint8_t usbh_ctrl_data[USBH_BOUNCE_LEN]
+	__attribute__((aligned(CONFIG_USB_ALIGN_SIZE)));
+
 static int32_t usbh_status_map(int ret)
 {
 	switch (ret) {
@@ -221,7 +246,9 @@ usbh_cherryusb_ControlTransfer(uint32_t index, const USB_HOST_REQUEST *req,
     void *data, uint32_t *actlen, uint32_t timeout_ms)
 {
 	struct usbh_hubport *hport;
-	struct usb_setup_packet setup;
+	struct usb_setup_packet *setup = &usbh_ctrl_setup;
+	uint8_t *stage = NULL;
+	int in;
 	int ret;
 
 	if (req == NULL || (req->wLength != 0 && data == NULL)) {
@@ -229,6 +256,9 @@ usbh_cherryusb_ControlTransfer(uint32_t index, const USB_HOST_REQUEST *req,
 	}
 	if (actlen != NULL) {
 		*actlen = 0;
+	}
+	if (req->wLength > USBH_BOUNCE_LEN) {
+		return USB_HOST_ERROR_PARAMETER;
 	}
 	/* CherryUSB's control path has its own (compile-time) timeout; the
 	 * only value this backend can honestly honour is "the default". */
@@ -241,16 +271,25 @@ usbh_cherryusb_ControlTransfer(uint32_t index, const USB_HOST_REQUEST *req,
 	}
 
 	/* the interface's field set IS the setup packet, field for field */
-	setup.bmRequestType = req->bmRequestType;
-	setup.bRequest = req->bRequest;
-	setup.wValue = req->wValue;
-	setup.wIndex = req->wIndex;
-	setup.wLength = req->wLength;
+	setup->bmRequestType = req->bmRequestType;
+	setup->bRequest = req->bRequest;
+	setup->wValue = req->wValue;
+	setup->wIndex = req->wIndex;
+	setup->wLength = req->wLength;
 
-	ret = usbh_control_transfer(hport, &setup, (uint8_t *)data);
+	in = (req->bmRequestType & 0x80U) != 0U;
+	stage = (req->wLength != 0) ? usbh_ctrl_data : NULL;
+	if (stage != NULL && !in) {
+		memcpy(stage, data, req->wLength);
+	}
+
+	ret = usbh_control_transfer(hport, setup, stage);
 
 	if (ret < 0) {
 		return usbh_status_map(ret);
+	}
+	if (stage != NULL && in && ret > 0) {
+		memcpy(data, stage, (uint32_t)ret);
 	}
 	if (actlen != NULL) {
 		*actlen = (uint32_t)ret;
