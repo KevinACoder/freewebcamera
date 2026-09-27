@@ -1,9 +1,9 @@
 diff --git a/port/xhci/usb_hc_xhci.c b/port/xhci/usb_hc_xhci.c
 new file mode 100644
-index 00000000..27a7c53d
+index 00000000..e54e3b7f
 --- /dev/null
 +++ b/port/xhci/usb_hc_xhci.c
-@@ -0,0 +1,2140 @@
+@@ -0,0 +1,2163 @@
 +/*
 + * @file   usb_hc_xhci.c
 + * @brief  DWC3 xHCI host controller driver for the RK3568 USB3 socket
@@ -559,11 +559,15 @@ index 00000000..27a7c53d
 +
 +	xhci_setup_ep0_input_ctx(dev, mps);
 +	if (bsr == 0U) {
-+		/* BSR=0 semantics (spec 6.3.2.2, NetBSD's xhci_set_address
-+		 * shape): dw3[7:0] carries the address to program, and 0
-+		 * makes this DWC3 auto-assign - the shape the old line
-+		 * measured working on 0xFD000000; the assigned address is
-+		 * read back from the output context below. */
++		/* BSR=0, dw3=0: this DWC3 refuses explicit wire
++		 * SET_ADDRESS values (Transaction Error whenever the value
++		 * differs from its own choice - hub explicit 2 refused,
++		 * dongle explicit 3 refused, 2026-09-28; the old line saw
++		 * the same on 0xFD000000 and retreated to auto-assign).
++		 * The controller numbers devices by its own sequence, so
++		 * the assigned address is ADOPTED into the stack's view
++		 * below - CherryUSB's devgen number is never wire-visible
++		 * for the device's own filtering. */
 +		xhci_in_ctx(dev, 0U)[3] = 0U;
 +		xhci_dcache_clean(dev->input_ctx,
 +				  dev->ctxsz * (2U + XHCI_MAX_DCI));
@@ -576,8 +580,11 @@ index 00000000..27a7c53d
 +
 +	ret = xhci_do_command(hcd, &trb, CMD_TIMEOUT_MS);
 +	if (bsr == 0U) {
-+		/* verify the output context: the controller should have
-+		 * moved the slot to ADDRESSED and reported the address */
++		/* verify the output context and adopt the assigned address:
++		 * the controller must have moved the slot to ADDRESSED and
++		 * programmed its own sequential number - the stack's view
++		 * (usb_addr/hport->dev_addr) follows, or every later token
++		 * would be for a device that does not exist on the wire */
 +		uint32_t dw3, st, hw_addr;
 +
 +		xhci_dcache_invalidate(dev->dev_ctx,
@@ -586,6 +593,15 @@ index 00000000..27a7c53d
 +		st = (dw3 >> 27) & 0x1FU;
 +		hw_addr = dw3 & 0xFFU;
 +		if ((st == SLOT_CTX_STATE_ADDRESSED) && (hw_addr != 0U)) {
++			if (hw_addr != dev->usb_addr) {
++				usbh_console_printf(
++					"xhci: slot %u auto-assigned %u "
++					"(stack wanted %u)\n",
++					dev->slot_id, hw_addr,
++					dev->usb_addr);
++				dev->usb_addr = (uint8_t)hw_addr;
++				dev->hport->dev_addr = dev->usb_addr;
++			}
 +			ret = 0;
 +		} else if (ret == 0) {
 +			ret = -USB_ERR_IO;
@@ -1350,9 +1366,14 @@ index 00000000..27a7c53d
 +		}
 +
 +		/* SET_ADDRESS never becomes TRBs: the xHCI does it with
-+		 * Address Device (BSR=0, explicit address in input slot
-+		 * dw3 - see xhci_cmd_address_device). */
-+		if (setup->bRequest == USB_REQUEST_SET_ADDRESS) {
++		 * Address Device (BSR=0).  The type check is load-bearing:
++		 * urtwn's vendor efuse read is (c0, 05, offset) - the same
++		 * bRequest as SET_ADDRESS - and without it every efuse read
++		 * was hijacked into an Address Device on an already-addressed
++		 * slot (Context State Error storm, MAC ff:ff:ff:ff:ff:ff,
++		 * 2026-09-28). */
++		if ((setup->bmRequestType == 0x00U) &&
++		    (setup->bRequest == USB_REQUEST_SET_ADDRESS)) {
 +			mps = (uint16_t)(hport->ep0.wMaxPacketSize & 0x7FFU);
 +			if (mps == 0U) {
 +				mps = 64U;
@@ -1368,7 +1389,9 @@ index 00000000..27a7c53d
 +			if (ret != 0) {
 +				return ret;
 +			}
-+			hport->dev_addr = (uint8_t)(setup->wValue & 0xFFU);
++			/* usb_addr may have been adopted from the controller
++			 * (explicit-address fallback) */
++			hport->dev_addr = dev->usb_addr;
 +			urb->actual_length = 8U; /* CherryUSB counts the setup
 +						  * stage in */
 +			return 0;
