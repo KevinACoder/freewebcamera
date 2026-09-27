@@ -8,6 +8,9 @@
  *   usbh list [-t]     same, -t adds the hub/port hierarchy
  *   usbh start         bring the buses up - idempotent, also runs from
  *                      `wlan start`'s platform hook
+ *   usbh xdump [busid] the xHCI derived state + event-ring head (the
+ *                      wlan xhci equivalent, feat/cherryusb_xhci)
+ *   usbh xreg [busid]  raw capability/operational/runtime register rows
  *
  * Devices with no matching class driver (the panel's RTL8188EUS until the
  * urtwn class hook lands, the AIC8800D80, a UVC camera without the video
@@ -21,12 +24,25 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "config.h"
+
 #include "cherrysh_adapter.h"
 #include "csh.h"
 
 #include "usbh_core.h"
 #include "usbh_platform.h"
 #include "usb_board.h"
+#if CONFIG_USBHOST_XHCI
+#include "usb_hc_xhci.h"
+#endif
+
+/* buses this image starts (the ehci roots, plus the xHCI root on the
+ * cherryusb_xhci line) */
+#if CONFIG_USBHOST_XHCI
+#define USBH_CMD_MAX_BUS	(USBH_EHCI_NUM + USBH_XHCI_NUM)
+#else
+#define USBH_CMD_MAX_BUS	USBH_EHCI_NUM
+#endif
 
 static const char *usbh_speed_str(uint8_t speed)
 {
@@ -79,7 +95,7 @@ static void usbh_list_print(chry_shell_t *csh, bool tree)
 {
 	uint8_t busid;
 
-	for (busid = 0U; busid < USBH_EHCI_NUM; busid++) {
+	for (busid = 0U; busid < USBH_CMD_MAX_BUS; busid++) {
 		struct usbh_bus *bus = &g_usbhost_bus[busid];
 		struct usbh_hub *roothub = &bus->hcd.roothub;
 		const char *drv = (bus->hc_driver != NULL) ?
@@ -95,6 +111,35 @@ static void usbh_list_print(chry_shell_t *csh, bool tree)
 		usbh_tree_print(csh, roothub, tree ? 1U : 0U);
 	}
 }
+
+#if CONFIG_USBHOST_XHCI
+/* `usbh xdump|xreg [busid]`: the xHCI state dumps (default bus: the xHCI
+ * root the wlan dongle sits behind - 0xFCC00000, U-Boot usb reset measured
+ * 2026-09-27). */
+static int usbh_xhci_diag(chry_shell_t *csh, int argc, char **argv, bool raw)
+{
+	uint8_t busid = USBH_XHCI1_BUSID;
+
+	if (argc >= 3) {
+		uint32_t parsed = 0U;
+		const char *s = argv[2];
+
+		while ((*s >= '0') && (*s <= '9')) {
+			parsed = (parsed * 10U) + (uint32_t)(*s++ - '0');
+		}
+		if (!USBH_BUS_IS_XHCI(parsed) ||
+		    (USBH_XHCI_INST(parsed) >= USBH_XHCI_NUM)) {
+			csh_printf(csh, "usbh: bus%u is not an xhci bus\n",
+				   parsed);
+			return 1;
+		}
+		busid = (uint8_t)parsed;
+	}
+
+	usbh_xhci_dump(&g_usbhost_bus[busid], raw);
+	return 0;
+}
+#endif
 
 static int cmd_usbh(int argc, char **argv)
 {
@@ -114,14 +159,23 @@ static int cmd_usbh(int argc, char **argv)
 		return 0;
 	}
 
+#if CONFIG_USBHOST_XHCI
+	if (argc >= 2 && strcmp(argv[1], "xdump") == 0) {
+		return usbh_xhci_diag(csh, argc, argv, false);
+	}
+	if (argc >= 2 && strcmp(argv[1], "xreg") == 0) {
+		return usbh_xhci_diag(csh, argc, argv, true);
+	}
+#endif
+
 	if (argc == 1) {
 		usbh_list_print(csh, false);
 		return 0;
 	}
 
-	csh_printf(csh, "usage: usbh [list [-t]|start]\n");
+	csh_printf(csh, "usage: usbh [list [-t]|start|xdump [busid]|xreg [busid]]\n");
 	return 1;
 }
 
-CSH_CMD_EXPORT_ALIAS_FULL(cmd_usbh, usbh, "usbh [list [-t]|start]",
-			  "show the usb host device tree or start the buses");
+CSH_CMD_EXPORT_ALIAS_FULL(cmd_usbh, usbh, "usbh [list [-t]|start|xdump|xreg]",
+			  "show the usb host device tree, dump xhci state, or start the buses");

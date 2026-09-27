@@ -1,30 +1,33 @@
 /*
  * @file   usbh_platform.c
- * @brief  CherryUSB backend platform bring-up: the two panel EHCI roots.
+ * @brief  CherryUSB backend platform bring-up: the two panel EHCI roots
+ *         plus, on the feat/cherryusb_xhci line, the USB3 socket group's
+ *         xHCI root (0xFCC00000).
  *
- * The register side is not here: the PD_PIPE / PHY reference clock / VBUS /
- * usb2phy1 sequence lives in port/adapters/usb/usb_domain.c, shared with
- * the NetBSD HCD backend, and the CRU/SRST ordering discipline is the same
- * one usb_platform_init() follows on that side - every domain runs to
- * completion before any controller is initialized, because the con14 pulse
- * resets BOTH EHCI roots.
+ * The register side is not here: the PD_PIPE / PHY reference clock / VBUS
+ * sequences live in port/adapters/usb/usb_domain.c, shared with the NetBSD
+ * HCD backend, and the CRU/SRST ordering discipline is the same one
+ * usb_platform_init() follows on that side - every domain runs to
+ * completion before any controller is initialized, because the con9/con14
+ * SRST pulses reset whole controllers (the USB3 socket group AND both
+ * EHCI roots).
  *
  * What this file owns is the CherryUSB half:
  *  - the OSAL byte pool + reaper (they must exist before the first
  *    usb_osal_* allocation, i.e. before the first hub thread is created);
- *  - one bus registration per EHCI root through upstream's multi-HC
+ *  - one bus registration per root through upstream's multi-HC
  *    dispatcher (usbh_register_hc_driver) - registered BEFORE
  *    usbh_initialize(), because the hub thread that usbh_initialize()
  *    creates runs usb_hc_init() through that dispatcher the moment it is
  *    scheduled;
  *  - the wait for usb_hc_init() to actually finish (it runs on the hub
  *    thread, not on the caller);
- *  - KI-006: the panel hubs sit plugged in before the image boots, so
- *    after HCRESET the root ports read CCS=1 without ever raising a
- *    connect-change edge and the hub thread would sleep forever waiting
- *    for one. Ports with a device get a power-off/power-on kick to
+ *  - KI-006: the panel hubs / the USB3 dongle sit plugged in before the
+ *    image boots, so after reset the ports read CCS=1 without ever
+ *    raising a connect-change edge and the hub thread would sleep forever
+ *    waiting for one.  Ports with a device get a power-cycle kick to
  *    manufacture that edge, the roothub change bits are seeded, and the
- *    hub thread is woken.
+ *    hub thread is woken (per-backend post_init).
  *
  * @date   27.09.2026
  * @author zhugengyu
@@ -33,11 +36,15 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "config.h"
 #include "board.h"
 
 #include "usbh_core.h"
 #include "usbh_hub.h"
 #include "usb_hc_ehci.h"
+#if CONFIG_USBHOST_XHCI
+#include "usb_hc_xhci.h"
+#endif
 
 #include "usb_board.h"
 #include "usb_domain.h"
@@ -244,6 +251,44 @@ static int usbh_bus_start(uint8_t busid)
 	return 0;
 }
 
+#if CONFIG_USBHOST_XHCI
+/* The xHCI root (feat/cherryusb_xhci): same start shape, the readiness
+ * probe is the driver's running flag, and the post-init pass is the
+ * driver's (post-RUN port power + the KI-006 kick for the pre-plugged
+ * dongle). */
+static int usbh_xhci_bus_start(uint8_t busid)
+{
+	struct usbh_bus *bus = &g_usbhost_bus[busid];
+	uint32_t i;
+
+	if (!USBH_BUS_IS_XHCI(busid) ||
+	    (USBH_XHCI_INST(busid) >= USBH_XHCI_NUM)) {
+		return -1;
+	}
+
+	usbh_register_hc_driver(busid, &xhci_hc_driver);
+	if (usbh_initialize(busid, USBH_XHCI_BASE(busid), usbh_bus_event) != 0) {
+		return -1;
+	}
+
+	/* usb_hc_init runs on the hub thread this just created: wait for the
+	 * controller to come live before the port seed. */
+	for (i = 0U; i < 300U; i++) {
+		if (usbh_xhci_bus_ready(busid)) {
+			break;
+		}
+		usb_osal_msleep(10);
+	}
+	if (!usbh_xhci_bus_ready(busid)) {
+		usbh_console_printf("usbh: bus%u xhci init timeout\n", busid);
+		return -1;
+	}
+
+	usbh_xhci_post_init(bus);
+	return 0;
+}
+#endif
+
 int usbh_platform_start(void)
 {
 	uint8_t busid;
@@ -257,8 +302,12 @@ int usbh_platform_start(void)
 	usb_osal_init(NULL, 0U);
 
 	/* Every shared-domain register write happens HERE, in task context,
-	 * before any hub thread exists: the con14 pulse resets both EHCI
-	 * roots, so it must not land between their inits. */
+	 * before any hub thread exists: the con9/con14 SRST pulses reset
+	 * whole controllers (the USB3 socket group AND both EHCI roots), so
+	 * they must not land between their inits.  The order is the
+	 * NetBSD-side usb_platform_init order: USB3 socket group first,
+	 * then the usb2phy1 domain. */
+	usb_usb3_domain_init();
 	usb_usb2phy1_domain_init();
 
 	for (busid = 0U; busid < USBH_EHCI_NUM; busid++) {
@@ -267,6 +316,20 @@ int usbh_platform_start(void)
 			fails++;
 		}
 	}
+
+#if CONFIG_USBHOST_XHCI
+	/* the xHCI root the wlan dongle sits behind: 0xFCC00000 (USBH_XHCI1,
+	 * the OTG instance forced host).  U-Boot `usb reset` on 2026-09-27:
+	 * dwc3@fcc00000 = 3 devices (root + GenesysLogic hub + RTL8188EU),
+	 * dwc3@fd000000 = root only - the dongle's hub is on THIS root; the
+	 * first round's empty-port picture was the PORTSC 1-based bug, not a
+	 * wrong instance. */
+	if (usbh_xhci_bus_start(USBH_XHCI1_BUSID) != 0) {
+		usbh_console_printf("usbh: bus%u xhci start FAIL\n",
+				    (uint32_t)USBH_XHCI1_BUSID);
+		fails++;
+	}
+#endif
 
 	s_usbh_platform_ready = (fails == 0);
 	return s_usbh_platform_ready ? 0 : -1;

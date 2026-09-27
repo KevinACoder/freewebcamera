@@ -146,4 +146,27 @@ void usbh_console_printf(const char *fmt, ...);
 #define CONFIG_USBHOST_XHCI_TRANSFER_RING_SIZE	256
 #endif
 
+/* Static pool sizing (the EHCI pools' shape: everything the DMA engine can
+ * reach sits in cacheable .bss with explicit maintenance, bounds fixed at
+ * compile time).  The compile-in switch itself is the generated config.h's
+ * CONFIG_USBHOST_XHCI (a build key, Makefile-driven - not defined here, the
+ * two headers would fight over it):
+ *  - MAX_SLOTS caps the DCBAA/device-context tables (the tree behind this
+ *    board's root ports is two devices deep: the panel hub + one dongle;
+ *    HW reports more but enabling what we do not use only spends RAM);
+ *  - RINGS is the per-bus transfer-ring pool (ep0 + one ring per endpoint
+ *    of every connected device; the panel hub and the wlan dongle fit in
+ *    single digits);
+ *  - MAX_SPBUF is the scratchpad-buffer bound (this DWC3 reports 1,
+ *    measured 2026-09-20 hcs2 spbuf=1). */
+#ifndef CONFIG_USBHOST_XHCI_MAX_SLOTS
+#define CONFIG_USBHOST_XHCI_MAX_SLOTS		8
+#endif
+#ifndef CONFIG_USBHOST_XHCI_RINGS
+#define CONFIG_USBHOST_XHCI_RINGS		12
+#endif
+#ifndef CONFIG_USBHOST_XHCI_MAX_SPBUF
+#define CONFIG_USBHOST_XHCI_MAX_SPBUF		2
+#endif
+
 #endif /* FREEWEBCAMERA_USB_CONFIG_H */

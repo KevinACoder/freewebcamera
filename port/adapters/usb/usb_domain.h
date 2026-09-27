@@ -38,4 +38,20 @@ void usb_bus_domain_once(void);
  * one PHY domain; the shared bus domain runs first). Runs once per boot. */
 void usb_usb2phy1_domain_init(void);
 
+/* The USB3 socket-group domain (once per boot): CRU clkgate_con10, the
+ * con9+con14 SRST pulse that takes the ATF-held DWC3 cores to a cold state,
+ * and the usb2phy0 port GRF.  Every shared-domain pulse resets whole USB
+ * blocks (con14 bounces both EHCI roots too), so both domains must run to
+ * completion BEFORE any HCD is initialized.  feat/cherryusb_xhci moved this
+ * here from port/adapters/libbsd/usb_xhci_platform.c: the CherryUSB xHCI
+ * glue runs the same sequence the NetBSD attach does. */
+void usb_usb3_domain_init(void);
+
+/* dwc3_fdt.c's soft_reset + enable_phy + set_mode for one DWC3 core; base
+ * is the controller base whose xHCI aperture sits at +0 and whose core
+ * globals start at +0xC100 (usb_board.h).  Register-exact net_80211 line:
+ * the soft reset MUST close with the GCTL.CORESOFTRESET clear, the OTG
+ * instance needs the forced PRTCAP=host, HS-only needs GUCTL1 bit26. */
+void usb_xhci_dwc3_host_init(uintptr_t base);
+
 #endif /* USB_DOMAIN_H */

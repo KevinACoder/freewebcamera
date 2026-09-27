@@ -55,6 +55,11 @@ static const uint32_t s_ehci_irq[USBH_EHCI_NUM] = {
 	USBH_EHCI1_IRQ,
 };
 
+static const uint32_t s_xhci_irq[USBH_XHCI_NUM] = {
+	USBH_XHCI0_IRQ,
+	USBH_XHCI1_IRQ,
+};
+
 /* The completion path mutates the same shared state (async ring, pool
  * freelists, urb fields) the submit path guards with the osal critical
  * section, and the submit side may run on a thread the IRQ preempts.
@@ -62,7 +67,7 @@ static const uint32_t s_ehci_irq[USBH_EHCI_NUM] = {
  * the tear as double-granted pool slots under full-rate bulk,
  * evidence 20260923-fullrate-instability-two-signatures). Hold time is the
  * scan itself; nothing in the held region sleeps. */
-static void s_ehci_isr(uint8_t busid)
+static void s_hcd_isr(uint8_t busid)
 {
 	size_t flags = usb_osal_enter_critical_section();
 
@@ -75,12 +80,22 @@ static void s_ehci_isr(uint8_t busid)
  * trampoline closing over the busid. */
 static void usbh_ehci0_isr(void)
 {
-	s_ehci_isr(0U);
+	s_hcd_isr(0U);
 }
 
 static void usbh_ehci1_isr(void)
 {
-	s_ehci_isr(1U);
+	s_hcd_isr(1U);
+}
+
+static void usbh_xhci0_isr(void)
+{
+	s_hcd_isr(USBH_XHCI0_BUSID);
+}
+
+static void usbh_xhci1_isr(void)
+{
+	s_hcd_isr(USBH_XHCI1_BUSID);
 }
 
 static void (*const s_ehci_isr_tab[USBH_EHCI_NUM])(void) = {
@@ -88,12 +103,38 @@ static void (*const s_ehci_isr_tab[USBH_EHCI_NUM])(void) = {
 	usbh_ehci1_isr,
 };
 
+static void (*const s_xhci_isr_tab[USBH_XHCI_NUM])(void) = {
+	usbh_xhci0_isr,
+	usbh_xhci1_isr,
+};
+
 /* Called from the vendored usb_hc_init() with the registers still reset:
  * bring up the shared PHY domain and arm the interrupt line. The register
- * base itself was set by usbh_initialize() before this runs. */
+ * base itself was set by usbh_initialize() before this runs.  EHCI busids
+ * run the usb2phy1 domain; xHCI busids run the USB3 socket-group domain +
+ * the DWC3 core reconfiguration (both once-guarded - usbh_platform_start()
+ * has already run them in task context, before any hub thread existed,
+ * because the con9/con14 SRST pulses reset whole controllers). */
 void usb_hc_low_level_init(struct usbh_bus *bus)
 {
 	uint32_t irq_num;
+
+	if (USBH_BUS_IS_XHCI(bus->busid)) {
+		if (USBH_XHCI_INST(bus->busid) >= USBH_XHCI_NUM) {
+			return;
+		}
+
+		usb_usb3_domain_init();
+		usb_xhci_dwc3_host_init(bus->hcd.reg_base);
+
+		irq_num = s_xhci_irq[USBH_XHCI_INST(bus->busid)];
+		(void)IRQ_SetHandler((IRQn_ID_t)irq_num,
+				     s_xhci_isr_tab[USBH_XHCI_INST(bus->busid)]);
+		(void)IRQ_SetPriority((IRQn_ID_t)irq_num,
+				      BOARD_IRQ_PRIORITY_API_CALL_RAW);
+		(void)IRQ_Enable((IRQn_ID_t)irq_num);
+		return;
+	}
 
 	if ((uint32_t)bus->busid >= USBH_EHCI_NUM) {
 		return;

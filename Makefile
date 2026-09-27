@@ -60,7 +60,7 @@ include $(CONFIG_FILE)
 CONFIG_KEYS := CONFIG_NAME CONFIG_BOARD CONFIG_SMP_CORES CONFIG_OPT \
 	CONFIG_SHELL CONFIG_NET CONFIG_UVC CONFIG_UAC \
 	CONFIG_BUS_USB CONFIG_BUS_PCIE CONFIG_BUS_SDIO CONFIG_USB_BACKEND \
-	CONFIG_USB_BACKEND_CHERRYUSB \
+	CONFIG_USB_BACKEND_CHERRYUSB CONFIG_USBHOST_XHCI \
 	CONFIG_NIC_IWM CONFIG_NIC_URTWN CONFIG_NIC_RTW8189F \
 	CONFIG_BSD_DIAGNOSTIC CONFIG_IWM_DEBUG \
 	CONFIG_USB_DEBUG_DEFAULT CONFIG_EHCI_DEBUG_DEFAULT CONFIG_XHCI_DEBUG_DEFAULT \
@@ -465,10 +465,19 @@ USB_DOMAIN_SRCS := \
 # HCD + the OSAL), plus the adapter: the shadow usb_config.h, the low-level
 # glue (IRQ/cache/console), the platform start path and the shell command.
 # The tree itself is never edited - local differences go through patches/.
+# The xHCI port (feat/cherryusb_xhci) is our own code landing through
+# patches/cherryusb/ as upstream-tree files (no open upstream xHCI port
+# exists - port/xhci/ carries only excluded vendor blobs); it joins the
+# image on CONFIG_USBHOST_XHCI.
 CHERRYUSB_SUB_SRCS := \
 	third-party/cherryusb/core/usbh_core.c \
 	third-party/cherryusb/class/hub/usbh_hub.c \
 	third-party/cherryusb/port/ehci/usb_hc_ehci.c
+
+ifeq ($(CONFIG_USBHOST_XHCI),1)
+CHERRYUSB_SUB_SRCS += \
+	third-party/cherryusb/port/xhci/usb_hc_xhci.c
+endif
 
 CHERRYUSB_ADAPTER_SRCS := \
 	port/adapters/cherryusb/usb_osal_threadx.c \
@@ -487,7 +496,8 @@ CHERRYUSB_INC := -Iport/adapters/cherryusb -Iport/adapters/libbsd \
 	-Ithird-party/cherryusb/core \
 	-Ithird-party/cherryusb/common \
 	-Ithird-party/cherryusb/class/hub \
-	-Ithird-party/cherryusb/port/ehci
+	-Ithird-party/cherryusb/port/ehci \
+	-Ithird-party/cherryusb/port/xhci
 
 LIBBSD_URTWN_ADAPTER_SRCS := \
 	port/adapters/libbsd/fw_rtl8188eufw.c
@@ -1262,13 +1272,16 @@ modules:
 	# walks third-party/ - bundled NimBLE ships `#include "hal/hal_timer.h"`,
 	# which reads as a project-header include and fails the gate for code that
 	# is not in any image.  What stays is exactly what the Makefile compiles:
-	# core, common, the hub class, the EHCI port, and the OSAL (kept whole as
-	# the reference our adapter copy was derived from).
+	# core, common, the hub class, the EHCI port, the xHCI port (our own
+	# patch-added files - port/xhci's first-level subdirectory is the closed
+	# vendor blob drop, excluded wholesale), and the OSAL (kept whole as the
+	# reference our adapter copy was derived from).
 	git -C third-party/cherryusb sparse-checkout set --no-cone \
 		'/*' '!/*/' \
 		'/core/' '/common/' \
 		'/class/' '!/class/*/' '/class/hub/' \
 		'/port/' '!/port/*/' '/port/ehci/' \
+		'/port/xhci/' '!/port/xhci/*/' \
 		'/osal/' || \
 		echo 'note: cherryusb sparse-checkout not set (kept full checkout)'
 	@for p in patches/*/*.patch; do \

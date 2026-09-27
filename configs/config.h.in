@@ -39,9 +39,13 @@
 
 /* The USB host stack this image links.  CONFIG_USB_BACKEND is the make-level
  * choice (netbsd | cherryusb); CONFIG_USB_BACKEND_CHERRYUSB is its derived
- * 0/1 form so C code can test it in #if without string compares. */
+ * 0/1 form so C code can test it in #if without string compares.  The xHCI
+ * root joins the CherryUSB image on CONFIG_USBHOST_XHCI (feat/cherryusb_xhci:
+ * our port/xhci files land through patches/cherryusb/; the netbsd backend
+ * carries its own xhci.c and ignores this key). */
 #define CONFIG_USB_BACKEND		"@CONFIG_USB_BACKEND@"
 #define CONFIG_USB_BACKEND_CHERRYUSB	@CONFIG_USB_BACKEND_CHERRYUSB@
+#define CONFIG_USBHOST_XHCI		@CONFIG_USBHOST_XHCI@
 
 /* --- wireless lines -------------------------------------------------------- */
 
