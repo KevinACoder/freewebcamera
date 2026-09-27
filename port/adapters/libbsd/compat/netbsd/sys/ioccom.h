@@ -18,6 +18,7 @@
 #define IOC(inout, group, num, len) \
 	((unsigned long) ((inout) | (((len) & IOCPARM_MASK) << 16) | \
 	((group) << 8) | (num)))
+#define _IO(g, n) IOC(IOC_VOID, (g), (n), 0)
 #define _IOR(g, n, t) IOC(IOC_OUT, (g), (n), sizeof(t))
 #define _IOW(g, n, t) IOC(IOC_IN, (g), (n), sizeof(t))
 #define _IOWR(g, n, t) IOC(IOC_IN | IOC_OUT, (g), (n), sizeof(t))

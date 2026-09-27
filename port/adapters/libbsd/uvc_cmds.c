@@ -153,6 +153,53 @@ cmd_uvc(int argc, char **argv)
 		av_video_stats_dump();
 		return 0;
 	}
+	if (argc >= 2 && strcmp(argv[1], "dbg") == 0) {
+		/* the imported drivers' own DPRINTF gates (both are plain
+		 * globals; the UVC_DEBUG build compiles the paths in).
+		 * Per-channel on purpose: the middle layer's write-path
+		 * prints fire per payload and will bury the console, so it
+		 * stays off unless asked for explicitly. */
+		extern int uvideodebug;
+		extern int videodebug;
+		int uv = argc > 2 ? atoi(argv[2]) : 1;
+		int vd = argc > 3 ? atoi(argv[3]) : 0;
+
+		uvideodebug = uv;
+		videodebug = vd;
+		printf("uvc: debug uvideo=%d video=%d\n", uvideodebug,
+		    videodebug);
+		return 0;
+	}
+	if (argc >= 2 && strcmp(argv[1], "qdump") == 0) {
+		/* one-shot middle-layer snapshot (patches/libbsd/0016):
+		 * the next write/sample_done prints the ingress/egress
+		 * heads plus every buffer's flag/owner state */
+		extern int video_diag_dump_req;
+
+		video_diag_dump_req = 1;
+		printf("uvc: queue snapshot armed (next UVC event prints)\n");
+		return 0;
+	}
+	if (argc >= 2 && strcmp(argv[1], "bufs") == 0) {
+		unsigned i;
+
+		for (i = 0; i < 4; i++) {
+			uint32_t flags = 0, used = 0, len = 0;
+			int err = av_video_query_buf(0, i, &flags, &used,
+			    &len);
+
+			if (err != 0) {
+				printf("uvc buf[%u] query err %d\n", i, err);
+				break;
+			}
+			printf("uvc buf[%u] flags=%#x queued=%d done=%d "
+			    "bytesused=%u length=%u\n", i, flags,
+			    (flags & V4L2_BUF_FLAG_QUEUED) ? 1 : 0,
+			    (flags & V4L2_BUF_FLAG_DONE) ? 1 : 0, used, len);
+		}
+		av_video_stats_dump();
+		return 0;
+	}
 	if (argc >= 2 && strcmp(argv[1], "read") == 0) {
 		unsigned count = argc > 2 ? (unsigned) atoi(argv[2]) : 10;
 
@@ -160,7 +207,7 @@ cmd_uvc(int argc, char **argv)
 		return 0;
 	}
 	printf("usage: uvc list | video on [WxH] [FCCC] [fps] | "
-	    "video off | stats | read [n]\n");
+	    "video off | stats | read [n] | bufs | qdump | dbg [uv] [vd]\n");
 	return 0;
 }
 

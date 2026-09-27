@@ -32,6 +32,9 @@ int av_video_ensure_open(int unit);
  * completed frame, a byte count means the egress ring had one waiting */
 int av_video_open_nonblock(int unit);
 int av_video_read_probe(int unit, unsigned count);
+/* VIDIOC_QUERYBUF: flags/bytesused/length of one read-method buffer */
+int av_video_query_buf(int unit, unsigned idx, uint32_t *flags,
+    uint32_t *bytesused, uint32_t *length);
 int av_video_get_format(int unit, uint32_t *w, uint32_t *h, uint32_t *pixfmt);
 int av_video_set_format(int unit, uint32_t w, uint32_t h, uint32_t pixfmt);
 int av_video_set_framerate(int unit, uint32_t fps);

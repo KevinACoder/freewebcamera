@@ -1,0 +1,78 @@
+diff --git a/sys/dev/video.c b/sys/dev/video.c
+index 4aade8f06883..c1dfac9c9985 100644
+--- a/sys/dev/video.c
++++ b/sys/dev/video.c
+@@ -2669,6 +2669,55 @@ v4l2buf_set_timestamp(struct v4l2_buffer *buf)
+  * write payload data to the appropriate video sample, possibly moving
+  * the sample from ingress to egress queues
+  */
++#ifdef UVC_PORT_DIAG
++/*
++ * Port-side on-demand forensics for the UVC line: the stream/queue state
++ * that decides whether a completed frame can be handed to userspace.
++ * video_diag_dump_req is a one-shot trigger (set from the port's shell,
++ * cleared after the next event prints) so the console is never flooded.
++ */
++int video_diag_dump_req;
++
++/* the port's condvar forensics (osal layer): a consumer parked behind a
++ * full egress ring with zero registered waiters is a lost wakeup */
++extern int wlan_cv_waiter_count(kcondvar_t *);
++extern int wlan_cv_sem_count(kcondvar_t *);
++
++static void
++video_diag_dump_stream(const char *tag, struct video_stream *vs)
++{
++	struct video_buffer *ib = SIMPLEQ_FIRST(&vs->vs_ingress);
++	struct video_buffer *eb = SIMPLEQ_FIRST(&vs->vs_egress);
++	int i;
++
++	printf("video_diag[%s]: vs=%p method=%d nbufs=%u bytesread=%zu "
++	    "ingress=%p last=%p egress=%p frameno=%d drop=%d seq=%u\n",
++	    tag, vs, (int) vs->vs_method, (unsigned) vs->vs_nbufs,
++	    vs->vs_bytesread, ib, (void *) vs->vs_ingress.sqh_last, eb,
++	    vs->vs_frameno, (int) vs->vs_drop, vs->vs_sequence);
++	printf("video_diag[%s]: cv waiters=%d sem=%d\n", tag,
++	    wlan_cv_waiter_count(&vs->vs_sample_cv),
++	    wlan_cv_sem_count(&vs->vs_sample_cv));
++	for (i = 0; i < vs->vs_nbufs; i++) {
++		struct v4l2_buffer *buf = vs->vs_buf[i]->vb_buf;
++
++		printf("video_diag[%s]: buf[%d]=%p flags=%#x used=%u len=%u "
++		    "next=%p\n", tag, i, vs->vs_buf[i], buf->flags,
++		    buf->bytesused, buf->length,
++		    (void *) vs->vs_buf[i]->entries.sqe_next);
++	}
++}
++
++#define VIDEO_DIAG_TAKE(tag, vs) do {					\
++	if (video_diag_dump_req) {					\
++		video_diag_dump_req = 0;				\
++		video_diag_dump_stream(tag, vs);			\
++	}								\
++} while (0)
++#else
++#define VIDEO_DIAG_TAKE(tag, vs) do { } while (0)
++#endif
++
+ void
+ video_stream_write(struct video_stream *vs,
+ 		   const struct video_payload *payload)
+@@ -2677,6 +2726,8 @@ video_stream_write(struct video_stream *vs,
+ 	struct v4l2_buffer *buf;
+ 	struct scatter_io sio;
+ 
++	VIDEO_DIAG_TAKE("write", vs);
++
+ 	mutex_enter(&vs->vs_lock);
+ 
+ 	/* change of frameno implies end of current frame */
+@@ -2730,6 +2781,8 @@ video_stream_sample_done(struct video_stream *vs)
+ {
+ 	struct video_buffer *vb;
+ 
++	VIDEO_DIAG_TAKE("sample_done", vs);
++
+ 	if (vs->vs_drop) {
+ 		vs->vs_drop = false;
+ 	} else if (!SIMPLEQ_EMPTY(&vs->vs_ingress)) {

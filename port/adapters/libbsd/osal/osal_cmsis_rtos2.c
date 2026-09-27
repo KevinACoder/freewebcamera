@@ -323,6 +323,18 @@ int wlan_cv_timedwait(kcondvar_t *cv, kmutex_t *m, int ticks) {
  * all - sound when the caller holds the same mutex the waiter will
  * re-check its predicate under, but the counter makes any other (more
  * fragile) caller visible from the shell. */
+/* Forensics accessors: the UVC line's frame-completion path needs to see
+ * whether the consumer is actually registered as a waiter when the middle
+ * layer signals - a dropped token with a parked consumer behind a full
+ * egress ring is a lost wakeup, not a lost frame. */
+int wlan_cv_waiter_count(kcondvar_t *cv) {
+	return *hc_cond_waiters(cv);
+}
+
+int wlan_cv_sem_count(kcondvar_t *cv) {
+	return (int) osSemaphoreGetCount(hc_cond_sem(cv));
+}
+
 volatile unsigned wlan_cv_signals;
 volatile unsigned wlan_cv_signals_dropped;
 volatile unsigned wlan_cv_broadcasts;

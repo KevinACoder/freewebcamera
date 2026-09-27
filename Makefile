@@ -325,9 +325,12 @@ LIBBSD_BSD_CFG := -D_KERNEL -D_KERNEL_OPT -DDIAGNOSTIC \
 # this switch needs `make clean` too (same untracked -D as WLAN_NIC; a
 # stale uvideo.o silently keeps -DUVIDEO_DEBUG).
 ifeq ($(UVC_DEBUG),1)
-LIBBSD_BSD_CFG += -DUVIDEO_DEBUG
-LIBBSD_SUB_CFG += -DUVIDEO_DEBUG
+LIBBSD_BSD_CFG += -DUVIDEO_DEBUG -DVIDEO_DEBUG=0 -DUVC_PORT_DIAG
+LIBBSD_SUB_CFG += -DUVIDEO_DEBUG -DVIDEO_DEBUG=0 -DUVC_PORT_DIAG
 endif
+# VIDEO_DEBUG=0 (not bare): the middle layer compiles its DPRINTF paths in
+# but leaves videodebug=0, so 'uvc dbg <n>' can turn them on at runtime
+# without a rebuild.  A bare -DVIDEO_DEBUG would print from the start.
 # _KERNEL_OPT makes this build behave like a config(8) kernel for the
 # imported sources: every `#ifdef _KERNEL_OPT #include "opt_*.h"` and
 # `#include "<device>.h"` fires, so the compat tree's stand-ins for the
@@ -765,7 +768,9 @@ modules:
 		'/external/realtek/rtw8189f/' '/external/realtek/urtwn/' \
 		'/sys/arch/arm/include/' '/sys/crypto/aes/' '/sys/dev/hid/' \
 		'/sys/dev/ic/' '/sys/dev/pci/' '/sys/dev/sdmmc/' '/sys/dev/usb/' \
-		'/sys/fs/' '/sys/net80211/' '/sys/sys/videoio.h' || \
+		'/sys/fs/' '/sys/net80211/' '/sys/sys/videoio.h' \
+		'/sys/sys/featuretest.h' '/sys/compat/sys/time.h' \
+		'/sys/compat/sys/time_types.h' || \
 		echo 'note: libbsd sparse-checkout not set (kept full checkout)'
 	git -C third-party/wpa_supplicant sparse-checkout set \
 		src wpa_supplicant || \

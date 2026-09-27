@@ -94,6 +94,39 @@ av_video_open_nonblock(int unit)
 	return videoopen((dev_t) (unsigned) unit, O_NONBLOCK, 0, NULL);
 }
 
+/* VIDIOC_QUERYBUF per index: the read-method's buffers live in the middle
+ * layer's ingress queue, and only their QUEUED flag (V4L2_BUF_FLAG_QUEUED)
+ * says so.  This is the window that tells "never queued" apart from
+ * "queued and consumed". */
+int
+av_video_query_buf(int unit, unsigned idx, uint32_t *flags,
+    uint32_t *bytesused, uint32_t *length)
+{
+	struct v4l2_buffer buf;
+	int err;
+
+	if (av_video_device(unit) == NULL) {
+		return -ENXIO;
+	}
+	memset(&buf, 0, sizeof(buf));
+	buf.index = idx;
+	buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	err = av_v_ioctl(unit, VIDIOC_QUERYBUF, &buf);
+	if (err != 0) {
+		return -err;
+	}
+	if (flags != NULL) {
+		*flags = buf.flags;
+	}
+	if (bytesused != NULL) {
+		*bytesused = buf.bytesused;
+	}
+	if (length != NULL) {
+		*length = buf.length;
+	}
+	return 0;
+}
+
 int
 av_video_read_probe(int unit, unsigned count)
 {
