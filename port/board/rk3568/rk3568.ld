@@ -29,6 +29,24 @@ RAM_BASE = 0x0a000000;
  * 0x11000000. */
 RAM_SIZE = 3072M;
 
+/* --- the DMA-reachable RAM window -------------------------------------------
+ * What a bus master may legally be handed: everything from the image RAM base
+ * up to the top of the Normal-cacheable mapping.  Below RAM_BASE is firmware
+ * the port keeps Device (a master's write there is dropped silently, which is
+ * why the guard in port/adapters/libbsd/bsd_bus.c checks every address it
+ * passes to hardware); above 0xc0000000 is the peripheral/Device window
+ * (mmu.c: L1[0]'s Normal blocks from RAM_BASE, then the two 1 GiB Normal
+ * blocks L1[1]/L1[2], then L1[3] Device).
+ *
+ * This lives here so the numbers have exactly one owner that both the linker
+ * (the ASSERT below) and the C code see.  The guard used to carry its own
+ * copy, taken from the RAM_SIZE of the day (96M); when the system heap moved
+ * out of .bss to a fixed 0x20000000 arena (heap.c, 2026-09-28) that copy
+ * turned the guard into a false negative: iwm's RX buffers come from the heap
+ * and were rejected as "outside the window" while being ordinary DDR. */
+DMA_WINDOW_BASE = RAM_BASE;
+DMA_WINDOW_END = 0xc0000000;
+
 SECTIONS
 {
 	. = RAM_BASE;
@@ -121,4 +139,11 @@ SECTIONS
 
 	/* Guard: the image must fit the usable RAM window. */
 	ASSERT(. <= (RAM_BASE + RAM_SIZE), "image exceeds the usable RAM window")
+	/* The DMA window must describe mapped Normal RAM, and the image must sit
+	 * inside it (a master can only be handed addresses the CPU also maps
+	 * cacheable, or the flush discipline in bsd_bus.c means nothing). */
+	ASSERT(DMA_WINDOW_BASE == RAM_BASE, "DMA window must start at the image RAM base")
+	ASSERT(DMA_WINDOW_END > DMA_WINDOW_BASE, "DMA window is empty")
+	ASSERT(DMA_WINDOW_END <= 0xc0000000, "DMA window reaches into the Device mapping")
+	ASSERT(. <= DMA_WINDOW_END, "image does not sit inside the DMA window")
 }

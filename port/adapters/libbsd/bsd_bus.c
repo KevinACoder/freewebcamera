@@ -148,14 +148,24 @@ bus_space_tag_t wlan_bus_space_tag = &wlan_bus_space_store;
  * dropped while the controller still reports a clean transfer, which is
  * how a bad buffer address turns into "the device answered with garbage".
  * So every address handed to hardware is checked against the two facts
- * this port knows: the pool it allocates from, and the board's
- * DMA-reachable RAM window (port/board/rk3568/board_conf.h
- * BOARD_MMU_IMAGE_RAM_BASE; the 96M cap is the linker script's RAM_SIZE -
- * both repeated here because this unit compiles without the board include
- * path, exactly like the dcache externs above).
+ * this port knows: the pool it allocates from, and the RAM the port maps
+ * Normal cacheable.
+ *
+ * The window comes from the board's linker script (port/board/<board>/)
+ * rather than from a copy here.  The copy is what broke: it held
+ * 0x0a000000..0x10000000 - the image RAM base plus the RAM_SIZE of that
+ * day (96M) - and when the system heap moved out of .bss to a fixed
+ * 0x20000000 arena (heap.c, 2026-09-28) every heap-backed DMA buffer,
+ * starting with iwm's RX mbufs, fell outside a window that had stopped
+ * describing the machine.  One owner for the numbers removes the failure
+ * mode: the linker script is the file both the ASSERT family and this
+ * code can see.
  */
-#define WLAN_DMA_WINDOW_BASE	0x0a000000UL
-#define WLAN_DMA_WINDOW_END	0x10000000UL
+extern char DMA_WINDOW_BASE[];
+extern char DMA_WINDOW_END[];
+
+#define WLAN_DMA_WINDOW_BASE	((uintptr_t) DMA_WINDOW_BASE)
+#define WLAN_DMA_WINDOW_END	((uintptr_t) DMA_WINDOW_END)
 
 static const uintptr_t wlan_dma_pool_base = (uintptr_t) wlan_dma_pool;
 
