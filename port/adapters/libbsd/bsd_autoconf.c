@@ -101,7 +101,12 @@ struct usb_subr_copy_30_hook_t usb_subr_copy_30_hook = { .hooked = false };
 
 /* usb shells: ehci1's usbus + the xHCI's two buses (USB3 + USB2);
  * roothub shells: one per usbus, same count */
-#if CONFIG_BUS_USB
+/* The usbdi world's device shells and cfdrivers exist only when the imported
+ * stack is linked.  A CherryUSB image has no usbus/roothub/ehci/xhci cfattach
+ * at all: enumeration and attach live in the CherryUSB hub thread, and the
+ * urtwn driver is invoked directly by the class hook (see usbh_urtwn_class.c)
+ * rather than through config_found. */
+#if CONFIG_BUS_USB && !CONFIG_USB_BACKEND_CHERRYUSB
 static device_t usb_devs[4];
 static device_t uroothub_devs[4];
 static device_t uhub_devs[4];
@@ -112,7 +117,7 @@ static device_t xhci_devs[2];
 static device_t urtwn_devs[2];
 #endif
 
-#if CONFIG_BUS_USB
+#if CONFIG_BUS_USB && !CONFIG_USB_BACKEND_CHERRYUSB
 struct cfdriver usb_cd = {
 	.cd_devs = usb_devs,
 	.cd_name = "usb",
@@ -150,7 +155,7 @@ struct cfdriver xhci_cd = {
 	.cd_class = DV_DULL,
 	.cd_ndevs = 2,
 };
-#endif /* CONFIG_BUS_USB */
+#endif /* CONFIG_BUS_USB && !CONFIG_USB_BACKEND_CHERRYUSB */
 
 #if CONFIG_NIC_URTWN
 struct cfdriver urtwn_cd = {
@@ -204,7 +209,7 @@ struct cfdriver audio_cd = {
 };
 #endif /* CONFIG_UAC */
 
-#if CONFIG_BUS_USB
+#if CONFIG_BUS_USB && !CONFIG_USB_BACKEND_CHERRYUSB
 extern const struct cfattach usb_ca;
 extern const struct cfattach uroothub_ca;
 extern const struct cfattach uhub_ca;
@@ -356,7 +361,7 @@ struct cfentry {
 
 static int dlocs_zero[1] = { -1 };
 
-#if CONFIG_BUS_USB
+#if CONFIG_BUS_USB && !CONFIG_USB_BACKEND_CHERRYUSB
 static struct cfdata cfdata_usb = {
 	.cf_name = "usb", .cf_atname = "usb",
 	.cf_fstate = FSTATE_STAR, .cf_loc = dlocs_zero,
@@ -371,7 +376,7 @@ static struct cfdata cfdata_uhub = {
 	.cf_name = "uhub", .cf_atname = "uhub",
 	.cf_fstate = FSTATE_STAR, .cf_loc = dlocs_zero,
 };
-#endif /* CONFIG_BUS_USB */
+#endif /* CONFIG_BUS_USB && !CONFIG_USB_BACKEND_CHERRYUSB */
 
 #if CONFIG_NIC_URTWN
 static struct cfdata cfdata_urtwn = {
@@ -423,7 +428,7 @@ static struct cfdata cfdata_iwm = {
 #endif /* CONFIG_NIC_IWM */
 
 static struct cfentry cfentries[] = {
-#if CONFIG_BUS_USB
+#if CONFIG_BUS_USB && !CONFIG_USB_BACKEND_CHERRYUSB
 	{ "usbus", &cfdata_usb, &usb_cd },
 	{ "usbroothubif", &cfdata_uroothub, &uroothub_cd },
 	{ "usbdevif", &cfdata_uhub, &uhub_cd },
@@ -488,7 +493,11 @@ dev_alloc(struct cfdriver *cd, cfdata_t cf)
 static struct cfattach *
 cfattach_lookup(const char *atname)
 {
-#if CONFIG_BUS_USB
+#if CONFIG_BUS_USB && !CONFIG_USB_BACKEND_CHERRYUSB
+	/* The usbus/roothub/hub attach tables belong to the imported usbdi
+	 * world.  A CherryUSB image carries no usb_subr/uhub at all - its
+	 * enumeration and attach run inside the CherryUSB hub thread - so
+	 * these lookups must not reference the (absent) cfattach objects. */
 	if (strcmp(atname, "usb") == 0) {
 		return __DECONST(struct cfattach *, &usb_ca);
 	}

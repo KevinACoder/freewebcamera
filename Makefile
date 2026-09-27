@@ -549,10 +549,11 @@ endif
 endif
 endif
 
-# The usbdi(9) request compat layer: the CherryUSB backend's driver-facing
-# half, which is what lets a verbatim NetBSD driver (urtwn) run on this stack.
-# It compiles in the BSD world - it *is* the usbdi surface - but only in a
-# CherryUSB image; a netbsd image links the real usbdi.c instead.
+# The usbdi(9) request compat layer and its class hook (feat/cherryusb_ehci):
+# the CherryUSB backend's driver-facing half.  Both compile in the BSD world
+# plus the CherryUSB world (the shim implements the usbdi surface over
+# CherryUSB's usbh_urb API, so it needs both include sets) - hence the
+# explicit rules below rather than the libbsd-directory pattern rules.
 ifeq ($(CONFIG_USB_BACKEND_CHERRYUSB)-$(CONFIG_NIC_URTWN),1-1)
 LIBBSD_IMPL_SRCS    += port/adapters/cherryusb/usbdi_compat.c
 LIBBSD_ADAPTER_SRCS += port/adapters/cherryusb/usbh_urtwn_class.c
@@ -907,15 +908,22 @@ $(BUILD)/third-party/libbsd/%.o: third-party/libbsd/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(LIBBSD_INC) $(LIBBSD_SUB_CFG) -MMD -MP -c $< -o $@
 
-$(LIBBSD_IMPL_OBJS): $(BUILD)/port/adapters/libbsd/%.o: port/adapters/libbsd/%.c
+# The CherryUSB compat layer lives in another directory than libbsd's, so the
+# pattern rule below cannot match it and it gets its explicit rule further
+# down (it needs both include worlds).  Filtering it here keeps make from
+# claiming the target with an empty source.
+LIBBSD_IMPL_GENERIC_OBJS := $(filter-out %/usbdi_compat.o,$(LIBBSD_IMPL_OBJS))
+
+$(LIBBSD_IMPL_GENERIC_OBJS): $(BUILD)/port/adapters/libbsd/%.o: port/adapters/libbsd/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(LIBBSD_INC) $(LIBBSD_BSD_CFG) -MMD -MP -c $< -o $@
 
-# The SDIO claim layer, the raw A/V dump and the backend-neutral USB domain
-# sequence have their own rules below (extra include worlds / a different
-# directory than libbsd's); excluding them here keeps the static pattern from
-# claiming them and make from warning about an overridden recipe.
-LIBBSD_ADAPTER_GENERIC_OBJS := $(filter-out %/wlan_sdio_claim.o %/av_dump.o %/usb_domain.o,$(LIBBSD_ADAPTER_OBJS))
+# The SDIO claim layer, the raw A/V dump, the backend-neutral USB domain
+# sequence and the CherryUSB class hook have their own rules below (extra
+# include worlds / a different directory than libbsd's); excluding them here
+# keeps the static pattern from claiming them and make from warning about an
+# overridden recipe.
+LIBBSD_ADAPTER_GENERIC_OBJS := $(filter-out %/wlan_sdio_claim.o %/av_dump.o %/usb_domain.o %/usbh_urtwn_class.o,$(LIBBSD_ADAPTER_OBJS))
 
 $(LIBBSD_ADAPTER_GENERIC_OBJS): $(BUILD)/port/adapters/libbsd/%.o: port/adapters/libbsd/%.c
 	@mkdir -p $(dir $@)
@@ -939,6 +947,23 @@ $(BUILD)/port/adapters/libbsd/av_dump.o: port/adapters/libbsd/av_dump.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(LIBBSD_INC) \
 		$(LWIP_INC) -MMD -MP -c $< -o $@
+
+# The usbdi(9) compat layer is the one file that spans both worlds: it
+# implements the imported usbdi surface (usbdivar.h types, the driver-facing
+# prototypes) over CherryUSB's usbh_urb API, so it compiles with the BSD
+# include set and config PLUS the CherryUSB include set.  The class hook next
+# to it is CherryUSB-side and stays in the CherryUSB world.  Both need
+# explicit rules: their directory is not the one the libbsd pattern rules
+# name, and a pattern rule that cannot match leaves make with no recipe.
+$(BUILD)/port/adapters/cherryusb/usbdi_compat.o: port/adapters/cherryusb/usbdi_compat.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(LIBBSD_INC) \
+		$(LIBBSD_BSD_CFG) $(CHERRYUSB_INC) -MMD -MP -c $< -o $@
+
+$(BUILD)/port/adapters/cherryusb/usbh_urtwn_class.o: port/adapters/cherryusb/usbh_urtwn_class.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(CHERRYUSB_INC) \
+		-MMD -MP -c $< -o $@
 
 # The usb host abstraction's NetBSD backend is the one file above the platform
 # that includes the imported usbdi world, so it compiles with the BSD include

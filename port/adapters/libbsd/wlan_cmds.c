@@ -27,7 +27,10 @@
  * the urtwn/rtw8189f register access is per-driver. */
 #include "config.h"
 
-#if CONFIG_BUS_USB
+/* The USB dump commands are usbdi-world introspection - they exist in a
+ * netbsd image only.  A CherryUSB image brings its own view up through
+ * `usbh list`/`usbreq` instead (port/adapters/cherryusb/). */
+#if CONFIG_BUS_USB && !CONFIG_USB_BACKEND_CHERRYUSB
 extern void usb_platform_dump(void);
 extern void usb_platform_qh_dump(void);
 extern void usb_platform_reg_dump(void);
@@ -35,6 +38,9 @@ extern void usb_platform_hist_dump(unsigned int max);
 extern void usb_platform_delay_test(void);
 extern void usb_xhci_dump(void);
 extern void usb_xhci_reg_dump(void);
+#define WLAN_HAS_NETBSD_USB_DUMPS 1
+#else
+#define WLAN_HAS_NETBSD_USB_DUMPS 0
 #endif
 
 #if CONFIG_NIC_URTWN
@@ -136,7 +142,7 @@ static int cmd_wlan(int argc, char **argv)
 		csh_printf(csh, "heap free=%lu B\n",
 		    (unsigned long) xPortGetFreeHeapSize());
 		wlan_port_status_dump();
-#if CONFIG_BUS_USB
+#if WLAN_HAS_NETBSD_USB_DUMPS
 		usb_platform_dump();
 #endif
 		return 0;
@@ -163,7 +169,7 @@ static int cmd_wlan(int argc, char **argv)
 		return 0;
 	}
 
-#if CONFIG_BUS_USB
+#if WLAN_HAS_NETBSD_USB_DUMPS
 	if (argc >= 2 && strcmp(argv[1], "dump") == 0) {
 		usb_platform_dump();
 		usb_platform_qh_dump();
@@ -242,7 +248,7 @@ static int cmd_wlan(int argc, char **argv)
 		return 0;
 	}
 #endif /* CONFIG_NIC_URTWN */
-#endif /* CONFIG_BUS_USB */
+#endif /* WLAN_HAS_NETBSD_USB_DUMPS */
 
 #if CONFIG_NIC_RTW8189F
 	/* the rtw8189f driver's register windows + SDIO-local state */
@@ -345,7 +351,7 @@ static int cmd_wlan(int argc, char **argv)
 	 * default; the full ring flood drowns the interesting records).
 	 * usbdebug lives in usb.c, which only compiles when the history
 	 * machinery is on (CONFIG_USB_DEBUG_DEFAULT != 0). */
-#if CONFIG_BUS_USB
+#if WLAN_HAS_NETBSD_USB_DUMPS
 #if CONFIG_USB_DEBUG_DEFAULT
 	if (argc >= 2 && strcmp(argv[1], "usbdebug") == 0) {
 		extern int usbdebug;
@@ -359,7 +365,7 @@ static int cmd_wlan(int argc, char **argv)
 #endif
 #endif
 
-#if CONFIG_BUS_USB
+#if WLAN_HAS_NETBSD_USB_DUMPS
 #if CONFIG_USB_DEBUG_DEFAULT
 #define USBBUG_TAIL " | usbdebug <n>"
 #else
@@ -376,10 +382,15 @@ static int cmd_wlan(int argc, char **argv)
 #define URTWN_TAIL ""
 #endif
 
-#if CONFIG_BUS_USB
+#if WLAN_HAS_NETBSD_USB_DUMPS
 #define WLAN_CMD_TAIL \
 	" | dump | hist [n] | delaytest | calib [0|1]" \
 	" | callouts | cv" URTWN_TAIL USBBUG_TAIL
+#elif CONFIG_BUS_USB
+/* A CherryUSB image still carries the urtwn line's own verbs (its register
+ * access goes through the driver, not the stack); only the bus-level dumps
+ * are netbsd-only. */
+#define WLAN_CMD_TAIL " | callouts | cv" URTWN_TAIL
 #else
 #define WLAN_CMD_TAIL ""
 #endif
