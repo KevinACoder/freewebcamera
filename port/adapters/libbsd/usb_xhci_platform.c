@@ -318,6 +318,13 @@ int usb_xhci_attach(void)
 	sc->sc_child2 = config_found(dev, &sc->sc_bus2, usbctlprint,
 	    CFARGS(.iattr = "usbus"));
 
+	/* register both buses (usb_platform.h); the host-abstraction backend
+	 * walks this registry, and an unrecorded bus would be invisible to it
+	 * while still enumerating devices - the silent half-failure this
+	 * registry exists to prevent */
+	usb_platform_bus_record(&sc->sc_bus);
+	usb_platform_bus_record(&sc->sc_bus2);
+
 	/* both usbuses attached - unmask and let the first interrupt
 	 * drain the queued port-change events */
 	IRQ_Enable((IRQn_ID_t) irq);

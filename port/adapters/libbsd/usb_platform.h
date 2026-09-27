@@ -36,4 +36,16 @@ void usb_platform_hist_dump(unsigned int max);
 /* requested against measured wait times for delay()/usb_delay_ms() */
 void usb_platform_delay_test(void);
 
+/* The usbus registry: the bus objects the platform handed to the usb driver,
+ * in attach order (each EHCI root first, then the xHCI's two buses).
+ * Recorded here because this file is what composes and attaches them; a
+ * consumer above the imported world (the usb host abstraction's backend)
+ * asks this for "bus N" instead of reaching into the driver's device table. */
+struct usbd_bus;
+unsigned int usb_platform_bus_count(void);
+struct usbd_bus *usb_platform_bus_at(unsigned int index);
+/* Attach-time registration; called by usb_platform.c and
+ * usb_xhci_platform.c for every bus they hand to the usb driver. */
+void usb_platform_bus_record(struct usbd_bus *bus);
+
 #endif /* NET80211_USB_PLATFORM_H_ */

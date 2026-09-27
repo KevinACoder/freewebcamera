@@ -273,7 +273,8 @@ ARCH_SRCS := \
 	port/aarch64/gicv3_msi.c \
 	port/aarch64/its_test.c \
 	port/aarch64/itsdump.c \
-	port/aarch64/tick.c
+	port/aarch64/tick.c \
+	port/aarch64/reset.c
 
 # Shell adapter + cherrysh itself.  SHELL=0 drops the shell and every command
 # TU with it (commands register through the FSymTab section, so a command is
@@ -409,6 +410,16 @@ LIBBSD_USB_PLATFORM_SRCS := \
 	port/adapters/libbsd/usb_platform.c \
 	port/adapters/libbsd/usb_xhci_platform.c
 
+# The USB request abstraction (feat/usbport): include/usb_host.h is the
+# interface, the backend is the only file that includes the imported usbdi
+# world, and the command TU is the in-tree consumer.  The backend compiles in
+# the BSD world (its own rule below); the command TU is ordinary adapter code.
+USB_HOST_SRCS := \
+	port/adapters/usb/usb_host_netbsd.c
+
+USB_HOST_CMD_SRCS := \
+	port/adapters/usb/usb_host_cmds.c
+
 LIBBSD_URTWN_ADAPTER_SRCS := \
 	port/adapters/libbsd/fw_rtl8188eufw.c
 
@@ -448,6 +459,10 @@ endif
 ifeq ($(CONFIG_BUS_USB),1)
 LIBBSD_BSD_SRCS += $(LIBBSD_USB_SRCS)
 LIBBSD_ADAPTER_SRCS += $(LIBBSD_USB_PLATFORM_SRCS)
+USB_HOST_OBJS := $(addprefix $(BUILD)/,$(USB_HOST_SRCS:.c=.o))
+ifeq ($(CONFIG_SHELL),1)
+USB_HOST_OBJS += $(addprefix $(BUILD)/,$(USB_HOST_CMD_SRCS:.c=.o))
+endif
 endif
 ifeq ($(CONFIG_NIC_URTWN),1)
 LIBBSD_IMPL_SRCS    += port/adapters/libbsd/urtwn_reg.c
@@ -774,7 +789,7 @@ WPA_OBJS := $(addprefix $(BUILD)/,$(WPA_CORE_SRCS:.c=.o) $(WPA_PORT_SRCS:.c=.o))
 endif
 OBJS := $(addprefix $(BUILD)/,$(C_SRCS:.c=.o)) $(addprefix $(BUILD)/,$(ASM_SRCS:.S=.o)) \
 	$(addprefix $(BUILD)/,$(LIBBSD_BSD_SRCS:.c=.o)) \
-	$(LIBBSD_IMPL_OBJS) $(LIBBSD_ADAPTER_OBJS) \
+	$(LIBBSD_IMPL_OBJS) $(LIBBSD_ADAPTER_OBJS) $(USB_HOST_OBJS) \
 	$(LWIP_OBJS) $(WPA_OBJS) $(NETUTILS_OBJS) $(SDMMC_OBJS)
 DEPS := $(OBJS:.o=.d)
 
@@ -828,6 +843,15 @@ $(BUILD)/port/adapters/libbsd/av_dump.o: port/adapters/libbsd/av_dump.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(LIBBSD_INC) \
 		$(LWIP_INC) -MMD -MP -c $< -o $@
+
+# The usb host abstraction's backend is the one file above the platform that
+# includes the imported usbdi world, so it compiles with the BSD include set
+# and config (same world as the platform files).  The command TU next to it is
+# ordinary adapter code and falls to the generic adapter rule.
+$(BUILD)/port/adapters/usb/usb_host_netbsd.o: port/adapters/usb/usb_host_netbsd.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(LIBBSD_INC) \
+		$(LIBBSD_BSD_CFG) -MMD -MP -c $< -o $@
 
 # fsl_sdmmc protocol layer: frozen NXP import, warnings silenced (-w); the
 # shadow SDK headers come first so they win over anything vendored.
@@ -1092,6 +1116,22 @@ modules:
 			echo "kept    $$p (already applied or inapplicable)"; \
 		fi; \
 	done
+
+# First-time setup for a FRESH WORKTREE: seed the per-worktree submodule
+# clones from an existing checkout instead of re-downloading them.
+#
+# Submodule clones are per-worktree, so a new worktree's `make modules` starts
+# by cloning every submodule from its recorded URL - for third-party/libbsd
+# that is the multi-GB netbsd-src fork over SSH (>25 min measured, aborted).
+# The helper points those URLs at a local checkout for THIS worktree only and
+# pre-seeds shared clones (alternates, no object copies), which brings the
+# whole bootstrap to ~1 s + the checkout.  See tools/wt-submodules.sh.
+#
+# Only needed once per worktree; plain `make modules` is the steady-state
+# command afterwards.
+wt-modules:
+	./tools/wt-submodules.sh
+	$(MAKE) modules
 
 # End-of-round hygiene: materialize each patched submodule's applied tree as
 # a commit on branch fwc/<component> so the parent repo's final status is
