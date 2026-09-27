@@ -237,6 +237,9 @@ struct usbdi_dev {
 	/* usb task queue ring */
 	struct usb_task *tasks[USBD_SHIM_RING];
 	volatile unsigned task_head;
+	/* the task the worker is running right now (NULL when idle); what
+	 * usb_rem_task_wait() waits on, mirroring usb_taskq.current_task */
+	struct usb_task *task_cur;
 	usb_osal_sem_t task_sem;
 
 	kmutex_t wq_mtx;
@@ -1758,7 +1761,9 @@ bool usb_rem_task_wait(struct usbd_device *dev, struct usb_task *task,
 	d = usbdi_dv(dev);
 	usb_rem_task(dev, task);
 	mutex_enter(&d->wq_mtx);
-	while (task->queue != USB_NUM_TASKQS) {
+	/* done when the task is no longer queued and no longer running
+	 * (NetBSD waits on usb_taskq.current_task the same way) */
+	while (task->queue != USB_NUM_TASKQS || d->task_cur == task) {
 		cv_wait(&d->wq_cv, &d->wq_mtx);
 	}
 	mutex_exit(&d->wq_mtx);
@@ -1901,6 +1906,23 @@ static void usbdi_taskq_worker_loop(void *arg) {
 		memmove(&dev->tasks[0], &dev->tasks[1],
 		    (dev->task_head - 1) * sizeof(task));
 		dev->task_head--;
+
+		/* Clear the queue slot BEFORE running the task, exactly as
+		 * NetBSD's usb_task_thread does (usb.c: TAILQ_REMOVE, then
+		 * `task->queue = USB_NUM_TASKQS`, then fun - "Can't
+		 * dereference task after this point").  Order matters: the
+		 * driver re-arms itself from inside the task (urtwn_task
+		 * drains its cmdq, whose callbacks enqueue more commands and
+		 * call usb_add_task again).  With the slot still marked, that
+		 * re-add looks like "already queued" and is dropped, and the
+		 * driver's command ring stalls half-drained - measured on the
+		 * board as cmdq queued=18/64 with the scan crawling one channel
+		 * per supplicant timeout.  current_task keeps
+		 * usb_rem_task_wait()'s "has run" answer accurate. */
+		mutex_enter(&dev->wq_mtx);
+		task->queue = USB_NUM_TASKQS;
+		dev->task_cur = task;
+		mutex_exit(&dev->wq_mtx);
 		usbdi_ipl_restore(flags);
 
 		if (wlan_trace_lvl >= 1 && wlan_async_trace_seq < 48) {
@@ -1917,7 +1939,7 @@ static void usbdi_taskq_worker_loop(void *arg) {
 		}
 
 		mutex_enter(&dev->wq_mtx);
-		task->queue = USB_NUM_TASKQS;
+		dev->task_cur = NULL;
 		cv_broadcast(&dev->wq_cv);
 		mutex_exit(&dev->wq_mtx);
 	}
