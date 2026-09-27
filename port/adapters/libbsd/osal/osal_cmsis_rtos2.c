@@ -1053,13 +1053,19 @@ void wlan_port_serializer_unlock(void) {
 		wlan_ser_op("unlock-", self, wlan_ser_depth);
 		return;
 	}
+	/* owner/op bookkeeping must land while we still hold the mutex:
+	 * osMutexRelease wakes the next waiter and - on a higher priority -
+	 * switches to it inside the call, and its lock would then record
+	 * over a stale owner before we got to clear ours (board 2026-09-28:
+	 * "unlock by non-owner" panic on the first ping, owner=NULL with
+	 * depth=2 left behind) */
+	wlan_ser_owner = NULL;
+	wlan_ser_op("unlock", self, 0);
 	if (osMutexRelease(wlan_ser_mtx) != osOK) {
 		wlan_ser_op("relE", self, 0);
 		wlan_ser_dump();
 		panic("wlan serializer mutex release failed");
 	}
-	wlan_ser_op("unlock", self, 0);
-	wlan_ser_owner = NULL;
 }
 
 void *wlan_port_serializer_owner(void) {
@@ -1078,8 +1084,8 @@ int wlan_port_serializer_suspend(void) {
 	depth = wlan_ser_depth;
 	wlan_ser_owner = NULL;
 	wlan_ser_depth = 0;
-	osMutexRelease(wlan_ser_mtx);
 	wlan_ser_op("susp", self, depth);
+	osMutexRelease(wlan_ser_mtx);
 	return depth;
 }
 

@@ -376,6 +376,20 @@ static int cmd_wlan(int argc, char **argv)
 		wlan_usbdi_stats_dump();
 		return 0;
 	}
+
+	/* runtime shim trace level (1 = async urb/taskq events, 2 = plus
+	 * every control transfer).  The attach chain runs before a user can
+	 * type, so turn it on before `wlan start` when a control-path
+	 * regression needs the per-request view. */
+	if (argc >= 2 && strcmp(argv[1], "trace") == 0) {
+		extern void wlan_usbdi_trace_set(unsigned int level);
+
+		unsigned lvl = (argc > 2) ? (unsigned) atoi(argv[2]) : 0U;
+
+		wlan_usbdi_trace_set(lvl);
+		csh_printf(csh, "wlan: trace=%u (1 async, 2 +ctrl)\n", lvl);
+		return 0;
+	}
 #endif
 
 #if WLAN_HAS_NETBSD_USB_DUMPS
@@ -401,11 +415,11 @@ static int cmd_wlan(int argc, char **argv)
 #define WLAN_CMD_TAIL \
 	" | dump | hist [n] | delaytest | calib [0|1]" \
 	" | callouts | cv" URTWN_TAIL USBBUG_TAIL
-#elif CONFIG_BUS_USB
+#elif CONFIG_USB_BACKEND_CHERRYUSB
 /* A CherryUSB image still carries the urtwn line's own verbs (its register
  * access goes through the driver, not the stack); only the bus-level dumps
  * are netbsd-only. */
-#define WLAN_CMD_TAIL " | callouts | cv" URTWN_TAIL
+#define WLAN_CMD_TAIL " | callouts | cv | trace <n>" URTWN_TAIL
 #else
 #define WLAN_CMD_TAIL ""
 #endif
