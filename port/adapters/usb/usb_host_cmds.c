@@ -33,13 +33,25 @@
 
 #include "cherrysh_adapter.h"
 #include "csh.h"
+#include "config.h"
 #include "usb_host.h"
 
 /* Freestanding: minilibc.c provides the definition (same extern the shell
  * adapter uses for its own parsing). */
 extern int atoi(const char *s);
 
+/* The compile-time backend of this image (D-C1③).  One backend per image:
+ * each stack brings its own controllers up, and both define a
+ * Driver_USB_HOST_* object, so the choice is a build key rather than a
+ * runtime lookup.  This TU is the abstraction's consumer and the one place
+ * that names a driver object. */
+#if CONFIG_USB_BACKEND_CHERRYUSB
+extern ARM_DRIVER_USB_HOST Driver_USB_HOST_CherryUSB;
+#define USBREQ_HOST Driver_USB_HOST_CherryUSB
+#else
 extern ARM_DRIVER_USB_HOST Driver_USB_HOST_NetBSD;
+#define USBREQ_HOST Driver_USB_HOST_NetBSD
+#endif
 
 static const char *usbreq_speed_str(uint8_t speed)
 {
@@ -94,7 +106,7 @@ static int usbreq_list(chry_shell_t *csh)
 	uint32_t i;
 	int32_t ret;
 
-	ret = Driver_USB_HOST_NetBSD.GetDeviceCount(&count);
+	ret = USBREQ_HOST.GetDeviceCount(&count);
 	if (ret != USB_HOST_OK) {
 		csh_printf(csh, "usbreq: device count failed (%d)\n", (int) ret);
 		return 1;
@@ -103,7 +115,7 @@ static int usbreq_list(chry_shell_t *csh)
 	for (i = 0; i < count; i++) {
 		USB_HOST_DEVICE info;
 
-		if (Driver_USB_HOST_NetBSD.GetDeviceInfo(i, &info) != USB_HOST_OK) {
+		if (USBREQ_HOST.GetDeviceInfo(i, &info) != USB_HOST_OK) {
 			continue;
 		}
 		csh_printf(csh,
@@ -126,7 +138,7 @@ static int usbreq_info(chry_shell_t *csh, const char *arg)
 		csh_printf(csh, "usbreq: bad index '%s'\n", arg != NULL ? arg : "");
 		return 1;
 	}
-	ret = Driver_USB_HOST_NetBSD.GetDeviceInfo(index, &info);
+	ret = USBREQ_HOST.GetDeviceInfo(index, &info);
 	if (ret != USB_HOST_OK) {
 		csh_printf(csh, "usbreq: no device at index %u (%d)\n",
 			   (unsigned) index, (int) ret);
@@ -178,7 +190,7 @@ static int usbreq_desc(chry_shell_t *csh, const char *idxarg, const char *lenarg
 	req.wIndex = 0;
 	req.wLength = (uint16_t) want;
 
-	ret = Driver_USB_HOST_NetBSD.ControlTransfer(index, &req, buf, &got,
+	ret = USBREQ_HOST.ControlTransfer(index, &req, buf, &got,
 	    USB_HOST_DEFAULT_TIMEOUT_MS);
 	if (ret != USB_HOST_OK && ret != USB_HOST_ERROR_SHORT) {
 		csh_printf(csh, "usbreq: GET_DESCRIPTOR failed (%d)\n", (int) ret);
@@ -226,7 +238,7 @@ static int usbreq_ctrl(chry_shell_t *csh, int argc, char **argv)
 	req.wIndex = (uint16_t) widx;
 	req.wLength = (uint16_t) len;
 
-	ret = Driver_USB_HOST_NetBSD.ControlTransfer(index, &req, buf, &got,
+	ret = USBREQ_HOST.ControlTransfer(index, &req, buf, &got,
 	    USB_HOST_DEFAULT_TIMEOUT_MS);
 	csh_printf(csh, "usbreq: ctrl -> %d, %u byte(s)\n", (int) ret,
 		   (unsigned) got);

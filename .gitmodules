@@ -20,3 +20,6 @@
 [submodule "third-party/sdmmc"]
 	path = third-party/sdmmc
 	url = /home/zhugy/workspace/rk3568_lab/os/fsl_sdmmc
+[submodule "third-party/cherryusb"]
+	path = third-party/cherryusb
+	url = https://github.com/cherry-embedded/CherryUSB.git
