@@ -15,8 +15,8 @@
 #include <sys/event.h>
 #include <sys/kernhist.h>
 
-typedef struct { int unused; } devmajor_t;
-typedef struct { int unused; } devminor_t;
+typedef int devmajor_t;
+typedef int devminor_t;
 
 struct tty;
 struct buf;
@@ -64,11 +64,20 @@ struct cdevsw {
 int nowrite(dev_t, struct uio *, int);
 int nostop(struct tty *, int);
 int noioctl(dev_t, u_long, void *, int, struct lwp *);
+int nokqfilter(dev_t, struct knote *);
 int nodiscard(dev_t, off_t, off_t);
 paddr_t nommap(dev_t, off_t, int);
 #define minor(dev) ((int) (unsigned) (dev))
 #define major(dev) ((int) ((unsigned) (dev) >> 8))
 
 #define notty ((struct tty * (*)(dev_t)) 0)
+
+/* the video(4) detach path asks for this switch's major and tears down
+ * its open instances; there is no cdevsw table and no vnode layer here,
+ * so the major is a constant tag and vdevgone is a no-op (the one open
+ * consumer closes its unit through the port shim) */
+devmajor_t cdevsw_lookup_major(const struct cdevsw *);
+void vdevgone(devmajor_t, int, int, int);
+#define VCHR	4	/* upstream enum vtype order: VNON VREG VDIR VBLK VCHR */
 
 #endif /* _COMPAT_SYS_CONF_H_ */

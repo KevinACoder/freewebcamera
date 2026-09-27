@@ -14,5 +14,9 @@ extern struct cfdriver uroothub_cd;
 extern struct cfdriver uhub_cd;
 extern struct cfdriver ehci_cd;
 extern struct cfdriver urtwn_cd;
+#if UVC_BUILD
+extern struct cfdriver uvideo_cd;
+extern struct cfdriver video_cd;
+#endif
 
 #endif /* _IOCONF_H_ */

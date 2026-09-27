@@ -718,6 +718,12 @@ void microtime(struct timeval *tv) {
 	tv->tv_usec = (long) ((now % frq) * 1000000ULL / frq);
 }
 
+/* video(4) stamps frames with this; same clock, no locking semantic
+ * beyond microtime's */
+void getmicrotime(struct timeval *tv) {
+	microtime(tv);
+}
+
 int ratecheck(struct timeval *last, const struct timeval *min) {
 	struct timeval tv;
 	uint64_t elapsed_us, min_us;

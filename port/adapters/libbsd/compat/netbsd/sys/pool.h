@@ -35,4 +35,11 @@ void pool_cache_destroy(pool_cache_t pc);
 void *pool_cache_get(pool_cache_t pc, int flags);
 void pool_cache_put(pool_cache_t pc, void *obj);
 
+/* the scatter_buf mmap path asks the VM for physical pages; this port
+ * is identity-mapped (virtual == physical, see bsd_bus.c), so the pmap
+ * face is a shell */
+typedef struct pmap *pmap_t;
+pmap_t pmap_kernel(void);
+int pmap_extract(pmap_t, vaddr_t, paddr_t *);
+
 #endif /* _COMPAT_SYS_POOL_H_ */

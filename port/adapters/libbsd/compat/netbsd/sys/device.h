@@ -65,13 +65,16 @@ typedef enum devact devact_t;
 #define DVF_ACTIVE		0x0004
 
 /* device shells handed out by config_attach; the imported drivers only
- * read xname/private and take the address */
+ * read xname/private and take the address.  dv_cd plays ioconf.c's role:
+ * device_cfdriver(dev) walks back to the cfdriver (upstream resolves it
+ * through the cfdata->cfattach->cfdriver registration) */
 struct device {
 	char dv_xname[16];
 	device_t dv_parent;
 	cfdata_t dv_cfdata;
 	void *dv_private;
 	int dv_unit;
+	struct cfdriver *dv_cd;
 };
 
 #define device_xname(d)		((d)->dv_xname)
@@ -79,10 +82,22 @@ struct device {
 #define device_self(d)		((d))
 #define device_unit(d)		((d)->dv_unit)
 #define device_parent(d)	((d)->dv_parent)
+#define device_cfdriver(d)	((d)->dv_cd)
 #define device_is_active(d)	(true)
 #define device_lookup_private(d, u) \
 	(((u) < (d)->cd_ndevs) ? (d)->cd_devs[u] != NULL ? \
 	 (d)->cd_devs[u]->dv_private : NULL : NULL)
+
+/* upstream device_lookup(cfdriver, unit) returns the device shell (not
+ * the softc), NULL past cd_ndevs - the video(4)/audio(4) cdev entry
+ * points key off it */
+#define device_lookup(d, u) \
+	(((u) < (d)->cd_ndevs) ? (d)->cd_devs[u] : NULL)
+
+/* device_activity(9): nothing powers down here; DVA_SYSTEM is the only
+ * level the compiled set names */
+#define DVA_SYSTEM	0x01
+#define device_active(d, a)	((void) (d), (void) (a))
 
 /* ------------------------------------------------------------------
  * configuration data (ioconf.c shapes)
@@ -212,6 +227,7 @@ device_t config_found(device_t, void *, cfprint_t, const struct cfargs *);
 device_t config_attach(device_t, cfdata_t, void *, cfprint_t,
 	const struct cfargs *);
 int config_detach(device_t, int);
+int config_detach_children(device_t, int);
 int config_stdsubmatch(device_t, cfdata_t, const int *, void *);
 void config_defer(device_t, void (*)(device_t));
 void config_interrupts(device_t, void (*)(device_t));

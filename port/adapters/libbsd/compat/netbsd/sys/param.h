@@ -39,6 +39,17 @@
 #ifndef PAGE_SIZE
 #define PAGE_SIZE 4096
 #endif
+#define PAGE_SHIFT 12
+#define PAGE_MASK (PAGE_SIZE - 1)
+#ifndef atop
+#define atop(x)		((paddr_t) (x) >> PAGE_SHIFT)
+#define ptoa(x)		((paddr_t) (x) << PAGE_SHIFT)
+#endif
+
+/* the pinned tree is netbsd-11 (11.0_STABLE) */
+#ifndef __NetBSD_Version__
+#define __NetBSD_Version__ 1100000000
+#endif
 
 /* hz/mstohz live in kernel.h too; the imported drivers include only
  * param.h and call mstohz - identical definitions, so including both

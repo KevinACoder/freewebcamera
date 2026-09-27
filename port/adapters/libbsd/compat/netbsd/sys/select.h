@@ -10,17 +10,23 @@
 #include <sys/cdefs.h>
 #include <sys/types.h>
 
+struct knote;
+struct lwp;
+
 struct selinfo {
 	int unused;
 };
+
+void selinit(struct selinfo *);
+void selrecord(struct lwp *, struct selinfo *);
+void selnotify(struct selinfo *, int, long);
+void seldestroy(struct selinfo *);
 
 #include <sys/event.h>
 
 struct lwp;
 struct knote;
 
-void selrecord(struct lwp *selector, struct selinfo *sip);
-void selnotify(struct selinfo *sip, int events, long knoteflags);
 void selrecord_knote(struct selinfo *sip, struct knote *kn);
 void selremove_knote(struct selinfo *sip, struct knote *kn);
 

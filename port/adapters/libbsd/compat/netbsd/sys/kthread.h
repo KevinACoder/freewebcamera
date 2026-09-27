@@ -18,6 +18,13 @@ typedef int pri_t;
 #define PRI_NONE (-1)
 #endif
 
+/* the bio thread class (uvideo's frame-completion kthread).  This tree
+ * carries no sys/priority.h and the OSAL kthread_create ignores the
+ * priority, so the number is inert here - it only has to exist. */
+#ifndef PRI_BIO
+#define PRI_BIO 25
+#endif
+
 #define KTHREAD_MPSAFE		0x01
 #define KTHREAD_INTR		0x02
 #define KTHREAD_JOINABLE	0x04

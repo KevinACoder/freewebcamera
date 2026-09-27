@@ -32,6 +32,11 @@ int kprintf(const char *fmt, ...) __printflike(1, 2);
 #define aprint_debug kprintf
 
 #define NBBY 8
+
+/* the no-op statement the drivers' DPRINTF non-debug branch spells */
+#ifndef __nothing
+#define __nothing do { } while (0)
+#endif
 static inline void setbit(volatile unsigned char *p, unsigned int n) {
 	p[n / NBBY] |= (unsigned char) (1 << (n % NBBY));
 }

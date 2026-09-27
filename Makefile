@@ -55,6 +55,14 @@ WLAN_HAVE_USB  := $(if $(filter $(WLAN_NIC),urtwn all),1,0)
 WLAN_HAVE_PCIE := $(if $(filter $(WLAN_NIC),iwm all),1,0)
 WLAN_HAVE_SDIO := $(if $(filter $(WLAN_NIC),rtw8189f all),1,0)
 
+# UVC line (feat/libbsd_uvc): NetBSD uvideo (USB video class, isochronous)
+# behind the video(4) middle layer, both compiled straight from the
+# submodule tree; the adapter side is the cdev consumer shim (av_video.c)
+# and the shell command.  UVC=0 compiles the line out entirely (sources,
+# cfdrivers and cfentries are all guarded).  Switching UVC needs
+# `make clean` for the same stale-object reason as WLAN_NIC.
+UVC ?= 1
+
 # Debug-carrier optimization profile (D57): symbols plus near-no optimization,
 # so gdb's line table places breakpoints on addresses code actually reaches.
 # UC_OPT=-O0 reproduces the reference SDK's CONFIG_DEBUG_NOOPT exact-noopt shape.
@@ -72,6 +80,7 @@ CFLAGS := $(UC_OPT) -g3 -std=c11 -Wall -Wextra \
 	-march=armv8-a -mgeneral-regs-only -mstrict-align -mno-outline-atomics \
 	-DGUEST -DEL1 -DSMP_CORES=1 \
 	-DWLAN_NIC_USB=$(WLAN_HAVE_USB) -DWLAN_NIC_PCIE=$(WLAN_HAVE_PCIE) \
+	-DUVC_BUILD=$(UVC) \
 	-DTHREADX_BUILD=1 -DTHREADX_UP_BUILD=1 \
 	-DTX_INCLUDE_USER_DEFINE_FILE \
 	-DWLAN_NIC_USB=$(WLAN_HAVE_USB) -DWLAN_NIC_PCIE=$(WLAN_HAVE_PCIE) \
@@ -273,6 +282,12 @@ ifeq ($(WLAN_HAVE_SDIO),1)
 LIBBSD_BSD_SRCS     += $(LIBBSD_SDIO_BSD_SRCS)
 LIBBSD_IMPL_SRCS    += $(LIBBSD_SDIO_IMPL_SRCS)
 LIBBSD_ADAPTER_SRCS += $(LIBBSD_SDIO_ADAPTER_SRCS)
+endif
+ifeq ($(UVC),1)
+LIBBSD_BSD_SRCS     += third-party/libbsd/sys/dev/video.c \
+	third-party/libbsd/sys/dev/usb/uvideo.c
+LIBBSD_ADAPTER_SRCS += port/adapters/libbsd/av_video.c \
+	port/adapters/libbsd/uvc_cmds.c
 endif
 
 LIBBSD_INC := -Iinclude \
@@ -735,7 +750,7 @@ modules:
 		'/external/realtek/rtw8189f/' '/external/realtek/urtwn/' \
 		'/sys/arch/arm/include/' '/sys/crypto/aes/' '/sys/dev/hid/' \
 		'/sys/dev/ic/' '/sys/dev/pci/' '/sys/dev/sdmmc/' '/sys/dev/usb/' \
-		'/sys/fs/' '/sys/net80211/' || \
+		'/sys/fs/' '/sys/net80211/' '/sys/sys/videoio.h' || \
 		echo 'note: libbsd sparse-checkout not set (kept full checkout)'
 	git -C third-party/wpa_supplicant sparse-checkout set \
 		src wpa_supplicant || \

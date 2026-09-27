@@ -28,9 +28,11 @@
 #include <sys/types.h>
 #include <sys/device.h>
 #include <sys/errno.h>
+#include <sys/conf.h>
 #include <sys/kmem.h>
 #include <sys/kthread.h>
 #include <sys/mutex.h>
+#include <sys/pool.h>
 #include <sys/systm.h>
 #include <sys/tty.h>
 #include <sys/select.h>
@@ -149,6 +151,27 @@ struct cfdriver urtwn_cd = {
 
 #endif /* WLAN_NIC_USB */
 
+#if UVC_BUILD
+/* the UVC line: uvideo claims the video-control interface (usbifif) and
+ * hands each stream to the video(4) middle layer over videobus */
+static device_t uvideo_devs[2];
+static device_t video_devs[2];
+
+struct cfdriver uvideo_cd = {
+	.cd_devs = uvideo_devs,
+	.cd_name = "uvideo",
+	.cd_class = DV_DULL,
+	.cd_ndevs = 2,
+};
+
+struct cfdriver video_cd = {
+	.cd_devs = video_devs,
+	.cd_name = "video",
+	.cd_class = DV_DULL,
+	.cd_ndevs = 2,
+};
+#endif /* UVC_BUILD */
+
 #if WLAN_NIC_USB
 extern const struct cfattach usb_ca;
 extern const struct cfattach uroothub_ca;
@@ -196,6 +219,10 @@ void selinit(struct selinfo *sip) {
 	(void) sip;
 }
 
+void seldestroy(struct selinfo *sip) {
+	(void) sip;
+}
+
 void selrecord(struct lwp *l, struct selinfo *sip) {
 	(void) l; (void) sip;
 }
@@ -232,6 +259,34 @@ paddr_t nommap(dev_t dev, off_t pos, int flags) {
 	return 0;
 }
 
+int nokqfilter(dev_t dev, struct knote *kn) {
+	(void) dev; (void) kn;
+	return 1;	/* EINVAL upstream shape: kqueue is not served */
+}
+
+/* the video(4) detach path only; see compat sys/conf.h */
+devmajor_t cdevsw_lookup_major(const struct cdevsw *cdev) {
+	(void) cdev;
+	return 193;	/* the video major the native fork used */
+}
+
+void vdevgone(devmajor_t maj, int min1, int min2, int type) {
+	(void) maj; (void) min1; (void) min2; (void) type;
+}
+
+/* the pmap face is a shell: the port is identity-mapped (virtual ==
+ * physical - the whole bus_dma backend hands out and flushes raw
+ * addresses), so extraction is the identity and there is no map */
+pmap_t pmap_kernel(void) {
+	return NULL;
+}
+
+int pmap_extract(pmap_t pm, vaddr_t va, paddr_t *pap) {
+	(void) pm;
+	*pap = (paddr_t) va;
+	return 1;
+}
+
 /* ------------------------------------------------------------------
  * the cfdata table: (iattr gate, cfdata, cfdriver)
  */
@@ -266,6 +321,18 @@ static struct cfdata cfdata_urtwn = {
 };
 #endif /* WLAN_NIC_USB */
 
+#if UVC_BUILD
+static struct cfdata cfdata_uvideo = {
+	.cf_name = "uvideo", .cf_atname = "uvideo",
+	.cf_fstate = FSTATE_STAR, .cf_loc = dlocs_zero,
+};
+
+static struct cfdata cfdata_video = {
+	.cf_name = "video", .cf_atname = "video",
+	.cf_fstate = FSTATE_STAR, .cf_loc = dlocs_zero,
+};
+#endif /* UVC_BUILD */
+
 #if WLAN_NIC_PCIE
 /* the pcie endpoint: the native glue (pcie_glue.c) drives the DesignWare
  * host directly through include/pcie.h and config_founds only the radio
@@ -290,6 +357,13 @@ static struct cfentry cfentries[] = {
 	{ "usbroothubif", &cfdata_uroothub, &uroothub_cd },
 	{ "usbdevif", &cfdata_uhub, &uhub_cd },
 	{ "usbdevif", &cfdata_urtwn, &urtwn_cd },
+#endif
+#if UVC_BUILD
+	/* uvideo matches on the video-control interface class, the same
+	 * usbifif config_found usb_subr does per unclaimed interface */
+	{ "usbifif", &cfdata_uvideo, &uvideo_cd },
+	/* video_attach_mi config_founds the middle layer per stream */
+	{ "videobus", &cfdata_video, &video_cd },
 #endif
 #if WLAN_NIC_PCIE
 	{ "pci", &cfdata_iwm, &iwm_cd },
@@ -323,6 +397,7 @@ dev_alloc(struct cfdriver *cd, cfdata_t cf)
 	}
 	dev->dv_unit = unit;
 	dev->dv_cfdata = cf;
+	dev->dv_cd = cd;
 	snprintf(dev->dv_xname, sizeof(dev->dv_xname), "%s%d",
 	    cf->cf_name, unit);
 	cd->cd_devs[unit] = dev;
@@ -353,6 +428,22 @@ cfattach_lookup(const char *atname)
 		extern const struct cfattach iwm_ca;
 
 		return __DECONST(struct cfattach *, &iwm_ca);
+	}
+#endif
+#if UVC_BUILD
+	if (strcmp(atname, "uvideo") == 0) {
+		/* CFATTACH_DECL2_NEW(uvideo, ...) inside the verbatim
+		 * uvideo.c (compiled straight from the submodule tree) */
+		extern const struct cfattach uvideo_ca;
+
+		return __DECONST(struct cfattach *, &uvideo_ca);
+	}
+	if (strcmp(atname, "video") == 0) {
+		/* CFATTACH_DECL_NEW(video, ...) inside the verbatim
+		 * sys/dev/video.c middle layer */
+		extern const struct cfattach video_ca;
+
+		return __DECONST(struct cfattach *, &video_ca);
 	}
 #endif
 	return NULL;
@@ -483,6 +574,15 @@ config_attach(device_t parent, cfdata_t cf, void *aux, cfprint_t print,
 int
 config_detach(device_t dev, int flags)
 {
+	return 0;
+}
+
+/* the parent tracks no child list here; uvideo's detach path calls it
+ * to tear its video children down, but those die with the unit shell */
+int
+config_detach_children(device_t dev, int flags)
+{
+	(void) dev; (void) flags;
 	return 0;
 }
 
