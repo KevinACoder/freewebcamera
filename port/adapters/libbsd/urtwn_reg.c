@@ -60,7 +60,7 @@ void wlan_urtwn_chanmap_dump(void);
 
 /* the verbatim import compiled into this unit so its static glue
  * (CFATTACH_DECL_NEW tables) stays intact */
-#include "../../../third-party/net80211/sys/dev/usb/if_urtwn.c"
+#include "../../../third-party/libbsd/sys/dev/usb/if_urtwn.c"
 
 struct urtwn_softc *urtwn_reg_softc;
 

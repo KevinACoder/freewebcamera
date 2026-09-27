@@ -6,7 +6,7 @@
  * which stack runs, how many netifs exist and how they are fed live behind
  * this header in the adapter that implements it (the shell.h precedent).
  * Currently that is lwIP on the ThreadX/CMSIS twin, with the wlan netif
- * bridge from the net80211 adapter.
+ * bridge from the libbsd adapter.
  */
 
 #ifndef FREEWEBCAMERA_NET_H

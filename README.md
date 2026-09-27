@@ -3,7 +3,7 @@
 RK3568（E4AP5G1-ITX）上的 RTOS 综合工程：以"USB 摄像头 + 无线网卡 + 网络应用"
 这一真实组合为载体，验证板级 PCIe / USB / 无线外设在硬实时内核上的完整数据面。
 当前形态 = **Eclipse ThreadX 6.5.1（Cortex-A55 UP）** + CMSIS-RTOS2 抽象 +
-cherrysh 控制台 + gdb stub + NetBSD net80211/USB 主机栈（EHCI + xHCI 双主机）+
+cherrysh 控制台 + gdb stub + NetBSD libbsd（net80211/USB 主机栈，EHCI + xHCI 双主机）+
 lwIP + wpa_supplicant + netutils 工具族。
 
 BSD-2（自有代码）；第三方依赖全部为宽松许可（MIT / Apache-2.0 / BSD / ISC），
@@ -40,7 +40,7 @@ include/              接口头（CMSIS 标准 + 自补缺口：pcie.h/pci.h/msi
 port/
   aarch64/            CPU bring-up：startup/mmu/gicv3(+ITS/MSI)/tick/cache/gdb stub
   board/              板级链接脚本、平台坐标与寄存器真值
-  adapters/           组件适配层（ThreadX/CMSIS 桥、net80211、lwIP、wpa_supplicant、cherrysh）
+  adapters/           组件适配层（ThreadX/CMSIS 桥、libbsd（NetBSD 面）、lwIP、wpa_supplicant、cherrysh）
 third-party/          固定 pin 的 git submodule + vendored 目录
 patches/              对 submodule 上游的全部本地差异（真值源；经 make sync 物化）
 tools/                宿主侧工具（gdbinit.uc 等）

@@ -55,7 +55,7 @@ void wlan_iwm_scan_dump(void);
 
 /* the verbatim import compiled into this unit so its static glue
  * (CFATTACH_DECL_NEW tables) stays intact */
-#include "../../../third-party/net80211/sys/dev/pci/if_iwm.c"
+#include "../../../third-party/libbsd/sys/dev/pci/if_iwm.c"
 
 struct iwm_softc *iwm_reg_softc;
 

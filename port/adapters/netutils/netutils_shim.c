@@ -124,7 +124,7 @@ void netutils_shim_log(const char *level, const char *fmt, ...)
 /* --- heap ------------------------------------------------------------------ */
 
 /* The libc names resolve to the image's TLSF-backed malloc family (the
- * net80211 adapter's host-world libc unit provides them for the whole
+ * libbsd adapter's host-world libc unit provides them for the whole
  * image); no second allocator is created here - cross-freeing between the
  * netutils world and the rest of the tree must stay safe. */
 

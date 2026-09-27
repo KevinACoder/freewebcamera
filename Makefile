@@ -171,78 +171,78 @@ endif
 APP_SRCS := app/main.c app/dbg_scenario.c
 
 # --- net80211 + usb world (feat/net80211) -------------------------------------
-# The NetBSD import (third-party/net80211, see IMPORT-INFO.md) compiles in
+# The NetBSD import (third-party/libbsd, see IMPORT-INFO.md) compiles in
 # its own world: the compat shadow headers stand in for the NetBSD kernel
 # headers (compat first, so the shadows win over anything the sparse tree
 # carries), port_config_bsd.h force-includes the preamble, and the if_urtwn
-# driver compiles inside port/adapters/net80211/urtwn_reg.c so its static
+# driver compiles inside port/adapters/libbsd/urtwn_reg.c so its static
 # CFATTACH glue stays intact. The adapter impl units (bus_dma/autoconf/osal
 # backends) compile in the same world; the shell-facing adapter files compile
 # like any other adapter code.
 
-NET80211_BSD_SRCS := \
-	third-party/net80211/sys/net80211/ieee80211.c \
-	third-party/net80211/sys/net80211/ieee80211_amrr.c \
-	third-party/net80211/sys/net80211/ieee80211_crypto.c \
-	third-party/net80211/sys/net80211/ieee80211_crypto_ccmp.c \
-	third-party/net80211/sys/net80211/ieee80211_crypto_none.c \
-	third-party/net80211/sys/net80211/ieee80211_input.c \
-	third-party/net80211/sys/net80211/ieee80211_netbsd.c \
-	third-party/net80211/sys/net80211/ieee80211_node.c \
-	third-party/net80211/sys/net80211/ieee80211_output.c \
-	third-party/net80211/sys/net80211/ieee80211_proto.c \
-	third-party/net80211/sys/crypto/aes/aes_bear.c \
-	third-party/net80211/sys/crypto/aes/aes_ccm.c \
-	third-party/net80211/sys/crypto/aes/aes_ccm_mbuf.c \
-	third-party/net80211/sys/crypto/aes/aes_ct.c \
-	third-party/net80211/sys/crypto/aes/aes_ct_dec.c \
-	third-party/net80211/sys/crypto/aes/aes_ct_enc.c
+LIBBSD_BSD_SRCS := \
+	third-party/libbsd/sys/net80211/ieee80211.c \
+	third-party/libbsd/sys/net80211/ieee80211_amrr.c \
+	third-party/libbsd/sys/net80211/ieee80211_crypto.c \
+	third-party/libbsd/sys/net80211/ieee80211_crypto_ccmp.c \
+	third-party/libbsd/sys/net80211/ieee80211_crypto_none.c \
+	third-party/libbsd/sys/net80211/ieee80211_input.c \
+	third-party/libbsd/sys/net80211/ieee80211_netbsd.c \
+	third-party/libbsd/sys/net80211/ieee80211_node.c \
+	third-party/libbsd/sys/net80211/ieee80211_output.c \
+	third-party/libbsd/sys/net80211/ieee80211_proto.c \
+	third-party/libbsd/sys/crypto/aes/aes_bear.c \
+	third-party/libbsd/sys/crypto/aes/aes_ccm.c \
+	third-party/libbsd/sys/crypto/aes/aes_ccm_mbuf.c \
+	third-party/libbsd/sys/crypto/aes/aes_ct.c \
+	third-party/libbsd/sys/crypto/aes/aes_ct_dec.c \
+	third-party/libbsd/sys/crypto/aes/aes_ct_enc.c
 
 # The USB host stack (usbdi + hub + ehci/xhci): the urtwn line's bus.
-NET80211_USB_SRCS := \
-	third-party/net80211/sys/dev/usb/usbdi.c \
-	third-party/net80211/sys/dev/usb/usbdi_util.c \
-	third-party/net80211/sys/dev/usb/usb_mem.c \
-	third-party/net80211/sys/dev/usb/usb_subr.c \
-	third-party/net80211/sys/dev/usb/usb.c \
-	third-party/net80211/sys/dev/usb/usb_quirks.c \
-	third-party/net80211/sys/dev/usb/uhub.c \
-	third-party/net80211/sys/dev/usb/usbroothub.c \
-	third-party/net80211/sys/dev/usb/ehci.c \
-	third-party/net80211/sys/dev/usb/xhci.c
+LIBBSD_USB_SRCS := \
+	third-party/libbsd/sys/dev/usb/usbdi.c \
+	third-party/libbsd/sys/dev/usb/usbdi_util.c \
+	third-party/libbsd/sys/dev/usb/usb_mem.c \
+	third-party/libbsd/sys/dev/usb/usb_subr.c \
+	third-party/libbsd/sys/dev/usb/usb.c \
+	third-party/libbsd/sys/dev/usb/usb_quirks.c \
+	third-party/libbsd/sys/dev/usb/uhub.c \
+	third-party/libbsd/sys/dev/usb/usbroothub.c \
+	third-party/libbsd/sys/dev/usb/ehci.c \
+	third-party/libbsd/sys/dev/usb/xhci.c
 
 ifeq ($(WLAN_HAVE_USB),1)
-NET80211_BSD_SRCS += $(NET80211_USB_SRCS)
+LIBBSD_BSD_SRCS += $(LIBBSD_USB_SRCS)
 endif
 
-NET80211_IMPL_SRCS := \
-	port/adapters/net80211/aes_impl_compat.c \
-	port/adapters/net80211/bsd_bus.c \
-	port/adapters/net80211/bsd_autoconf.c \
-	port/adapters/net80211/bsd_kernhist.c \
-	port/adapters/net80211/bsd_subr_prf.c \
-	port/adapters/net80211/osal/osal_cmsis_rtos2.c \
-	port/adapters/net80211/osal/firmware_cmsis.c \
-	port/adapters/net80211/net/bsd_mbuf.c \
-	port/adapters/net80211/net/bsd_ifnet.c
+LIBBSD_IMPL_SRCS := \
+	port/adapters/libbsd/aes_impl_compat.c \
+	port/adapters/libbsd/bsd_bus.c \
+	port/adapters/libbsd/bsd_autoconf.c \
+	port/adapters/libbsd/bsd_kernhist.c \
+	port/adapters/libbsd/bsd_subr_prf.c \
+	port/adapters/libbsd/osal/osal_cmsis_rtos2.c \
+	port/adapters/libbsd/osal/firmware_cmsis.c \
+	port/adapters/libbsd/net/bsd_mbuf.c \
+	port/adapters/libbsd/net/bsd_ifnet.c
 
-NET80211_ADAPTER_SRCS := \
-	port/adapters/net80211/wlan_adapter.c \
-	port/adapters/net80211/wlan_console.c \
-	port/adapters/net80211/wlan_cmds.c
+LIBBSD_ADAPTER_SRCS := \
+	port/adapters/libbsd/wlan_adapter.c \
+	port/adapters/libbsd/wlan_console.c \
+	port/adapters/libbsd/wlan_cmds.c
 
 # One line, one driver TU set: the bus glue + platform + firmware blob of
 # each wireless line (the driver .c compiles inside the *_reg.c wrapper so
 # its static CFATTACH glue stays intact).
-NET80211_USB_ADAPTER_SRCS := \
-	port/adapters/net80211/usb_platform.c \
-	port/adapters/net80211/usb_xhci_platform.c \
-	port/adapters/net80211/fw_rtl8188eufw.c
+LIBBSD_USB_ADAPTER_SRCS := \
+	port/adapters/libbsd/usb_platform.c \
+	port/adapters/libbsd/usb_xhci_platform.c \
+	port/adapters/libbsd/fw_rtl8188eufw.c
 
-NET80211_PCIE_ADAPTER_SRCS := \
-	port/adapters/net80211/fw_iwlwifi7260.c \
-	port/adapters/net80211/iwm_reg.c \
-	port/adapters/net80211/pcie_glue.c
+LIBBSD_PCIE_ADAPTER_SRCS := \
+	port/adapters/libbsd/fw_iwlwifi7260.c \
+	port/adapters/libbsd/iwm_reg.c \
+	port/adapters/libbsd/pcie_glue.c
 
 # The SDIO line (feat/net80211_sdio): rtw8189f over the fsl_sdmmc stack.
 # The driver's transport/chip TUs compile in the frozen-import BSD world;
@@ -250,45 +250,45 @@ NET80211_PCIE_ADAPTER_SRCS := \
 # (sd/sdio_compat.c) join the adapter impl units; the claim layer (the
 # fsl_sdio ops binding + the explicit probe) and the firmware array join
 # the shell-facing adapter files.
-NET80211_SDIO_BSD_SRCS := \
-	third-party/net80211/sys/dev/sdmmc/rtw8189f_sdio.c \
-	third-party/net80211/sys/dev/sdmmc/rtw8189f_chip.c
+LIBBSD_SDIO_BSD_SRCS := \
+	third-party/libbsd/sys/dev/sdmmc/rtw8189f_sdio.c \
+	third-party/libbsd/sys/dev/sdmmc/rtw8189f_chip.c
 
-NET80211_SDIO_IMPL_SRCS := \
-	port/adapters/net80211/rtw8189f_reg.c \
-	port/adapters/net80211/sd/sdio_compat.c
+LIBBSD_SDIO_IMPL_SRCS := \
+	port/adapters/libbsd/rtw8189f_reg.c \
+	port/adapters/libbsd/sd/sdio_compat.c
 
-NET80211_SDIO_ADAPTER_SRCS := \
-	port/adapters/net80211/fw_rtw8189ffw.c \
-	port/adapters/net80211/wlan_sdio_claim.c
+LIBBSD_SDIO_ADAPTER_SRCS := \
+	port/adapters/libbsd/fw_rtw8189ffw.c \
+	port/adapters/libbsd/wlan_sdio_claim.c
 
 ifeq ($(WLAN_HAVE_USB),1)
-NET80211_IMPL_SRCS    += port/adapters/net80211/urtwn_reg.c
-NET80211_ADAPTER_SRCS += $(NET80211_USB_ADAPTER_SRCS)
+LIBBSD_IMPL_SRCS    += port/adapters/libbsd/urtwn_reg.c
+LIBBSD_ADAPTER_SRCS += $(LIBBSD_USB_ADAPTER_SRCS)
 endif
 ifeq ($(WLAN_HAVE_PCIE),1)
-NET80211_ADAPTER_SRCS += $(NET80211_PCIE_ADAPTER_SRCS)
+LIBBSD_ADAPTER_SRCS += $(LIBBSD_PCIE_ADAPTER_SRCS)
 endif
 ifeq ($(WLAN_HAVE_SDIO),1)
-NET80211_BSD_SRCS     += $(NET80211_SDIO_BSD_SRCS)
-NET80211_IMPL_SRCS    += $(NET80211_SDIO_IMPL_SRCS)
-NET80211_ADAPTER_SRCS += $(NET80211_SDIO_ADAPTER_SRCS)
+LIBBSD_BSD_SRCS     += $(LIBBSD_SDIO_BSD_SRCS)
+LIBBSD_IMPL_SRCS    += $(LIBBSD_SDIO_IMPL_SRCS)
+LIBBSD_ADAPTER_SRCS += $(LIBBSD_SDIO_ADAPTER_SRCS)
 endif
 
-NET80211_INC := -Iinclude \
-	-Iport/adapters/net80211/compat/netbsd \
-	-Ithird-party/net80211/sys \
-	-Ithird-party/net80211/sys/arch \
-	-Iport/adapters/net80211/osal \
-	-Iport/adapters/net80211/osal/compat \
-	-Iport/adapters/net80211 \
+LIBBSD_INC := -Iinclude \
+	-Iport/adapters/libbsd/compat/netbsd \
+	-Ithird-party/libbsd/sys \
+	-Ithird-party/libbsd/sys/arch \
+	-Iport/adapters/libbsd/osal \
+	-Iport/adapters/libbsd/osal/compat \
+	-Iport/adapters/libbsd \
 	-Ithird-party/tlsf
 
-NET80211_BSD_CFG := -D_KERNEL -D_KERNEL_OPT -DDIAGNOSTIC \
+LIBBSD_BSD_CFG := -D_KERNEL -D_KERNEL_OPT -DDIAGNOSTIC \
 	-DIWM_DEBUG \
 	-D_COMPAT_SYS_SYSCTL_H_ -include stdarg.h \
-	-DUSBHIST_SIZE=4096 -include port/adapters/net80211/compat/netbsd/opt_usb.h \
-	-include port/adapters/net80211/port_config_bsd.h
+	-DUSBHIST_SIZE=4096 -include port/adapters/libbsd/compat/netbsd/opt_usb.h \
+	-include port/adapters/libbsd/port_config_bsd.h
 # IWM_DEBUG compiles in iwm_nic_error()/iwm_nic_umac_error() and the
 # tx/rx-ring + 802.11-state dump that run on the fatal-firmware-error
 # interrupt (if_iwm.c iwm_softintr). Runtime traces behind it stay gated
@@ -306,7 +306,7 @@ NET80211_BSD_CFG := -D_KERNEL -D_KERNEL_OPT -DDIAGNOSTIC \
 # usb_dma.h meant usbdi.c compiled its DMA buffer path out
 # (NUSB_DMA == 0) and every device transfer got a stale buffer address.
 # NOTE: editing these flags does not invalidate $(OBJS); rm -rf
-# $(BUILD)/third-party/net80211 $(BUILD)/port/adapters/net80211 after a
+# $(BUILD)/third-party/libbsd $(BUILD)/port/adapters/libbsd after a
 # change.  Same for adding a header an existing .d file does not list.
 # DIAGNOSTIC is on for the bring-up rounds: upstream makes the KASSERT
 # family (and the xfer state it inspects - ux_state, ex_isdone) live only
@@ -317,7 +317,7 @@ NET80211_BSD_CFG := -D_KERNEL -D_KERNEL_OPT -DDIAGNOSTIC \
 # ehci xfer dumps).
 # the pinned upstream sources compile with warnings silenced (-w): they are
 # frozen imports, edited only through patches/
-NET80211_SUB_CFG := -w $(NET80211_BSD_CFG)
+LIBBSD_SUB_CFG := -w $(LIBBSD_BSD_CFG)
 
 # --- lwip + wlan netif bridge (feat/wpa_supplicant + feat/netutils) -------------
 # lwIP 2.2.1 (pinned submodule). The set follows upstream src/Filelists.mk for
@@ -369,7 +369,7 @@ LWIP_SRCS := \
 	third-party/lwip/src/api/sockets.c \
 	third-party/lwip/src/api/tcpip.c \
 	third-party/lwip/src/netif/ethernet.c \
-	port/adapters/net80211/lwip/lwip_netif.c \
+	port/adapters/libbsd/lwip/lwip_netif.c \
 	port/adapters/lwip/cmsis/sys_arch.c \
 	port/adapters/lwip/lwip_adapter.c \
 	port/adapters/lwip/lwip_diag.c \
@@ -378,7 +378,7 @@ LWIP_SRCS := \
 LWIP_INC := -Iport/adapters/lwip/include \
 	-Iport/adapters/lwip/cmsis/include \
 	-Ithird-party/lwip/src/include \
-	-Iport/adapters/net80211
+	-Iport/adapters/libbsd
 
 # --- netutils world (feat/netutils) --------------------------------------------
 # RT-Thread netutils, vendored (see third-party/netutils/PROVENANCE.md). The
@@ -535,14 +535,14 @@ ASM_SRCS := \
 # --- rules --------------------------------------------------------------------
 
 C_SRCS := $(KERNEL_SRCS) $(ARCH_SRCS) $(ADAPTER_SRCS) $(DRIVER_SRCS) $(BOARD_SRCS) $(APP_SRCS)
-NET80211_IMPL_OBJS := $(addprefix $(BUILD)/,$(NET80211_IMPL_SRCS:.c=.o))
-NET80211_ADAPTER_OBJS := $(addprefix $(BUILD)/,$(NET80211_ADAPTER_SRCS:.c=.o))
+LIBBSD_IMPL_OBJS := $(addprefix $(BUILD)/,$(LIBBSD_IMPL_SRCS:.c=.o))
+LIBBSD_ADAPTER_OBJS := $(addprefix $(BUILD)/,$(LIBBSD_ADAPTER_SRCS:.c=.o))
 LWIP_OBJS := $(addprefix $(BUILD)/,$(LWIP_SRCS:.c=.o))
 NETUTILS_OBJS := $(addprefix $(BUILD)/,$(NETUTILS_VENDORED_SRCS:.c=.o))
 WPA_OBJS := $(addprefix $(BUILD)/,$(WPA_CORE_SRCS:.c=.o) $(WPA_PORT_SRCS:.c=.o))
 OBJS := $(addprefix $(BUILD)/,$(C_SRCS:.c=.o)) $(addprefix $(BUILD)/,$(ASM_SRCS:.S=.o)) \
-	$(addprefix $(BUILD)/,$(NET80211_BSD_SRCS:.c=.o)) \
-	$(NET80211_IMPL_OBJS) $(NET80211_ADAPTER_OBJS) \
+	$(addprefix $(BUILD)/,$(LIBBSD_BSD_SRCS:.c=.o)) \
+	$(LIBBSD_IMPL_OBJS) $(LIBBSD_ADAPTER_OBJS) \
 	$(LWIP_OBJS) $(WPA_OBJS) $(NETUTILS_OBJS) $(SDMMC_OBJS)
 DEPS := $(OBJS:.o=.d)
 
@@ -554,24 +554,24 @@ $(BUILD)/third-party/%.o: third-party/%.c
 # The net80211 worlds: submodule sources (-w, frozen upstream) and the
 # adapter impl units compile against the compat shadows; the shell-facing
 # adapter files additionally see the standard adapter include path.
-$(BUILD)/third-party/net80211/%.o: third-party/net80211/%.c
+$(BUILD)/third-party/libbsd/%.o: third-party/libbsd/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(NET80211_INC) $(NET80211_SUB_CFG) -MMD -MP -c $< -o $@
+	$(CC) $(CFLAGS) $(LIBBSD_INC) $(LIBBSD_SUB_CFG) -MMD -MP -c $< -o $@
 
-$(NET80211_IMPL_OBJS): $(BUILD)/port/adapters/net80211/%.o: port/adapters/net80211/%.c
+$(LIBBSD_IMPL_OBJS): $(BUILD)/port/adapters/libbsd/%.o: port/adapters/libbsd/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(NET80211_INC) $(NET80211_BSD_CFG) -MMD -MP -c $< -o $@
+	$(CC) $(CFLAGS) $(LIBBSD_INC) $(LIBBSD_BSD_CFG) -MMD -MP -c $< -o $@
 
-$(NET80211_ADAPTER_OBJS): $(BUILD)/port/adapters/net80211/%.o: port/adapters/net80211/%.c
+$(LIBBSD_ADAPTER_OBJS): $(BUILD)/port/adapters/libbsd/%.o: port/adapters/libbsd/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(NET80211_INC) \
-		$(NET80211_BSD_CFG) -MMD -MP -c $< -o $@
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(LIBBSD_INC) \
+		$(LIBBSD_BSD_CFG) -MMD -MP -c $< -o $@
 
 # the SDIO claim layer additionally sees the fsl_sdio world (the fsl_sdio
 # API it binds the bus ops to, and the adapter's board header)
-$(BUILD)/port/adapters/net80211/wlan_sdio_claim.o: port/adapters/net80211/wlan_sdio_claim.c
+$(BUILD)/port/adapters/libbsd/wlan_sdio_claim.o: port/adapters/libbsd/wlan_sdio_claim.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(NET80211_INC) \
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(LIBBSD_INC) \
 		$(SDMMC_INC) -MMD -MP -c $< -o $@
 
 # fsl_sdmmc protocol layer: frozen NXP import, warnings silenced (-w); the
@@ -633,12 +633,12 @@ $(BUILD)/port/adapters/wpa_supplicant/%.o: port/adapters/wpa_supplicant/%.c
 
 $(BUILD)/port/adapters/wpa_supplicant/driver_net80211.o: port/adapters/wpa_supplicant/driver_net80211.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(NET80211_INC) $(NET80211_BSD_CFG) \
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(LIBBSD_INC) $(LIBBSD_BSD_CFG) \
 		$(WPA_INC) $(WPA_CFG) -MMD -MP -c $< -o $@
 
 $(BUILD)/port/adapters/wpa_supplicant/l2_packet_net80211.o: port/adapters/wpa_supplicant/l2_packet_net80211.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(NET80211_INC) $(NET80211_BSD_CFG) \
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(LIBBSD_INC) $(LIBBSD_BSD_CFG) \
 		$(WPA_INC) $(WPA_CFG) -MMD -MP -c $< -o $@
 
 # The rules below deliberately omit INC_ADAPTER.
@@ -710,24 +710,33 @@ deploy: $(TARGET).bin
 # Submodules + patches (policy: IMPORT-INFO.md and patches/README.md).
 # Idempotent: a patch that no longer applies cleanly is reported and kept.
 #
-# third-party/net80211 records a local-path URL (the rk3568_lab NetBSD src
-# checkout), so the file:// protocol must be allowed for the whole invocation
-# (-c beats any stale local config ordering problem on a fresh clone).
-# Its working tree is kept sparse (the net80211 + usb + urtwn subset instead
-# of the full ~7 GB src tree); sparse-checkout only rewrites the submodule's
-# working tree, the recorded gitlink is untouched. Cone mode takes directory
-# paths only - a file path (sys/fs/unicode.h) fails the whole "set" and a
-# fresh clone silently keeps the full tree, where the imported sys/sys/
+# third-party/sdmmc still records a local-path URL, so the file:// protocol
+# must be allowed for the whole invocation (-c beats any stale local config
+# ordering problem on a fresh clone). third-party/libbsd records the fork
+# URL (git@github.com:KevinACoder/netbsd-src.git); its fwc/libbsd branch is
+# pushed there, so the recorded gitlink resolves from the recorded URL.
+# The libbsd working tree is kept sparse (the net80211 + usb + urtwn subset
+# instead of the full ~7 GB src tree); sparse-checkout only rewrites the
+# submodule's working tree, the recorded gitlink is untouched. Non-cone
+# patterns on purpose: cone mode cannot express "files directly inside
+# sys/dev" (video.c, audio.c, auconv.c - the video/audio middle layer the
+# UVC line compiles), and a file path (sys/fs/unicode.h) fails a cone "set"
+# so a fresh clone silently keeps the full tree, where the imported sys/sys/
 # headers shadow the compat/netbsd ones and the build breaks. The set below
 # is the shape the checked-out lanes actually build with.
 modules:
 	git -c protocol.file.allow=always submodule update --init --recursive
-	git -C third-party/net80211 sparse-checkout set \
-		sys/net80211 sys/dev/usb sys/dev/ic sys/dev/hid sys/crypto/aes \
-		sys/fs external/realtek/urtwn \
-		sys/dev/pci sys/arch/arm/include \
-		sys/dev/sdmmc external/realtek/rtw8189f || \
-		echo 'note: net80211 sparse-checkout not set (kept full checkout)'
+	git -C third-party/libbsd sparse-checkout set --no-cone \
+		'/*' '!/*/' \
+		'/external/' '!/external/*/' '/external/realtek/' '!/external/realtek/*/' \
+		'/sys/' '!/sys/*/' '/sys/arch/' '!/sys/arch/*/' \
+		'/sys/arch/arm/' '!/sys/arch/arm/*/' \
+		'/sys/crypto/' '!/sys/crypto/*/' '/sys/dev/' '!/sys/dev/*/' \
+		'/external/realtek/rtw8189f/' '/external/realtek/urtwn/' \
+		'/sys/arch/arm/include/' '/sys/crypto/aes/' '/sys/dev/hid/' \
+		'/sys/dev/ic/' '/sys/dev/pci/' '/sys/dev/sdmmc/' '/sys/dev/usb/' \
+		'/sys/fs/' '/sys/net80211/' || \
+		echo 'note: libbsd sparse-checkout not set (kept full checkout)'
 	git -C third-party/wpa_supplicant sparse-checkout set \
 		src wpa_supplicant || \
 		echo 'note: wpa_supplicant sparse-checkout not set (kept full checkout)'
@@ -755,9 +764,12 @@ modules:
 # a commit on branch fwc/<component> so the parent repo's final status is
 # clean (no "modified content").  patches/<component>/ stays the source of
 # truth: the fwc commit is the mechanical application of those patches on
-# top of the pin, and its parent IS the pin.  Never pushed to the submodule's
-# origin.  Run after changing patches or bumping a pin, then include the
-# staged gitlink bump in the round's parent commit.
+# top of the pin, and its parent IS the pin.  Upstream-origin submodules
+# (threadx/cherrysh/wpa_supplicant) never get their fwc branch pushed;
+# third-party/libbsd is the exception - fwc/libbsd is pushed to the fork
+# (git@github.com:KevinACoder/netbsd-src.git) so the recorded gitlink stays
+# resolvable from the recorded URL.  Run after changing patches or bumping a
+# pin, then include the staged gitlink bump in the round's parent commit.
 sync: modules
 	@for comp in $$(ls -d patches/*/ 2>/dev/null | xargs -n1 basename); do \
 		[ -d third-party/$$comp ] || { echo "skip    $$comp (no submodule)"; continue; }; \

@@ -44,15 +44,15 @@ for dir in app drivers port/board; do
     fi
 done
 
-# third-party/ must not depend on us. The net80211 and wpa_supplicant
+# third-party/ must not depend on us. The libbsd and wpa_supplicant
 # trees are excluded from this one rule: they are self-contained
 # libraries whose own internal layout uses the same directory names
 # (hostap's "drivers/driver.h" is its own src/drivers/, not our
-# drivers/ layer; net80211's quoted "port/..." includes resolve inside
+# drivers/ layer; libbsd's quoted "port/..." includes resolve inside
 # the vendored tree). Everything else stays under the rule.
 if [ -d "$root/third-party" ]; then
     hits=$(grep -rnE '#include.*"(hal|include|port|app|drivers)/' "$root/third-party" 2>/dev/null \
-        | grep -vE 'third-party/(net80211|wpa_supplicant)/' | head -20)
+        | grep -vE 'third-party/(libbsd|wpa_supplicant)/' | head -20)
     if [ -z "$hits" ]; then
         say_ok 'third-party/ does not include project headers'
     else

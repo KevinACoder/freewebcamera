@@ -59,7 +59,7 @@ int wlan_port_get_hwaddr_rtw8189f(uint8_t addr[6]);
 
 /* the verbatim import compiled into this unit so its static glue
  * (CFATTACH_DECL_NEW tables and the static attach path) stays intact */
-#include "../../../third-party/net80211/sys/dev/sdmmc/if_rtw8189f.c"
+#include "../../../third-party/libbsd/sys/dev/sdmmc/if_rtw8189f.c"
 
 static const struct wlan_sdio_id rtw8189f_sdio_ids[] = {
 	{ 0x024c, 0xf179 }, /* RTL8189FTV */

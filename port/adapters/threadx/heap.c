@@ -8,7 +8,7 @@
  * TLSF allocator (third-party/tlsf, O(1) malloc/free/memalign, BSD-2)
  * managing one static region, exported under the pvPortMalloc/vPortFree
  * names the in-tree consumers already call (thread stacks in
- * cmsis_os2_impl.c, the net80211 adapter, the sdmmc OSA layer).
+ * cmsis_os2_impl.c, the libbsd adapter, the sdmmc OSA layer).
  *
  * TLSF is not thread safe (its README says so); every entry point takes
  * _tx_thread_smp_protect/_unprotect - the primitive the kernel's own

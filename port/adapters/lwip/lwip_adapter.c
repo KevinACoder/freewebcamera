@@ -6,7 +6,7 @@
  *
  * Implements include/net.h (the interface-layer seam). There is no wired
  * ethernet on this trunk: the only netif is the wlan bridge, which lives in
- * the net80211 adapter (port/adapters/net80211/lwip/lwip_netif.c) next to
+ * the libbsd adapter (port/adapters/libbsd/lwip/lwip_netif.c) next to
  * the port hooks it consumes. Everything this file does is ordering:
  *
  *   1. arm the lwIP diag sink (console is up by the time a task runs),

@@ -9,7 +9,7 @@
  *
  *   rt_tick_get          -> tx_time_get          (tick == 1 ms, 1:1)
  *   rt_malloc/free/...   -> the image's libc malloc family (TLSF-backed;
- *                           provided by the net80211 adapter's host-world
+ *                           provided by the libbsd adapter's host-world
  *                           libc unit under the standard names)
  *   rt_kprintf           -> mpaland/printf via minilibc, routed per session
  *                           (netutils_shim.c; unbound sessions go to the

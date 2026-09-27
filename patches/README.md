@@ -32,7 +32,7 @@ Rules:
 
 Current state:
 
-- `net80211/` — five patches against the netbsd-11 pin (all local
+- `libbsd/` — fifteen patches against the netbsd-11 pin (all local
   deviations the port needs, registered in `IMPORT-INFO.md`):
   - `0001-compile-out-the-sysctl-tree.patch` — the sysctl configuration
     tree compiles out (`IEEE80211_PORT_NO_SYSCTL`); attach/detach keep
@@ -57,7 +57,7 @@ Current state:
     `XHCI_DEBUG_DEFAULT` (same treatment as ehci's debug level) instead of
     a hard 0, so the xHCI debug verbosity is compile-time configurable via
     the compat `opt_usb.h` (introduced with the xHCI line).
-  - `0007-iwm-rx-rearm-slot-before-early-returns.patch` — `iwm_rx_rx_mpdu()`
+  - `0006-iwm-rx-rearm-slot-before-early-returns.patch` — `iwm_rx_rx_mpdu()`
     re-points the ring slot's mbuf at the frame *before* its two early
     returns (bad phy-info, bad CRC/overrun), so any dropped frame used to
     leave the slot poisoned: the RBD keeps the buffer's original address
@@ -71,13 +71,13 @@ Current state:
     re-arm restores the slot's DMA view before dropping the frame.  Board
     evidence: flood gone, no KASSERT/crash, WPA2 association succeeds
     (evidence 20260926-feat-net80211_refine).
-  - `0008-iwm-throttle-unhandled-response-print.patch` — the `default:` of
+  - `0007-iwm-throttle-unhandled-response-print.patch` — the `default:` of
     `iwm_notif_intr()`'s response switch printed unconditionally; one
     corrupted ring slot is re-read on every wrap, so it buried the console
     at tens of lines per second.  First 8 lines, then one per thousand,
     each carrying an `n=` counter (same intent as 0003: keep the
     diagnostic, lose the flood).
-  - `0009-iwm-throttle-hcmd-ring-race-prints.patch` — `iwm_cmd_done()`'s
+  - `0008-iwm-throttle-hcmd-ring-race-prints.patch` — `iwm_cmd_done()`'s
     two ring-bookkeeping complaints (`Some HCMDs skipped?`, `cmd_done with
     empty ring`) print once per affected completion, i.e. per frame while a
     submitter and the completion path interleave on `ring->cur/queued`.
@@ -86,6 +86,12 @@ Current state:
     serialization defect — splnet is wired to the port serializer and the
     softint worker runs its handlers under it — so the count going to zero
     is the acceptance signal).
+  - `0009-rtw8189f-sdio-intr-and-be-queue-from-m11.patch` — the SDIO
+    variant of the RTL8189FTV driver: wires the DAT1 card interrupt
+    (in-band SDIO interrupt, the SDIO line's only async upcall) and takes
+    the BE-queue shaping the frozen workspace's m11 line debugged.  The
+    SDIO round (feat/net80211_sdio) landed it without a README entry;
+    registered here since the renumbering pass.
   - `0010-iwm-rx-pipeline-counters.patch` — the RX pipeline is only
     observable through counters (the interrupt can keep arriving while
     nothing reaches net80211): notif calls, ring entries, delivered
