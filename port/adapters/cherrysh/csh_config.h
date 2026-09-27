@@ -63,8 +63,10 @@
 /*!< xterm support: off, the console is a plain line-oriented serial link */
 #define CONFIG_CSH_XTERM 0
 
-/*!< newline */
-#define CONFIG_CSH_NEWLINE "\r\n"
+/*!< newline: '\n' only - the console sink owns the CRLF expansion
+ *   (AGENTS.md "打印纪律"). The vendored shell pastes this macro into its own
+ *   strings, so a '\r\n' here would reach the wire as CR CR LF. */
+#define CONFIG_CSH_NEWLINE "\n"
 
 /*!< tab space count */
 #define CONFIG_CSH_SPACE 4

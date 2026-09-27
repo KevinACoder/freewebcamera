@@ -81,28 +81,43 @@ void board_main(void);
 
 /* --- early output --------------------------------------------------------- */
 
-/* Project log convention (NetBSD dmesg shape): one line, one stamp,
- * "module: message". Every line through board_early_print / board_log is
- * prefixed "[   s.mmm] " - boot-relative seconds from CNTVCT, captured at
- * the first stamped print - and names its module in the message ("uart: ...",
- * "smp: ...", "fatal: ..."). The shell's interactive echo/response stays on
- * the CMSIS console driver and is not stamped; the two sinks may interleave
- * on the wire, which is cosmetic.
+/* PRINT DISCIPLINE (the rule; full text in AGENTS.md):
  *
- * board_early_print / board_log write on the POLLED early UART
- * (startup.S's uart_early_puts) under a per-line spinlock. They never block
- * and are safe from any task context, on any core. */
+ *   1. Every non-interactive line: `[%4u.%03u] module: message` - one line,
+ *      one stamp, produced by the sink, never hand-written in the message.
+ *   2. Messages use '\n' only. The sink owns CRLF; a '\r' in a message is
+ *      dropped. No blank lines: a '\n' with nothing pending is ignored.
+ *   3. Modules are named in lowercase and the name appears once per line
+ *      ("urtwn0: ..."). The attach pair ("urtwn0 at usb0" / "urtwn0: ...")
+ *      comes from the autoconf, not from hand-printing the name twice.
+ *   4. Interactive output (prompt, echo, redraws) does NOT go through the
+ *      stamped sink: use board_console_write_raw() so it stays byte-exact
+ *      and still cannot land inside a log line.
+ *   5. The stamped sink ASSEMBLES lines: a message without a trailing '\n'
+ *      continues the next one (how the imported BSD autoconf prints
+ *      "uhub1 at usb0" + "\n" + ": vendor ..."). Callers that want one line
+ *      end it with '\n'.
+ *
+ * The sink is the POLLED early UART (startup.S's uart_early_puts) under a
+ * per-line spinlock: never blocks, safe from any task context, on any core. */
 void board_early_print(const char *message);
 
-/* Unstamped but LOCKED write on the same polled UART: the sink for console
- * frontends that must not garble against board_early_print (the net80211
- * world's printf used to drive the CMSIS USART driver on a different lock
- * domain, and attach-time prints shredded fault dumps mid-line). */
+/* The stamped assembler: buffered lines, CRLF-normalised, one stamp per
+ * line. This is the sink port/adapters/libbsd/wlan_console.c routes the BSD
+ * world's printf into, so driver attach output and board_log output share
+ * one shape. */
 void board_console_write(const char *message);
+
+/* Interactive output: raw bytes on the same UART under the same lock, but
+ * unstamped and NOT line-assembled (ANSI redraws must reach the wire
+ * verbatim). A pending logged line is closed first, so the prompt appears
+ * after it, never inside it. */
+void board_console_write_raw(const char *data, unsigned int len);
 
 /* Same sink, formatted. Drivers that report what they found (register
  * versions, PHY ids, negotiated link speed) use this instead of each carrying
- * its own formatter. One line per call; not for per-packet output. */
+ * its own formatter. One line per call (a missing trailing '\n' is repaired);
+ * not for per-packet output. */
 void board_log(const char *fmt, ...);
 
 /* gdb-session console gate (D56). While a stub session is live, the locked

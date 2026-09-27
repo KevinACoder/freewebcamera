@@ -216,12 +216,99 @@ static void print_lock_give(uint64_t saved_daif)
 	__asm__ __volatile__("msr daif, %0" ::"r"(saved_daif) : "memory");
 }
 
-/* Line-ending normalisation for the stamped sinks. Vendored components log
- * in their own house style and the shadow mappings append their own tail:
- * fsl_sdmmc's SDMMC_LOG fmts carry "\r\n" while the shadow adds "\n" (so a
- * single entry would hit the wire as "\n\n" - a blank line per log line),
- * CherryUSB appends "\r\n", and the CR itself reads as a line break on
- * terminals that count CR. Rule: CRs are dropped, and a second '\n'
+/* --- the stamped line sink -------------------------------------------------
+ *
+ * Print discipline (see AGENTS.md, "打印纪律"): one line, one stamp, one CRLF.
+ *
+ * The sink ASSEMBLES lines rather than writing each call straight through,
+ * because the vendored worlds print one logical line in several calls: the
+ * NetBSD autoconf prints "uhub1 at usb0" with no terminator, the driver's
+ * attach then prints "\n" and ": vendor ...".  Per-fragment writes put those
+ * pieces on the wire as separate lines, with a blank line wherever a
+ * terminator landed on an already-terminated buffer - the exact mess the
+ * uhub/urtwn/uvideo attach sequence showed.  One shared buffer fixes the
+ * whole family:
+ *
+ *   - a '\n' ends the line: stamp + text + CRLF, exactly once;
+ *   - a '\n' with nothing pending is dropped            (no blank lines);
+ *   - '\r' is dropped: the sink owns CRLF, callers write '\n' only;
+ *   - a line longer than the buffer is split, never dropped.
+ *
+ * Everything non-interactive lands here - the project's board_log, the BSD
+ * world's printf (port/adapters/libbsd/wlan_console.c), the netutils and
+ * lwIP diagnostics - so every driver line carries the same "[   s.mmm] "
+ * shape instead of a mix of stamped and bare lines.
+ *
+ * The shell's own output (prompt, echo, command redraws) does NOT go through
+ * here: it is conversational, unstamped, and carries ANSI escapes that must
+ * reach the wire byte-for-byte.  It shares this file's lock instead
+ * (board_console_write_raw), which is what stops a prompt from being printed
+ * into the middle of a driver line.
+ */
+
+#define CONSOLE_LINE_MAX 256u
+static char console_line[CONSOLE_LINE_MAX];
+static unsigned int console_len;
+
+/* Emit the pending line, stamped. Caller holds the print lock (or is the
+ * raw ISR path, which accepts interleaving by contract). */
+static void console_line_flush(void)
+{
+	char ts[BOARD_TS_STAMP_LEN];
+
+	if (console_len == 0u) {
+		return;
+	}
+	console_line[console_len] = '\0';
+	if (board_console_muted()) {
+		gate_suppressed += (unsigned long)console_len + 1U;
+		console_len = 0u;
+		return;
+	}
+	(void)board_uptime_stamp(ts);
+	uart_early_puts(ts);
+	uart_early_puts(console_line);
+	/* '\n' only: the polled writer expands it to CRLF (drivers/uart_ns16550.c
+	 * polled_putc). Writing "\r\n" here reaches the wire as CR CR LF, and a
+	 * parser that counts the bare CR reports a blank line after every
+	 * stamped line - measured on the board relay, 2026-09-28. */
+	uart_early_puts("\n");
+	console_len = 0u;
+}
+
+/* Append a message, terminating lines as they complete. Lock-holding wrapper. */
+static void console_feed(const char *s)
+{
+	uint64_t saved_daif;
+
+	if (s == NULL) {
+		return;
+	}
+
+	print_lock_take(&saved_daif);
+	for (; *s != '\0'; s++) {
+		if (*s == '\r') {
+			continue;
+		}
+		if (*s == '\n') {
+			console_line_flush();
+			continue;
+		}
+		if (console_len == CONSOLE_LINE_MAX - 1u) {
+			console_line_flush();	/* overlong: split, do not drop */
+		}
+		console_line[console_len++] = *s;
+	}
+	print_lock_give(saved_daif);
+}
+
+/* Line-ending normalisation for board_early_print / _raw, which write whole
+ * messages (possibly several lines) straight out with one stamp. Vendored
+ * components log in their own house style and the shadow mappings append
+ * their own tail: fsl_sdmmc's SDMMC_LOG fmts carry "\r\n" while the shadow
+ * adds "\n" (so a single entry would hit the wire as "\n\n" - a blank line
+ * per log line), CherryUSB appends "\r\n", and the CR itself reads as a line
+ * break on terminals that count CR. Rule: CRs are dropped, and a second '\n'
  * directly after one already emitted is dropped too - every entry ends as
  * exactly one "\r\n" on the wire, fragment-style logs (no trailing
  * newline) still concatenate, and nothing else changes. */
@@ -251,19 +338,46 @@ void board_early_print(const char *message)
 		return;
 	}
 
-	(void)board_uptime_stamp(ts);
 	print_lock_take(&saved_daif);
+	/* a fragment left pending by the assembler would otherwise be glued to
+	 * this call's text - close it first (the assembler holds fragments
+	 * across calls by design, the raw sinks do not) */
+	console_line_flush();
+	(void)board_uptime_stamp(ts);
 	uart_early_puts(ts);
 	puts_strip_cr(message);
 	print_lock_give(saved_daif);
 }
 
+/* The BSD world's printf and every other non-interactive writer: assembled
+ * into stamped lines. See the block comment above. */
 void board_console_write(const char *message)
 {
+	console_feed(message);
+}
+
+/* The shell's own output: raw bytes (ANSI escapes and all), unstamped, but
+ * under the same print lock so an interactive redraw cannot land in the
+ * middle of a driver line.  A '\r' directly before '\n' is dropped - the
+ * polled writer expands '\n' to CRLF itself, and the shell's strings carry
+ * "\r\n", which would otherwise reach the wire as CR CR LF. */
+void board_console_write_raw(const char *data, unsigned int len)
+{
 	uint64_t saved_daif;
+	unsigned int i;
+
+	if (data == NULL) {
+		return;
+	}
 
 	print_lock_take(&saved_daif);
-	puts_strip_cr(message);
+	console_line_flush();
+	for (i = 0U; i < len; i++) {
+		if (data[i] == '\r' && (i + 1U) < len && data[i + 1U] == '\n') {
+			continue;
+		}
+		uart_early_putc(data[i]);
+	}
 	print_lock_give(saved_daif);
 }
 
@@ -277,6 +391,7 @@ void board_early_print_raw(const char *message)
 {
 	char ts[BOARD_TS_STAMP_LEN];
 
+	console_line_flush();
 	(void)board_uptime_stamp(ts);
 	uart_early_puts(ts);
 	puts_strip_cr(message);
@@ -284,47 +399,40 @@ void board_early_print_raw(const char *message)
 
 /* Same sink, with numbers: drivers that report what they found (register
  * versions, PHY ids, negotiated speed) would otherwise each carry their own
- * formatter. The stamp is composed first so the message budget shrinks by
- * its length. The buffer is deliberately small - this is bring-up output on
- * a polled 115200 console, not a logging system, and a driver that wants to
- * print per packet has picked the wrong mechanism. */
+ * formatter. The stamp is composed at flush time by the assembler, so the
+ * whole 128-byte budget goes to the message. One line per call: a missing
+ * '\n' in fmt is repaired here rather than allowed to glue the next line
+ * onto this one (measured on the trunk: "gicv3: frame0 typer ...21[ 0.015]
+ * uart: ..." - one string, two stamps). The buffer is deliberately small -
+ * this is bring-up output on a polled 115200 console, not a logging system,
+ * and a driver that wants to print per packet has picked the wrong
+ * mechanism. */
 void board_log(const char *fmt, ...)
 {
 	char line[128];
 	va_list ap;
-	uint64_t saved_daif;
-	int off;
-	int i;
-	int out;
+	unsigned int n;
 
-	off = board_uptime_stamp(line);
 	va_start(ap, fmt);
-	(void)vsnprintf(line + off, sizeof(line) - (size_t)off, fmt, ap);
+	(void)vsnprintf(line, sizeof(line), fmt, ap);
 	va_end(ap);
 
-	/* Line-ending normalisation - see puts_strip_cr: drop CRs, collapse
-	 * consecutive newlines (the shadow's "\n" plus fsl_sdmmc's own
-	 * "\r\n" would otherwise emit a blank line after every entry). */
-	for (i = off, out = off; line[i] != '\0'; i++) {
-		if (line[i] == '\r') {
-			continue;
-		}
-		if (line[i] == '\n' && out > off && line[out - 1] == '\n') {
-			continue;
-		}
-		line[out++] = line[i];
+	n = 0u;
+	while (line[n] != '\0' && n < sizeof(line) - 1u) {
+		n++;
 	}
-	line[out] = '\0';
-
-	if (board_console_muted()) {
-		gate_suppressed += (unsigned long)out + 1U;
-		return;
+	if (n == 0u || line[n - 1u] != '\n') {
+		if (n < sizeof(line) - 2u) {
+			line[n++] = '\n';
+		} else {
+			line[n - 1u] = '\n';
+		}
+		line[n] = '\0';
 	}
 
-	print_lock_take(&saved_daif);
-	uart_early_puts(line);
-	print_lock_give(saved_daif);
+	console_feed(line);
 }
+
 
 /* --- gdb-session console gate (D56) --------------------------------------- *
  *

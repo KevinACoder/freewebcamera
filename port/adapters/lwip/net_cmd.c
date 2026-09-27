@@ -35,7 +35,7 @@ static int cmd_net(int argc, char **argv)
 
 	if (nif == NULL) {
 		csh_printf(csh, "net: no netif registered "
-			   "(stack not started?)\r\n");
+			   "(stack not started?)\n");
 		return 0;
 	}
 
@@ -47,7 +47,7 @@ static int cmd_net(int argc, char **argv)
 	(void)ip4addr_ntoa_r(mask, maskstr, sizeof(maskstr));
 
 	csh_printf(csh, "net wl%d hwaddr=%02x:%02x:%02x:%02x:%02x:%02x "
-		   "mtu=%d %s%s%s ip %s gw %s mask %s\r\n",
+		   "mtu=%d %s%s%s ip %s gw %s mask %s\n",
 		   nif->num,
 		   nif->hwaddr[0], nif->hwaddr[1], nif->hwaddr[2],
 		   nif->hwaddr[3], nif->hwaddr[4], nif->hwaddr[5],

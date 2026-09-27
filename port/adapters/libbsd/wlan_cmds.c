@@ -98,14 +98,14 @@ static int cmd_wlan(int argc, char **argv)
 		extern int wlan_adapter_ready(void);
 
 		if (wlan_adapter_ready()) {
-			csh_printf(csh, "wlan: already started\r\n");
+			csh_printf(csh, "wlan: already started\n");
 			return 0;
 		}
-		csh_printf(csh, "wlan: usb platform + enumeration...\r\n");
+		csh_printf(csh, "wlan: usb platform + enumeration...\n");
 		if (wlan_start() != 0) {
-			csh_printf(csh, "wlan: start failed\r\n");
+			csh_printf(csh, "wlan: start failed\n");
 		} else {
-			csh_printf(csh, "wlan: started\r\n");
+			csh_printf(csh, "wlan: started\n");
 		}
 		return 0;
 	}
@@ -123,17 +123,17 @@ static int cmd_wlan(int argc, char **argv)
 		uint8_t mac[6];
 
 		if (name != NULL && wlan_port_get_hwaddr(mac) == 0) {
-			csh_printf(csh, "wlan selected=%s mac=%02x:%02x:%02x:%02x:%02x:%02x\r\n",
+			csh_printf(csh, "wlan selected=%s mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
 			    name, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 		} else {
 			csh_printf(csh, "wlan: no adapter registered yet "
-				   "(run: wlan start)\r\n");
+				   "(run: wlan start)\n");
 		}
 		/* The wireless RX rings are the largest single consumer of the
 		 * system heap (iwm's 256 mbuf+cluster slots are ~1.1 MB of 4 MB),
 		 * so a driver that leaks a buffer per event shows up here first:
 		 * free bytes only ever drops. */
-		csh_printf(csh, "heap free=%lu B\r\n",
+		csh_printf(csh, "heap free=%lu B\n",
 		    (unsigned long) xPortGetFreeHeapSize());
 		wlan_port_status_dump();
 #if CONFIG_BUS_USB
@@ -152,13 +152,13 @@ static int cmd_wlan(int argc, char **argv)
 			wait_s = 1;
 		}
 		if (wlan_port_up() != 0) {
-			csh_printf(csh, "wlan: radio not up\r\n");
+			csh_printf(csh, "wlan: radio not up\n");
 			return 0;
 		}
 		wlan_port_scan(NULL, 0);
-		csh_printf(csh, "wlan: scanning for %d s...\r\n", wait_s);
+		csh_printf(csh, "wlan: scanning for %d s...\n", wait_s);
 		osDelay((uint32_t) wait_s * osKernelGetTickFreq());
-		csh_printf(csh, "wlan: scan results:\r\n");
+		csh_printf(csh, "wlan: scan results:\n");
 		wlan_port_scan_dump();
 		return 0;
 	}
@@ -220,10 +220,10 @@ static int cmd_wlan(int argc, char **argv)
 		if (argc >= 4 && strcmp(argv[2], "read") == 0) {
 			addr = parse_hex(argv[3]);
 			if (wlan_urtwn_reg_read((unsigned) addr, &val) == 0) {
-				csh_printf(csh, "urtwn reg[0x%04lx] = 0x%08x\r\n",
+				csh_printf(csh, "urtwn reg[0x%04lx] = 0x%08x\n",
 					   addr & 0xfffful, val);
 			} else {
-				csh_printf(csh, "wlan: reg read failed\r\n");
+				csh_printf(csh, "wlan: reg read failed\n");
 			}
 			return 0;
 		}
@@ -231,14 +231,14 @@ static int cmd_wlan(int argc, char **argv)
 			addr = parse_hex(argv[3]);
 			val = (unsigned) parse_hex(argv[4]);
 			if (wlan_urtwn_reg_write((unsigned) addr, val) == 0) {
-				csh_printf(csh, "wlan: reg write ok (urtwn)\r\n");
+				csh_printf(csh, "wlan: reg write ok (urtwn)\n");
 			} else {
-				csh_printf(csh, "wlan: reg write failed\r\n");
+				csh_printf(csh, "wlan: reg write failed\n");
 			}
 			return 0;
 		}
 		csh_printf(csh, "usage: wlan reg read <hexaddr> | "
-			   "wlan reg write <hexaddr> <hexval> | wlan reg txq\r\n");
+			   "wlan reg write <hexaddr> <hexval> | wlan reg txq\n");
 		return 0;
 	}
 #endif /* CONFIG_NIC_URTWN */
@@ -268,10 +268,10 @@ static int cmd_wlan(int argc, char **argv)
 		if (argc >= 4 && strcmp(argv[2], "read") == 0) {
 			addr = parse_hex(argv[3]);
 			if (wlan_rtw8189f_reg_read((unsigned) addr, &val) == 0) {
-				csh_printf(csh, "rtw8189f reg[0x%04lx] = 0x%08x\r\n",
+				csh_printf(csh, "rtw8189f reg[0x%04lx] = 0x%08x\n",
 					   addr & 0xfffful, val);
 			} else {
-				csh_printf(csh, "wlan: reg read failed\r\n");
+				csh_printf(csh, "wlan: reg read failed\n");
 			}
 			return 0;
 		}
@@ -279,15 +279,15 @@ static int cmd_wlan(int argc, char **argv)
 			addr = parse_hex(argv[3]);
 			val = (unsigned) parse_hex(argv[4]);
 			if (wlan_rtw8189f_reg_write((unsigned) addr, val) == 0) {
-				csh_printf(csh, "wlan: reg write ok (rtw8189f)\r\n");
+				csh_printf(csh, "wlan: reg write ok (rtw8189f)\n");
 			} else {
-				csh_printf(csh, "wlan: reg write failed\r\n");
+				csh_printf(csh, "wlan: reg write failed\n");
 			}
 			return 0;
 		}
 		csh_printf(csh, "usage: wlan reg read <hexaddr> | "
 			   "wlan reg write <hexaddr> <hexval> | "
-			   "wlan reg txq | wlan reg sdreg | wlan reg icstats\r\n");
+			   "wlan reg txq | wlan reg sdreg | wlan reg icstats\n");
 		return 0;
 	}
 
@@ -297,7 +297,7 @@ static int cmd_wlan(int argc, char **argv)
 		if (argc >= 3) {
 			(void) rtw8189f_data_rate_set((unsigned) atoi(argv[2]));
 		}
-		csh_printf(csh, "rtw8189f data rate=%u Mbps\r\n",
+		csh_printf(csh, "rtw8189f data rate=%u Mbps\n",
 		    rtw8189f_data_rate_get());
 		return 0;
 	}
@@ -309,7 +309,7 @@ static int cmd_wlan(int argc, char **argv)
 			    (unsigned) atoi(argv[2]) != 0);
 		}
 		csh_printf(csh, "wlan callouts enabled=%u fires=%u sched=%u "
-			   "suppressed=%u\r\n",
+			   "suppressed=%u\n",
 			   wlan_callout_get_enabled(), wlan_callout_fires,
 			   wlan_callout_sched, wlan_callout_suppressed);
 		return 0;
@@ -335,7 +335,7 @@ static int cmd_wlan(int argc, char **argv)
 
 	if (argc >= 2 && strcmp(argv[1], "cv") == 0) {
 		csh_printf(csh, "wlan cv: signals=%u dropped=%u "
-			   "broadcasts=%u bdropped=%u\r\n",
+			   "broadcasts=%u bdropped=%u\n",
 			   wlan_cv_signals, wlan_cv_signals_dropped,
 			   wlan_cv_broadcasts, wlan_cv_broadcasts_dropped);
 		return 0;
@@ -353,7 +353,7 @@ static int cmd_wlan(int argc, char **argv)
 		if (argc > 2) {
 			usbdebug = atoi(argv[2]);
 		}
-		csh_printf(csh, "wlan: usbdebug=%d\r\n", usbdebug);
+		csh_printf(csh, "wlan: usbdebug=%d\n", usbdebug);
 		return 0;
 	}
 #endif
@@ -386,7 +386,7 @@ static int cmd_wlan(int argc, char **argv)
 
 	csh_printf(csh,
 		   "usage: wlan start | scan [seconds] | status | nic <name>"
-		   WLAN_CMD_TAIL "\r\n");
+		   WLAN_CMD_TAIL "\n");
 	return 0;
 }
 

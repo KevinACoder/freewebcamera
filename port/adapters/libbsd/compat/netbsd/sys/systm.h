@@ -27,7 +27,12 @@ void get_random_bytes(void *, size_t);
 int kprintf(const char *fmt, ...) __printflike(1, 2);
 #define printf kprintf
 #define uprintf kprintf
-#define aprint_naive kprintf
+/* aprint_naive is NOT kprintf here: sys/device.h installs the port's
+ * newline-only suppression for it (upstream's naive calls are either a whole
+ * naive line, which must print, or the bare "\n" that terminates an attach
+ * head, which must not - see the macro there).  Mapping it to kprintf would
+ * re-split every "uhub0 at usb0" + ": <devinfo>" pair, which is exactly the
+ * shape the console assembler exists to join. */
 #define aprint_verbose kprintf
 #define aprint_debug kprintf
 

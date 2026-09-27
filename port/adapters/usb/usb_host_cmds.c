@@ -96,10 +96,10 @@ static int usbreq_list(chry_shell_t *csh)
 
 	ret = Driver_USB_HOST_NetBSD.GetDeviceCount(&count);
 	if (ret != USB_HOST_OK) {
-		csh_printf(csh, "usbreq: device count failed (%d)\r\n", (int) ret);
+		csh_printf(csh, "usbreq: device count failed (%d)\n", (int) ret);
 		return 1;
 	}
-	csh_printf(csh, "usbreq: %u device(s)\r\n", (unsigned) count);
+	csh_printf(csh, "usbreq: %u device(s)\n", (unsigned) count);
 	for (i = 0; i < count; i++) {
 		USB_HOST_DEVICE info;
 
@@ -107,7 +107,7 @@ static int usbreq_list(chry_shell_t *csh)
 			continue;
 		}
 		csh_printf(csh,
-			   "  [%u] addr %u %s vid:pid %04x:%04x class %02x cfg %u\r\n",
+			   "  [%u] addr %u %s vid:pid %04x:%04x class %02x cfg %u\n",
 			   (unsigned) info.index, (unsigned) info.address,
 			   usbreq_speed_str(info.speed), (unsigned) info.vendor,
 			   (unsigned) info.product, (unsigned) info.device_class,
@@ -123,18 +123,18 @@ static int usbreq_info(chry_shell_t *csh, const char *arg)
 	int32_t ret;
 
 	if (usbreq_num(arg, &index) != 0) {
-		csh_printf(csh, "usbreq: bad index '%s'\r\n", arg != NULL ? arg : "");
+		csh_printf(csh, "usbreq: bad index '%s'\n", arg != NULL ? arg : "");
 		return 1;
 	}
 	ret = Driver_USB_HOST_NetBSD.GetDeviceInfo(index, &info);
 	if (ret != USB_HOST_OK) {
-		csh_printf(csh, "usbreq: no device at index %u (%d)\r\n",
+		csh_printf(csh, "usbreq: no device at index %u (%d)\n",
 			   (unsigned) index, (int) ret);
 		return 1;
 	}
 	csh_printf(csh,
 		   "usbreq: [%u] addr %u speed %s class %02x vid:pid %04x:%04x "
-		   "bcd %04x configs %u configured %u\r\n",
+		   "bcd %04x configs %u configured %u\n",
 		   (unsigned) info.index, (unsigned) info.address,
 		   usbreq_speed_str(info.speed), (unsigned) info.device_class,
 		   (unsigned) info.vendor, (unsigned) info.product,
@@ -158,12 +158,12 @@ static int usbreq_desc(chry_shell_t *csh, const char *idxarg, const char *lenarg
 	unsigned i;
 
 	if (usbreq_num(idxarg, &index) != 0) {
-		csh_printf(csh, "usbreq: bad index\r\n");
+		csh_printf(csh, "usbreq: bad index\n");
 		return 1;
 	}
 	if (lenarg != NULL) {
 		if (usbreq_num(lenarg, &want) != 0 || want == 0) {
-			csh_printf(csh, "usbreq: bad length\r\n");
+			csh_printf(csh, "usbreq: bad length\n");
 			return 1;
 		}
 	}
@@ -181,14 +181,14 @@ static int usbreq_desc(chry_shell_t *csh, const char *idxarg, const char *lenarg
 	ret = Driver_USB_HOST_NetBSD.ControlTransfer(index, &req, buf, &got,
 	    USB_HOST_DEFAULT_TIMEOUT_MS);
 	if (ret != USB_HOST_OK && ret != USB_HOST_ERROR_SHORT) {
-		csh_printf(csh, "usbreq: GET_DESCRIPTOR failed (%d)\r\n", (int) ret);
+		csh_printf(csh, "usbreq: GET_DESCRIPTOR failed (%d)\n", (int) ret);
 		return 1;
 	}
-	csh_printf(csh, "usbreq: descriptor, %u byte(s)%s\r\n", (unsigned) got,
+	csh_printf(csh, "usbreq: descriptor, %u byte(s)%s\n", (unsigned) got,
 		   (ret == USB_HOST_ERROR_SHORT) ? " (short)" : "");
 	for (i = 0; i < got; i++) {
 		csh_printf(csh, "%02x%s", (unsigned) buf[i],
-			   ((i & 15) == 15 || i + 1 == got) ? "\r\n" : " ");
+			   ((i & 15) == 15 || i + 1 == got) ? "\n" : " ");
 	}
 	return 0;
 }
@@ -205,17 +205,17 @@ static int usbreq_ctrl(chry_shell_t *csh, int argc, char **argv)
 	if (argc < 7) {
 		csh_printf(csh,
 			   "usage: usbreq ctrl <idx> <bmRequestType> <bRequest> "
-			   "<wValue> <wIndex> <len>\r\n");
+			   "<wValue> <wIndex> <len>\n");
 		return 1;
 	}
 	if (usbreq_num(argv[2], &index) != 0 || usbreq_num(argv[3], &bm) != 0 ||
 	    usbreq_num(argv[4], &br) != 0 || usbreq_num(argv[5], &wval) != 0 ||
 	    usbreq_num(argv[6], &widx) != 0 || usbreq_num(argv[7], &len) != 0) {
-		csh_printf(csh, "usbreq: bad argument (numbers take 0x.. or decimal)\r\n");
+		csh_printf(csh, "usbreq: bad argument (numbers take 0x.. or decimal)\n");
 		return 1;
 	}
 	if (len > sizeof(buf)) {
-		csh_printf(csh, "usbreq: len capped at %u\r\n", (unsigned) sizeof(buf));
+		csh_printf(csh, "usbreq: len capped at %u\n", (unsigned) sizeof(buf));
 		len = sizeof(buf);
 	}
 
@@ -228,7 +228,7 @@ static int usbreq_ctrl(chry_shell_t *csh, int argc, char **argv)
 
 	ret = Driver_USB_HOST_NetBSD.ControlTransfer(index, &req, buf, &got,
 	    USB_HOST_DEFAULT_TIMEOUT_MS);
-	csh_printf(csh, "usbreq: ctrl -> %d, %u byte(s)\r\n", (int) ret,
+	csh_printf(csh, "usbreq: ctrl -> %d, %u byte(s)\n", (int) ret,
 		   (unsigned) got);
 	if (ret != USB_HOST_OK && ret != USB_HOST_ERROR_SHORT) {
 		return 1;
@@ -238,7 +238,7 @@ static int usbreq_ctrl(chry_shell_t *csh, int argc, char **argv)
 	if ((bm & 0x80) != 0) {
 		for (i = 0; i < got; i++) {
 			csh_printf(csh, "%02x%s", (unsigned) buf[i],
-				   ((i & 15) == 15 || i + 1 == got) ? "\r\n" : " ");
+				   ((i & 15) == 15 || i + 1 == got) ? "\n" : " ");
 		}
 	}
 	return 0;
@@ -264,7 +264,7 @@ static int cmd_usbreq(int argc, char **argv)
 	}
 	csh_printf(csh,
 		   "usage: usbreq list | info <idx> | desc <idx> [len] | "
-		   "ctrl <idx> <bm> <req> <wValue> <wIndex> <len>\r\n");
+		   "ctrl <idx> <bm> <req> <wValue> <wIndex> <len>\n");
 	return 1;
 }
 

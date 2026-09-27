@@ -20,6 +20,7 @@
 
 #include <sys/cdefs.h>
 #include <sys/types.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -276,9 +277,33 @@ void config_deferred_run(void);
 	printf("%s: " fmt, device_xname(dev), ##__VA_ARGS__)
 #define aprint_normal(fmt, ...) printf(fmt, ##__VA_ARGS__)
 #define aprint_error(fmt, ...) printf(fmt, ##__VA_ARGS__)
-#define aprint_naive(fmt, ...) printf(fmt, ##__VA_ARGS__)
 #define aprint_verbose(fmt, ...) do { } while (0)
 #define aprint_debug(fmt, ...) do { } while (0)
+
+/* aprint_naive has two uses upstream: a whole naive one-liner, and - the one
+ * every USB driver has - a bare "\n" that terminates the attach head the
+ * parent's cfprint printed, with the child's own attach output continuing the
+ * same line ("usb0 at ehci1" + ": USB revision 2.0").  Upstream suppresses
+ * the bare newline in normal (non-quiet) mode; this port has no quiet mode,
+ * and the autoconf now prints the head itself (see config_attach_internal), so
+ * the terminator would split ": USB revision ..." onto an orphan line - which
+ * is exactly what the trunk console showed.  Format-string equality is the
+ * discriminator: only the newline-only call is dropped, whole naive lines
+ * still print. */
+static inline int aprint_naive_impl(const char *fmt, ...)
+{
+	va_list ap;
+	int n;
+
+	if (fmt[0] == '\n' && fmt[1] == '\0') {
+		return 0;
+	}
+	va_start(ap, fmt);
+	n = vprintf(fmt, ap);
+	va_end(ap);
+	return n;
+}
+#define aprint_naive(fmt, ...) aprint_naive_impl(fmt, ##__VA_ARGS__)
 
 /* ------------------------------------------------------------------
  * proplib shells: the usb stack publishes device facts into a

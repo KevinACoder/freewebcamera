@@ -88,10 +88,10 @@ uint32_t xTaskGetTickCount(void);
 #define IPERF3_PRINTF(fmt, ...) \
 	do { LWIP_PLATFORM_DIAG((fmt, ##__VA_ARGS__)); } while (0)
 #define IPERF3_LOG_ERR(fmt, ...) \
-	IPERF3_PRINTF("[iperf3] ERROR: " fmt "\r\n", ##__VA_ARGS__)
+	IPERF3_PRINTF("[iperf3] ERROR: " fmt "\n", ##__VA_ARGS__)
 #define IPERF3_LOG_WARN(fmt, ...) \
-	IPERF3_PRINTF("[iperf3] WARN:  " fmt "\r\n", ##__VA_ARGS__)
+	IPERF3_PRINTF("[iperf3] WARN:  " fmt "\n", ##__VA_ARGS__)
 #define IPERF3_LOG_INFO(fmt, ...) \
-	IPERF3_PRINTF("[iperf3] info:  " fmt "\r\n", ##__VA_ARGS__)
+	IPERF3_PRINTF("[iperf3] info:  " fmt "\n", ##__VA_ARGS__)
 
 #endif /* FREEWEBCAMERA_IPERF3_PORT_H */
