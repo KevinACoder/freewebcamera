@@ -58,6 +58,7 @@
 #include "board.h"
 
 #include "usb_board.h"
+#include "usb_domain.h"
 #include "usb_dwc3.h"
 #include "usb_platform.h"
 
@@ -65,26 +66,6 @@
 extern bus_dma_tag_t wlan_bus_dma_tag;
 
 static bool s_usb3_domain_done;
-
-/* Microsecond busy-wait off the ARM generic timer (always on at EL1);
- * the same primitive usb_platform.c uses. */
-static void usb_udelay(uint32_t usec)
-{
-	uint64_t start, now, ticks, freq;
-
-	__asm__ __volatile__("mrs %0, cntfrq_el0" : "=r"(freq));
-	ticks = (freq * (uint64_t) usec) / 1000000U;
-	if (ticks == 0U) {
-		ticks = 1U;
-	}
-	__asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(start));
-	for (;;) {
-		__asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(now));
-		if (now - start >= ticks) {
-			break;
-		}
-	}
-}
 
 /* ------------------------------------------------------------------
  * the USB3 socket-group domain (once per boot): CRU clock gates, the

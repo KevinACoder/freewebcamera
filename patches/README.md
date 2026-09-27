@@ -145,5 +145,14 @@ Current state:
     of forensics chased.  The patch zeroes `busy` at buffer init and
     again in `video_stream_enqueue()` (a sample handed back to the driver
     is by definition not under userspace control).
-- `threadx/`, `cherrysh/`, `cherryrb/`, `lwip/` — no patches; used
-  byte-identical to their pins.
+- `threadx/`, `cherrysh/`, `cherryrb/`, `lwip/`, `cherryusb/` — no patches;
+  used byte-identical to their pins.  `cherryusb/` is the newest member
+  (feat/cherryusb_ehci, pin `6f096b14`): the EHCI bring-up needs no local
+  divergence because upstream `dev` already carries the multi-HC registration
+  this board's two roots use (`usbh_register_hc_driver`, since `8b7e58c6`) —
+  the old workspace's `usbh_hcd_ops` patch is deliberately not carried.  The
+  known candidate hunks (bulk-OUT data toggle + `USBH_URB_ZERO_PACKET` for
+  the urtwn TX path, from the old
+  `cherryusb-local-vs-upstream-5019680e.patch`) are added here only if the
+  data-plane round shows this pin still needs them; the xHCI port is a
+  separate feat line.

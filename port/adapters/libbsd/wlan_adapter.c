@@ -126,7 +126,7 @@ int wlan_start(void) {
 	 * whenever anything rides it - a wireless line or the camera.
 	 * usbdebug is usb.c's variable: it exists only when the bus and
 	 * the history machinery are both compiled in. */
-#if CONFIG_BUS_USB
+#if CONFIG_BUS_USB && !CONFIG_USB_BACKEND_CHERRYUSB
 #if CONFIG_USB_DEBUG_DEFAULT
 	{
 		extern int usbdebug;
@@ -177,9 +177,24 @@ int wlan_start(void) {
 	if (wlan_nic_pref != NULL && strcmp(wlan_nic_pref, "iwm") == 0) {
 		printf("wlan: usb line skipped (preference: %s)\n",
 		    wlan_nic_pref);
-	} else if (usb_platform_init() != 0) {
-		printf("wlan: usb platform init failed\n");
-		return -1;
+	} else {
+#if CONFIG_USB_BACKEND_CHERRYUSB
+		/* The CherryUSB backend has its own platform entry (domain +
+		 * both EHCI roots + hub threads).  The attach chain runs there
+		 * too: the hub thread enumerates and the wlan class hook calls
+		 * into urtwn_reg.c. */
+		extern int usbh_platform_start(void);
+
+		if (usbh_platform_start() != 0) {
+			printf("wlan: cherryusb platform init failed\n");
+			return -1;
+		}
+#else
+		if (usb_platform_init() != 0) {
+			printf("wlan: usb platform init failed\n");
+			return -1;
+		}
+#endif
 	}
 #endif
 	/* The pcie world runs after the usb line: usb keeps its proven boot

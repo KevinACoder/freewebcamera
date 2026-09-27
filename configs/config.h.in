@@ -37,6 +37,12 @@
 #define CONFIG_BUS_PCIE			@CONFIG_BUS_PCIE@
 #define CONFIG_BUS_SDIO			@CONFIG_BUS_SDIO@
 
+/* The USB host stack this image links.  CONFIG_USB_BACKEND is the make-level
+ * choice (netbsd | cherryusb); CONFIG_USB_BACKEND_CHERRYUSB is its derived
+ * 0/1 form so C code can test it in #if without string compares. */
+#define CONFIG_USB_BACKEND		"@CONFIG_USB_BACKEND@"
+#define CONFIG_USB_BACKEND_CHERRYUSB	@CONFIG_USB_BACKEND_CHERRYUSB@
+
 /* --- wireless lines -------------------------------------------------------- */
 
 #define CONFIG_NIC_IWM			@CONFIG_NIC_IWM@

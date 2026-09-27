@@ -49,6 +49,10 @@
 #include "port.h"
 #include "wlan_port_cmsis.h"
 
+/* The build configuration: this TU carries the CherryUSB attach entry too,
+ * and that path exists only in a CherryUSB image (see below). */
+#include "config.h"
+
 /* shell wrappers defined below */
 int wlan_urtwn_up(void);
 int wlan_port_scan_urtwn(const uint8_t *ssid, size_t len);
@@ -99,6 +103,93 @@ wlan_port_post_attach(device_t dev)
 		    ether_sprintf(sc->sc_ic.ic_myaddr));
 	}
 }
+
+#if CONFIG_USB_BACKEND_CHERRYUSB
+/* ------------------------------------------------------------------ */
+/* The CherryUSB attach entry (feat/cherryusb_ehci).                  */
+/*
+ * On this backend there is no usb_subr/config_found chain to run the
+ * driver's ca_match/ca_attach: CherryUSB's hub thread enumerates the
+ * device itself, the wlan class hook (usbh_urtwn_class.c) claims the
+ * interface, and this function plays the autoconf part - softc + device
+ * shell + usb_attach_arg - then calls the driver's own attach directly.
+ * The static CFATTACH glue inside if_urtwn.c stays intact; only the
+ * caller of urtwn_attach differs from the netbsd backend.
+ *
+ * Runs on the CherryUSB hub thread (64 KiB stack), which is where the
+ * firmware load and ieee80211_ifattach ran on the old harness too.
+ */
+#if CONFIG_NIC_URTWN
+int
+wlan_urtwn_cherryusb_attach(struct usbd_device *udev, uint16_t vendor,
+    uint16_t product)
+{
+	struct urtwn_softc *sc;
+	struct device *self;
+	struct usb_attach_arg uaa;
+	static unsigned urtwn_cherryusb_unit;
+
+	sc = wlan_kmalloc(sizeof(struct urtwn_softc), M_WAITOK | M_ZERO,
+	    M_USBDEV);
+	if (sc == NULL) {
+		return -1;
+	}
+	self = wlan_kmalloc(sizeof(struct device), M_WAITOK | M_ZERO,
+	    M_USBDEV);
+	if (self == NULL) {
+		wlan_kfree(sc, M_USBDEV);
+		return -1;
+	}
+	snprintf(self->dv_xname, sizeof(self->dv_xname), "urtwn%u",
+	    urtwn_cherryusb_unit++);
+	self->dv_private = sc;
+
+	memset(&uaa, 0, sizeof(uaa));
+	uaa.uaa_vendor = vendor;
+	uaa.uaa_product = product;
+	uaa.uaa_device = udev;
+
+	urtwn_attach(self, self, &uaa);
+
+	if (sc->sc_dying || !ISSET(sc->sc_flags, URTWN_FLAG_ATTACHED)) {
+		printf("wlan: urtwn attach failed (%04x:%04x)\n", vendor,
+		    product);
+		return -1;
+	}
+	/* the same registry note the netbsd chain's post-attach hook makes */
+	wlan_port_post_attach(self);
+	return 0;
+}
+
+void
+wlan_urtwn_cherryusb_detach(struct usbd_device *udev)
+{
+	(void) udev;
+	/* The shim stops the per-device workers; the driver's softc is kept
+	 * on purpose (a re-attach needs a reboot on this line, same rule the
+	 * netbsd chain follows for a detached usb device). */
+	if (urtwn_reg_softc != NULL) {
+		printf("wlan: urtwn gone\n");
+	}
+}
+#else
+int
+wlan_urtwn_cherryusb_attach(struct usbd_device *udev, uint16_t vendor,
+    uint16_t product)
+{
+	(void) udev;
+	(void) vendor;
+	(void) product;
+	return -1;
+}
+
+void
+wlan_urtwn_cherryusb_detach(struct usbd_device *udev)
+{
+	(void) udev;
+}
+#endif /* CONFIG_NIC_URTWN */
+#endif /* CONFIG_USB_BACKEND_CHERRYUSB */
 
 /* ------------------------------------------------------------------ */
 /* shell wrappers                                                     */

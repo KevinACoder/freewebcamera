@@ -59,7 +59,8 @@ include $(CONFIG_FILE)
 # between this list and the config.h.in template.
 CONFIG_KEYS := CONFIG_NAME CONFIG_BOARD CONFIG_SMP_CORES CONFIG_OPT \
 	CONFIG_SHELL CONFIG_NET CONFIG_UVC CONFIG_UAC \
-	CONFIG_BUS_USB CONFIG_BUS_PCIE CONFIG_BUS_SDIO \
+	CONFIG_BUS_USB CONFIG_BUS_PCIE CONFIG_BUS_SDIO CONFIG_USB_BACKEND \
+	CONFIG_USB_BACKEND_CHERRYUSB \
 	CONFIG_NIC_IWM CONFIG_NIC_URTWN CONFIG_NIC_RTW8189F \
 	CONFIG_BSD_DIAGNOSTIC CONFIG_IWM_DEBUG \
 	CONFIG_USB_DEBUG_DEFAULT CONFIG_EHCI_DEBUG_DEFAULT CONFIG_XHCI_DEBUG_DEFAULT \
@@ -158,6 +159,31 @@ endif
 endif
 ifeq ($(CONFIG_NET),1)
 CONFIG_SHELL := 1
+endif
+
+# --- USB host stack choice (D-C1③) -------------------------------------------
+# One backend per image: the two stacks bring their own controllers up and both
+# define a Driver_USB_HOST_* object, so which one is linked is a build key, not
+# a runtime lookup.  CONFIG_USB_BACKEND is the human-facing name; the derived
+# 0/1 switch is what C code and the source lists below key on.  This sits after
+# the implications above because CONFIG_BUS_USB may itself have been derived
+# from a NIC key.
+ifeq ($(filter $(CONFIG_USB_BACKEND),netbsd cherryusb),)
+$(error CONFIG_USB_BACKEND must be netbsd or cherryusb, got '$(CONFIG_USB_BACKEND)')
+endif
+CONFIG_USB_BACKEND_CHERRYUSB := $(if $(filter cherryusb,$(CONFIG_USB_BACKEND)),1,0)
+ifeq ($(CONFIG_USB_BACKEND_CHERRYUSB),1)
+ifeq ($(CONFIG_BUS_USB),0)
+$(error CONFIG_USB_BACKEND=cherryusb needs the USB bus: select the urtwn line (CONFIG_NIC_URTWN=1) or CONFIG_BUS_USB=1 as well)
+endif
+# Upstream CherryUSB has no isochronous support (the iso entry points are
+# declared and never defined; iso is the commercial edition's feature), so the
+# camera and the microphone cannot ride this backend.  A hard error beats an
+# image that links uvideo against a stack with no iso engine (R1 in
+# issues/20260928-feat-cherryusb_risk.md).
+ifneq ($(filter 1,$(CONFIG_UVC) $(CONFIG_UAC)),)
+$(error CONFIG_USB_BACKEND=cherryusb cannot carry UVC/UAC: upstream CherryUSB has no isochronous transfers. Use the netbsd backend for the camera/microphone lines)
+endif
 endif
 
 # --- validation --------------------------------------------------------------
@@ -410,15 +436,58 @@ LIBBSD_USB_PLATFORM_SRCS := \
 	port/adapters/libbsd/usb_platform.c \
 	port/adapters/libbsd/usb_xhci_platform.c
 
-# The USB request abstraction (feat/usbport): include/usb_host.h is the
-# interface, the backend is the only file that includes the imported usbdi
-# world, and the command TU is the in-tree consumer.  The backend compiles in
-# the BSD world (its own rule below); the command TU is ordinary adapter code.
+# The USB request abstraction (feat/usbport + feat/cherryusb_ehci):
+# include/usb_host.h is the interface, the backend is the only file that talks
+# to its own stack, and the command TU is the in-tree consumer.  Which backend
+# is linked is the CONFIG_USB_BACKEND key (D-C1③, one per image): the NetBSD
+# backend compiles in the BSD world (its own rule below), the CherryUSB backend
+# in the CherryUSB world (rules further down).  The command TU is ordinary
+# adapter code in both.
+ifeq ($(CONFIG_USB_BACKEND_CHERRYUSB),1)
+USB_HOST_SRCS := \
+	port/adapters/usb/usb_host_cherryusb.c
+else
 USB_HOST_SRCS := \
 	port/adapters/usb/usb_host_netbsd.c
+endif
 
 USB_HOST_CMD_SRCS := \
 	port/adapters/usb/usb_host_cmds.c
+
+# The backend-neutral half of the USB platform bring-up (PD_PIPE + PHY
+# reference clocks + VBUS + the usb2phy1 domain).  It talks to the CRU/PMU/GRF
+# only - no host stack headers - so both backends link this one copy.
+USB_DOMAIN_SRCS := \
+	port/adapters/usb/usb_domain.c
+
+# --- the CherryUSB host stack (feat/cherryusb_ehci) ---------------------------
+# The vendored upstream tree compiled as-is (core + the hub class + the EHCI
+# HCD + the OSAL), plus the adapter: the shadow usb_config.h, the low-level
+# glue (IRQ/cache/console), the platform start path and the shell command.
+# The tree itself is never edited - local differences go through patches/.
+CHERRYUSB_SUB_SRCS := \
+	third-party/cherryusb/core/usbh_core.c \
+	third-party/cherryusb/class/hub/usbh_hub.c \
+	third-party/cherryusb/port/ehci/usb_hc_ehci.c
+
+CHERRYUSB_ADAPTER_SRCS := \
+	port/adapters/cherryusb/usb_osal_threadx.c \
+	port/adapters/cherryusb/usbh_glue.c \
+	port/adapters/cherryusb/usbh_platform.c
+
+CHERRYUSB_CMD_SRCS := \
+	port/adapters/cherryusb/usbh_cmds.c
+
+# The shadow usb_config.h first: every vendored unit includes it by name, and
+# this path must win over anything else on the include list (cherrysh ships a
+# usb_config.h of its own).  usb_board.h lives with the NetBSD adapter and is
+# the single copy of the board constants this file also needs.
+CHERRYUSB_INC := -Iport/adapters/cherryusb -Iport/adapters/libbsd \
+	-Iport/adapters/usb \
+	-Ithird-party/cherryusb/core \
+	-Ithird-party/cherryusb/common \
+	-Ithird-party/cherryusb/class/hub \
+	-Ithird-party/cherryusb/port/ehci
 
 LIBBSD_URTWN_ADAPTER_SRCS := \
 	port/adapters/libbsd/fw_rtl8188eufw.c
@@ -457,12 +526,37 @@ LIBBSD_ADAPTER_SRCS := $(LIBBSD_ADAPTER_CORE_SRCS)
 endif
 
 ifeq ($(CONFIG_BUS_USB),1)
-LIBBSD_BSD_SRCS += $(LIBBSD_USB_SRCS)
-LIBBSD_ADAPTER_SRCS += $(LIBBSD_USB_PLATFORM_SRCS)
+# The domain bring-up is shared by both backends; the HCD world and the
+# platform composition are not: the CherryUSB image must NOT link the imported
+# usbdi/hub/ehci/xhci units (the compat layer provides the driver-facing
+# symbols, and both stacks define the same HCD entry points).
+USB_DOMAIN_OBJS := $(addprefix $(BUILD)/,$(USB_DOMAIN_SRCS:.c=.o))
+ifeq ($(CONFIG_USB_BACKEND_CHERRYUSB),1)
 USB_HOST_OBJS := $(addprefix $(BUILD)/,$(USB_HOST_SRCS:.c=.o))
+CHERRYUSB_OBJS := $(addprefix $(BUILD)/,$(CHERRYUSB_SUB_SRCS:.c=.o)) \
+	$(addprefix $(BUILD)/,$(CHERRYUSB_ADAPTER_SRCS:.c=.o)) \
+	$(USB_DOMAIN_OBJS)
+else
+LIBBSD_BSD_SRCS += $(LIBBSD_USB_SRCS)
+LIBBSD_ADAPTER_SRCS += $(LIBBSD_USB_PLATFORM_SRCS) $(USB_DOMAIN_SRCS)
+USB_HOST_OBJS := $(addprefix $(BUILD)/,$(USB_HOST_SRCS:.c=.o))
+endif
 ifeq ($(CONFIG_SHELL),1)
 USB_HOST_OBJS += $(addprefix $(BUILD)/,$(USB_HOST_CMD_SRCS:.c=.o))
+ifeq ($(CONFIG_USB_BACKEND_CHERRYUSB),1)
+USB_HOST_OBJS += $(addprefix $(BUILD)/,$(CHERRYUSB_CMD_SRCS:.c=.o))
 endif
+endif
+endif
+
+# The usbdi(9) request compat layer and its class hook (feat/cherryusb_ehci):
+# the CherryUSB backend's driver-facing half.  Both compile in the BSD world
+# plus the CherryUSB world (the shim implements the usbdi surface over
+# CherryUSB's usbh_urb API, so it needs both include sets) - hence the
+# explicit rules below rather than the libbsd-directory pattern rules.
+ifeq ($(CONFIG_USB_BACKEND_CHERRYUSB)-$(CONFIG_NIC_URTWN),1-1)
+LIBBSD_IMPL_SRCS    += port/adapters/cherryusb/usbdi_compat.c
+LIBBSD_ADAPTER_SRCS += port/adapters/cherryusb/usbh_urtwn_class.c
 endif
 ifeq ($(CONFIG_NIC_URTWN),1)
 LIBBSD_IMPL_SRCS    += port/adapters/libbsd/urtwn_reg.c
@@ -503,6 +597,7 @@ LIBBSD_INC := -I$(BUILD) -Iinclude \
 	-Iport/adapters/libbsd/osal \
 	-Iport/adapters/libbsd/osal/compat \
 	-Iport/adapters/libbsd \
+	-Iport/adapters/usb \
 	-Ithird-party/tlsf
 
 # The feature defines reach the frozen import from here rather than from the
@@ -790,6 +885,7 @@ endif
 OBJS := $(addprefix $(BUILD)/,$(C_SRCS:.c=.o)) $(addprefix $(BUILD)/,$(ASM_SRCS:.S=.o)) \
 	$(addprefix $(BUILD)/,$(LIBBSD_BSD_SRCS:.c=.o)) \
 	$(LIBBSD_IMPL_OBJS) $(LIBBSD_ADAPTER_OBJS) $(USB_HOST_OBJS) \
+	$(CHERRYUSB_OBJS) \
 	$(LWIP_OBJS) $(WPA_OBJS) $(NETUTILS_OBJS) $(SDMMC_OBJS)
 DEPS := $(OBJS:.o=.d)
 
@@ -812,14 +908,22 @@ $(BUILD)/third-party/libbsd/%.o: third-party/libbsd/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(LIBBSD_INC) $(LIBBSD_SUB_CFG) -MMD -MP -c $< -o $@
 
-$(LIBBSD_IMPL_OBJS): $(BUILD)/port/adapters/libbsd/%.o: port/adapters/libbsd/%.c
+# The CherryUSB compat layer lives in another directory than libbsd's, so the
+# pattern rule below cannot match it and it gets its explicit rule further
+# down (it needs both include worlds).  Filtering it here keeps make from
+# claiming the target with an empty source.
+LIBBSD_IMPL_GENERIC_OBJS := $(filter-out %/usbdi_compat.o,$(LIBBSD_IMPL_OBJS))
+
+$(LIBBSD_IMPL_GENERIC_OBJS): $(BUILD)/port/adapters/libbsd/%.o: port/adapters/libbsd/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(LIBBSD_INC) $(LIBBSD_BSD_CFG) -MMD -MP -c $< -o $@
 
-# The SDIO claim layer and the raw A/V dump have their own rules below (extra
-# include worlds); excluding them here keeps the static pattern from claiming
-# them and make from warning about an overridden recipe.
-LIBBSD_ADAPTER_GENERIC_OBJS := $(filter-out %/wlan_sdio_claim.o %/av_dump.o,$(LIBBSD_ADAPTER_OBJS))
+# The SDIO claim layer, the raw A/V dump, the backend-neutral USB domain
+# sequence and the CherryUSB class hook have their own rules below (extra
+# include worlds / a different directory than libbsd's); excluding them here
+# keeps the static pattern from claiming them and make from warning about an
+# overridden recipe.
+LIBBSD_ADAPTER_GENERIC_OBJS := $(filter-out %/wlan_sdio_claim.o %/av_dump.o %/usb_domain.o %/usbh_urtwn_class.o,$(LIBBSD_ADAPTER_OBJS))
 
 $(LIBBSD_ADAPTER_GENERIC_OBJS): $(BUILD)/port/adapters/libbsd/%.o: port/adapters/libbsd/%.c
 	@mkdir -p $(dir $@)
@@ -844,14 +948,58 @@ $(BUILD)/port/adapters/libbsd/av_dump.o: port/adapters/libbsd/av_dump.c
 	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(LIBBSD_INC) \
 		$(LWIP_INC) -MMD -MP -c $< -o $@
 
-# The usb host abstraction's backend is the one file above the platform that
-# includes the imported usbdi world, so it compiles with the BSD include set
-# and config (same world as the platform files).  The command TU next to it is
-# ordinary adapter code and falls to the generic adapter rule.
+# The usbdi(9) compat layer is the one file that spans both worlds: it
+# implements the imported usbdi surface (usbdivar.h types, the driver-facing
+# prototypes) over CherryUSB's usbh_urb API, so it compiles with the BSD
+# include set and config PLUS the CherryUSB include set.  The class hook next
+# to it is CherryUSB-side and stays in the CherryUSB world.  Both need
+# explicit rules: their directory is not the one the libbsd pattern rules
+# name, and a pattern rule that cannot match leaves make with no recipe.
+$(BUILD)/port/adapters/cherryusb/usbdi_compat.o: port/adapters/cherryusb/usbdi_compat.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(LIBBSD_INC) \
+		$(LIBBSD_BSD_CFG) $(CHERRYUSB_INC) -MMD -MP -c $< -o $@
+
+$(BUILD)/port/adapters/cherryusb/usbh_urtwn_class.o: port/adapters/cherryusb/usbh_urtwn_class.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(CHERRYUSB_INC) \
+		-MMD -MP -c $< -o $@
+
+# The usb host abstraction's NetBSD backend is the one file above the platform
+# that includes the imported usbdi world, so it compiles with the BSD include
+# set and config (same world as the platform files).  The CherryUSB backend and
+# the command TU next to it are ordinary adapter code in their own worlds.
 $(BUILD)/port/adapters/usb/usb_host_netbsd.o: port/adapters/usb/usb_host_netbsd.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(LIBBSD_INC) \
 		$(LIBBSD_BSD_CFG) -MMD -MP -c $< -o $@
+
+# The CherryUSB backend and its command TU see the CherryUSB world; warnings
+# silenced on the vendored side only (the adapter files are ours and keep
+# -Wall/-Wextra).
+$(BUILD)/port/adapters/usb/usb_host_cherryusb.o: port/adapters/usb/usb_host_cherryusb.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(CHERRYUSB_INC) \
+		-MMD -MP -c $< -o $@
+
+$(BUILD)/port/adapters/cherryusb/%.o: port/adapters/cherryusb/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(CHERRYUSB_INC) \
+		-MMD -MP -c $< -o $@
+
+# The backend-neutral USB domain sequence: board registers only, but
+# usb_board.h lives with the NetBSD adapter (it is the single copy of the
+# board's USB constants, and the CherryUSB adapter reads it too).
+$(BUILD)/port/adapters/usb/usb_domain.o: port/adapters/usb/usb_domain.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) -Iport/adapters/libbsd \
+		-MMD -MP -c $< -o $@
+
+# The vendored CherryUSB tree itself: -w (frozen upstream, edited only through
+# patches/), compiled in its own include world.
+$(BUILD)/third-party/cherryusb/%.o: third-party/cherryusb/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(CHERRYUSB_INC) -w -MMD -MP -c $< -o $@
 
 # fsl_sdmmc protocol layer: frozen NXP import, warnings silenced (-w); the
 # shadow SDK headers come first so they win over anything vendored.
@@ -1107,6 +1255,22 @@ modules:
 	git -C third-party/sdmmc sparse-checkout set --no-cone \
 		'/*' '!/common/fsl_common.h' '!/osa/fsl_os_abstraction.h' || \
 		echo 'note: sdmmc sparse-checkout not set (kept full checkout)'
+	# CherryUSB: the upstream tree carries demo/, tests/, docs/ (81 MB) and a
+	# bundled third_party/ (NimBLE, mbedtls, ...) that this image never
+	# compiles.  Both are dropped here for two reasons: the checkout goes from
+	# ~105 MB to a few hundred KB, and check-deps.sh's reverse-dependency scan
+	# walks third-party/ - bundled NimBLE ships `#include "hal/hal_timer.h"`,
+	# which reads as a project-header include and fails the gate for code that
+	# is not in any image.  What stays is exactly what the Makefile compiles:
+	# core, common, the hub class, the EHCI port, and the OSAL (kept whole as
+	# the reference our adapter copy was derived from).
+	git -C third-party/cherryusb sparse-checkout set --no-cone \
+		'/*' '!/*/' \
+		'/core/' '/common/' \
+		'/class/' '!/class/*/' '/class/hub/' \
+		'/port/' '!/port/*/' '/port/ehci/' \
+		'/osal/' || \
+		echo 'note: cherryusb sparse-checkout not set (kept full checkout)'
 	@for p in patches/*/*.patch; do \
 		[ -e "$$p" ] || continue; \
 		comp=$$(printf '%s' "$$p" | cut -d/ -f2); \
