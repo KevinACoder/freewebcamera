@@ -244,6 +244,45 @@ int usb_osal_mq_recv(usb_osal_mq_t mq, uintptr_t *addr, uint32_t timeout)
 	return -USB_ERR_INVAL;
 }
 
+/* ThreadX forbids suspension from its system timer thread - every blocking
+ * call there fails fast with TX_WAIT_ERROR (0x4) - and the hub class runs
+ * its interrupt-in submission from a timer callback, which on xHCI starts
+ * with a blocking Configure Endpoint command (measured 2026-09-28: the
+ * command "timed out" in 4 ms, ret=-USB_ERR_INVAL, st=0x4).  Defer the
+ * callbacks onto this service thread, whose context may block; the
+ * RT-Thread shape of this osal runs timers in a thread too. */
+#define USB_TIMER_QUEUE_SLOTS	16U
+
+static TX_QUEUE usb_timer_queue;
+static ULONG usb_timer_queue_mem[USB_TIMER_QUEUE_SLOTS];
+
+struct usb_timer_defer {
+	usb_timer_handler_t handler;
+	void *argument;
+};
+
+static void usb_timer_trampoline(ULONG arg)
+{
+	struct usb_timer_defer *defer = (struct usb_timer_defer *)(uintptr_t)arg;
+
+	/* never block: a drop costs one poll cycle and the next expiry
+	 * re-arms */
+	(void)tx_queue_send(&usb_timer_queue, (VOID *)&defer, TX_NO_WAIT);
+}
+
+static void usb_timer_service(void *argument)
+{
+	struct usb_timer_defer *defer;
+
+	(void)argument;
+	for (;;) {
+		if (tx_queue_receive(&usb_timer_queue, (VOID *)&defer,
+				     TX_WAIT_FOREVER) == TX_SUCCESS) {
+			defer->handler(defer->argument);
+		}
+	}
+}
+
 struct usb_osal_timer *usb_osal_timer_create(const char *name,
 					     uint32_t timeout_ms,
 					     usb_timer_handler_t handler,
@@ -251,6 +290,7 @@ struct usb_osal_timer *usb_osal_timer_create(const char *name,
 {
 	TX_TIMER *timer_ptr = TX_NULL;
 	struct usb_osal_timer *timer;
+	struct usb_timer_defer *defer;
 
 	tx_byte_allocate(&usb_byte_pool, (VOID **)&timer,
 			 sizeof(struct usb_osal_timer), TX_NO_WAIT);
@@ -266,12 +306,23 @@ struct usb_osal_timer *usb_osal_timer_create(const char *name,
 		return NULL;
 	}
 
+	tx_byte_allocate(&usb_byte_pool, (VOID **)&defer, sizeof(*defer),
+			 TX_NO_WAIT);
+	if (defer == TX_NULL) {
+		tx_byte_release(timer_ptr);
+		tx_byte_release(timer);
+		return NULL;
+	}
+	defer->handler = handler;
+	defer->argument = argument;
+
 	timer->timer = timer_ptr;
 	timer->timeout_ms = timeout_ms;
 	timer->is_period = is_period;
-	if (tx_timer_create(timer_ptr, (CHAR *)name,
-			    (void (*)(ULONG))handler, (uintptr_t)argument,
+	if (tx_timer_create(timer_ptr, (CHAR *)name, usb_timer_trampoline,
+			    (uintptr_t)defer,
 			    1, is_period ? 1 : 0, TX_NO_ACTIVATE) != TX_SUCCESS) {
+		tx_byte_release(defer);
 		tx_byte_release(timer_ptr);
 		tx_byte_release(timer);
 		return NULL;
@@ -285,6 +336,9 @@ void usb_osal_timer_delete(struct usb_osal_timer *timer)
 	tx_timer_delete((TX_TIMER *)timer->timer);
 	tx_byte_release(timer->timer);
 	tx_byte_release(timer);
+	/* the defer block is deliberately kept: a callback already queued
+	 * behind a delete would run on freed memory, and one 8-byte block
+	 * per hub across the line is noise next to that race */
 }
 
 void usb_osal_timer_start(struct usb_osal_timer *timer)
@@ -380,6 +434,15 @@ void usb_osal_init(uint8_t *mem, uint32_t mem_size)
 
 	tx_byte_pool_create(&usb_byte_pool, "usb byte pool", mem, mem_size);
 
+	/* the timer service queue before any timer can exist (hub class
+	 * timers are created on the bus start path, after this init) */
+	if (tx_queue_create(&usb_timer_queue, "usb_tmr_q", 1,
+			    usb_timer_queue_mem,
+			    USB_TIMER_QUEUE_SLOTS) != TX_SUCCESS) {
+		USB_LOG_ERR("Create usb_timer_queue failed\r\n");
+		return;
+	}
+
 	usb_osal_mq = usb_osal_mq_create(32);
 	if (usb_osal_mq == NULL) {
 		USB_LOG_ERR("Create usb_osal_mq failed\r\n");
@@ -390,6 +453,12 @@ void usb_osal_init(uint8_t *mem, uint32_t mem_size)
 					NULL);
 	if (thread == NULL) {
 		USB_LOG_ERR("Create usb_osal_thread failed\r\n");
+	}
+
+	thread = usb_osal_thread_create("usb_tmr", 2048, 10, usb_timer_service,
+					NULL);
+	if (thread == NULL) {
+		USB_LOG_ERR("Create usb_timer_service failed\r\n");
 	}
 }
 

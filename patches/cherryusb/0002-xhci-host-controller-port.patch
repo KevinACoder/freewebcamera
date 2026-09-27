@@ -1,9 +1,9 @@
 diff --git a/port/xhci/usb_hc_xhci.c b/port/xhci/usb_hc_xhci.c
 new file mode 100644
-index 00000000..1664ad7d
+index 00000000..27a7c53d
 --- /dev/null
 +++ b/port/xhci/usb_hc_xhci.c
-@@ -0,0 +1,2095 @@
+@@ -0,0 +1,2140 @@
 +/*
 + * @file   usb_hc_xhci.c
 + * @brief  DWC3 xHCI host controller driver for the RK3568 USB3 socket
@@ -133,11 +133,22 @@ index 00000000..1664ad7d
 +	__attribute__((aligned(XHCI_POOL_ALIGN)));
 +USB_NOCACHE_RAM_SECTION static struct xhci_trb s_cmd_trbs[CONFIG_USBHOST_MAX_BUS][CONFIG_USBHOST_XHCI_COMMAND_RING_SIZE]
 +	__attribute__((aligned(XHCI_POOL_ALIGN)));
-+USB_NOCACHE_RAM_SECTION static uint64_t s_dcbaa[CONFIG_USBHOST_MAX_BUS][CONFIG_USBHOST_XHCI_MAX_SLOTS + 1U]
++/* The controller 64B-aligns the DMA base addresses it latches: a DCBAA
++ * row at ...118 was latched as ...100 and Address Device silently wrote
++ * its output context through the shifted (zero) entries - board-measured
++ * 2026-09-28.  Pad the per-bus rows of the pointer tables so a row
++ * pointer keeps the array's alignment (the transfer/context tables have
++ * power-of-two rows and never needed this). */
++#define XHCI_DCBAA_ROWSLOT \
++	(((CONFIG_USBHOST_XHCI_MAX_SLOTS + 1U) + 7U) & ~7U)
++#define XHCI_SPBUF_ROWSLOT \
++	(((CONFIG_USBHOST_XHCI_MAX_SPBUF) + 7U) & ~7U)
++
++USB_NOCACHE_RAM_SECTION static uint64_t s_dcbaa[CONFIG_USBHOST_MAX_BUS][XHCI_DCBAA_ROWSLOT]
 +	__attribute__((aligned(XHCI_POOL_ALIGN)));
 +/* this DWC3 reports one scratchpad buffer (hcs2 spbuf=1, 2026-09-20); the
 + * pool covers the config bound and init fails loudly past it */
-+USB_NOCACHE_RAM_SECTION static uint64_t s_sp_array[CONFIG_USBHOST_MAX_BUS][CONFIG_USBHOST_XHCI_MAX_SPBUF]
++USB_NOCACHE_RAM_SECTION static uint64_t s_sp_array[CONFIG_USBHOST_MAX_BUS][XHCI_SPBUF_ROWSLOT]
 +	__attribute__((aligned(XHCI_POOL_ALIGN)));
 +USB_NOCACHE_RAM_SECTION static uint8_t s_sp_buf[CONFIG_USBHOST_MAX_BUS][CONFIG_USBHOST_XHCI_MAX_SPBUF][4096]
 +	__attribute__((aligned(4096)));
@@ -396,6 +407,9 @@ index 00000000..1664ad7d
 + * completion event arrives through the interrupt path and gives
 + * cmd_waitsem; timeout runs the NetBSD abort (CRCR.CA, wait CRR clear,
 + * re-arm the ring). */
++static struct xhci_dev *xhci_find_dev(struct xhci_hcd *hcd, uint8_t slot_id);
++static void xhci_event_process(struct xhci_hcd *hcd);
++
 +static int xhci_do_command(struct xhci_hcd *hcd, const struct xhci_trb *trb,
 +			   uint32_t timeout_ms)
 +{
@@ -433,6 +447,14 @@ index 00000000..1664ad7d
 +
 +	ret = usb_osal_sem_take(hcd->cmd_waitsem, timeout_ms);
 +	if (ret < 0) {
++		/* a completion whose interrupt was lost to the EINT/IP race
++		 * is still sitting in the ring: one synchronous drain before
++		 * concluding the controller is stuck (the thread/ISR
++		 * reentry guard keeps this safe) */
++		xhci_event_process(hcd);
++		ret = usb_osal_sem_take(hcd->cmd_waitsem, 10U);
++	}
++	if (ret < 0) {
 +		/* NetBSD xhci_abort_command: CRCR.CA, wait CRR self-clear,
 +		 * reset the ring (the CRCR read is the liveness probe: a
 +		 * read of 0 means the ring is wedged, not that the write
@@ -449,6 +471,14 @@ index 00000000..1664ad7d
 +		}
 +		flags = usb_osal_enter_critical_section();
 +		xhci_ring_reset(&hcd->cmd_ring);
++		/* re-arm CRCR after the abort (the old line's step this port
++		 * had dropped): with the ring reset to entry 0 the controller
++		 * must be told the new base or every later command races the
++		 * stopped ring */
++		xhci_w32(hcd, XHCI_CRCR_HI, 0U);
++		xhci_w32(hcd, XHCI_CRCR_LO,
++			 (uint32_t)(uintptr_t)hcd->cmd_ring.trbs |
++				 XHCI_CRCR_LO_RCS);
 +		hcd->cmd_busy = 0U;
 +		usb_osal_leave_critical_section(flags);
 +		usbh_console_printf(
@@ -529,16 +559,11 @@ index 00000000..1664ad7d
 +
 +	xhci_setup_ep0_input_ctx(dev, mps);
 +	if (bsr == 0U) {
-+		/* Standard BSR=0 semantics (spec 6.3.2.2, the NetBSD
-+		 * xhci_set_address shape): the new USB address rides in
-+		 * input slot dw3[7:0], the slot-state bits stay rsvdZ.  The
-+		 * old line's "write 0, let this DWC3 auto-assign" was
-+		 * measured on the 0xFD000000 instance; here on 0xFCC00000
-+		 * the auto-assign run completed with code=1 (Success) but
-+		 * never wrote the output context, and the retries came
-+		 * back 19 (Parameter, 2026-09-27).  With the explicit
-+		 * address the input context is byte-for-byte what NetBSD
-+		 * programs. */
++		/* BSR=0 semantics (spec 6.3.2.2, NetBSD's xhci_set_address
++		 * shape): dw3[7:0] carries the address to program, and 0
++		 * makes this DWC3 auto-assign - the shape the old line
++		 * measured working on 0xFD000000; the assigned address is
++		 * read back from the output context below. */
 +		xhci_in_ctx(dev, 0U)[3] = 0U;
 +		xhci_dcache_clean(dev->input_ctx,
 +				  dev->ctxsz * (2U + XHCI_MAX_DCI));
@@ -560,14 +585,6 @@ index 00000000..1664ad7d
 +		dw3 = xhci_out_ctx(dev, 0U)[3];
 +		st = (dw3 >> 27) & 0x1FU;
 +		hw_addr = dw3 & 0xFFU;
-+		usbh_console_printf(
-+			"xhci: slot %u addressed as %u (state=%u) out=%08x "
-+			"%08x %08x %08x dcbaa1=%08x%08x\n",
-+			dev->slot_id, hw_addr, st,
-+			xhci_out_ctx(dev, 0U)[0], xhci_out_ctx(dev, 0U)[1],
-+			xhci_out_ctx(dev, 0U)[2], xhci_out_ctx(dev, 0U)[3],
-+			(uint32_t)(hcd->dcbaa[dev->slot_id] >> 32),
-+			(uint32_t)hcd->dcbaa[dev->slot_id]);
 +		if ((st == SLOT_CTX_STATE_ADDRESSED) && (hw_addr != 0U)) {
 +			ret = 0;
 +		} else if (ret == 0) {
@@ -1419,8 +1436,15 @@ index 00000000..1664ad7d
 +	if (urb->setup != NULL) {
 +		xhci_dcache_clean(urb->setup, USB_ALIGN_UP(sizeof(struct usb_setup_packet), CONFIG_USB_ALIGN_SIZE));
 +	}
-+	if ((urb->transfer_buffer != NULL) && (urb->ep != &hport->ep0)) {
-+		if ((urb->ep->bEndpointAddress & 0x80U) != 0U) {
++	/* the ehci submit-side shape: ep0's endpoint address is 0x00, so the
++	 * IN test for a control transfer keys on the setup stage direction -
++	 * without this the first read into a cached (stale) buffer survives
++	 * on a miss and every later read serves the old lines (the config
++	 * descriptor came back as the cached device descriptor,
++	 * board-measured 2026-09-28) */
++	if (urb->transfer_buffer != NULL) {
++		if (((urb->setup != NULL) && ((urb->setup->bmRequestType & 0x80U) != 0U)) ||
++		    ((urb->ep != NULL) && ((urb->ep->bEndpointAddress & 0x80U) != 0U))) {
 +			xhci_dcache_invalidate(urb->transfer_buffer,
 +					       USB_ALIGN_UP(urb->transfer_buffer_length, CONFIG_USB_ALIGN_SIZE));
 +		} else {
@@ -1682,6 +1706,14 @@ index 00000000..1664ad7d
 + * shape). */
 +static void xhci_event_process(struct xhci_hcd *hcd)
 +{
++	if (hcd->evt_busy != 0U) {
++		/* the timeout path's thread-context drain preempted by the
++		 * ISR (or vice versa): the running pass sees the whole ring,
++		 * the loser must not double-process */
++		return;
++	}
++	hcd->evt_busy = 1U;
++
 +	xhci_dcache_invalidate(hcd->event_trbs,
 +			       CONFIG_USBHOST_XHCI_EVENT_RING_SIZE * TRB_SIZE);
 +
@@ -1737,6 +1769,7 @@ index 00000000..1664ad7d
 +			     ((uint32_t)erdp & ~0xFU) | XHCI_ERDP_BUSY);
 +		xhci_w32_rts(hcd, XHCI_ERDP_HI(0), 0U);
 +	}
++	hcd->evt_busy = 0U;
 +}
 +
 +/* ===================== root hub ===================== */
@@ -1917,6 +1950,7 @@ index 00000000..1664ad7d
 +{
 +	struct xhci_hcd *hcd;
 +	uint32_t usbsts, iman;
++	uint32_t spin;
 +
 +	if (busid >= CONFIG_USBHOST_MAX_BUS) {
 +		return;
@@ -1926,18 +1960,29 @@ index 00000000..1664ad7d
 +		return;
 +	}
 +
-+	/* NetBSD xhci_intr1: bail on nothing-to-do; RW1C the status bits
-+	 * (stripping the reserved payload), EINT before IMAN.IP (level
-+	 * interrupt order) */
++	/* NetBSD xhci_intr1: bail on nothing-to-do.  The event's DMA write
++	 * may still be in flight when the level interrupt lands (the
++	 * non-coherent port has no ordering against dsb), so EINT/IP are
++	 * cleared only AFTER a drain pass and then re-checked: an event
++	 * that became visible late re-arms EINT and gets its own pass
++	 * instead of sitting in the ring forever (the lost Configure EP
++	 * completion of 2026-09-28 was only surfaced by the later Command
++	 * Abort event) */
 +	usbsts = xhci_r32(hcd, XHCI_USBSTS);
 +	if ((usbsts & (XHCI_STS_HSE | XHCI_STS_EINT | XHCI_STS_PCD)) == 0U) {
 +		return;
 +	}
-+	xhci_w32(hcd, XHCI_USBSTS, usbsts & ~XHCI_STS_RSVDP0);
-+	iman = xhci_r32_rts(hcd, XHCI_IMAN(0));
-+	xhci_w32_rts(hcd, XHCI_IMAN(0), iman | XHCI_IMAN_INTR_PEND);
++	for (spin = 0U; spin < 10U; spin++) {
++		xhci_event_process(hcd);
 +
-+	xhci_event_process(hcd);
++		usbsts = xhci_r32(hcd, XHCI_USBSTS);
++		xhci_w32(hcd, XHCI_USBSTS, usbsts & ~XHCI_STS_RSVDP0);
++		iman = xhci_r32_rts(hcd, XHCI_IMAN(0));
++		xhci_w32_rts(hcd, XHCI_IMAN(0), iman | XHCI_IMAN_INTR_PEND);
++		if ((usbsts & (XHCI_STS_EINT | XHCI_STS_PCD)) == 0U) {
++			break;
++		}
++	}
 +}
 +
 +/* ===================== adapter hooks ===================== */
@@ -2101,10 +2146,10 @@ index 00000000..1664ad7d
 +#endif
 diff --git a/port/xhci/usb_hc_xhci.h b/port/xhci/usb_hc_xhci.h
 new file mode 100644
-index 00000000..97420e29
+index 00000000..2018fe85
 --- /dev/null
 +++ b/port/xhci/usb_hc_xhci.h
-@@ -0,0 +1,348 @@
+@@ -0,0 +1,354 @@
 +/*
 + * @file   usb_hc_xhci.h
 + * @brief  xHCI register/TRB/context definitions for the DWC3 xHCI port
@@ -2288,8 +2333,10 @@ index 00000000..97420e29
 +#define TRB_TYPE_PORT_STATUS	34U
 +#define TRB_TYPE_HC_EVENT	37U
 +
-+/* Completion codes (spec 6.4.5; corrected 2026-09-20 against spec/NetBSD:
-+ * Success=1, Short Packet=13, Parameter=19, Cmd Ring Stopped=24) */
++/* Completion codes (spec 6.4.5).  The first port carried a +2 slide -
++ * 19 was labelled Parameter and 21 Context State; the 2026-09-28 board
++ * evidence (a retry code=19 on an already-addressed slot) pinned the
++ * spec values: 17=Parameter, 19=Context State, 21=Event Lost. */
 +#define TRB_CODE_SUCCESS	1U
 +#define TRB_CODE_DATA_BUFFER_ERR 2U
 +#define TRB_CODE_BABBLE		3U
@@ -2299,8 +2346,9 @@ index 00000000..97420e29
 +#define TRB_CODE_SHORT_PACKET	13U
 +#define TRB_CODE_RING_UNDERRUN	14U
 +#define TRB_CODE_RING_OVERRUN	15U
-+#define TRB_CODE_PARAMETER_ERR	19U
-+#define TRB_CODE_CONTEXT_STATE	21U
++#define TRB_CODE_PARAMETER_ERR	17U
++#define TRB_CODE_CONTEXT_STATE	19U
++#define TRB_CODE_EVENT_LOST	21U
 +#define TRB_CODE_CMD_RING_STOPPED 24U
 +#define TRB_CODE_CMD_ABORTED	25U
 +#define TRB_CODE_STOPPED	26U
@@ -2428,6 +2476,9 @@ index 00000000..97420e29
 +	struct xhci_erst_seg *erst;
 +	uint32_t event_ep;
 +	uint8_t event_cs;
++	/* the command timeout path drains the ring from thread context; the
++	 * ISR may preempt that drain and must not double-process */
++	volatile uint8_t evt_busy;
 +	/* command ring: one command in flight, waitsem completion */
 +	struct xhci_ring cmd_ring;
 +	usb_osal_sem_t cmd_waitsem;
