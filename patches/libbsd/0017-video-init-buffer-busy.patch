@@ -1,0 +1,26 @@
+diff --git a/sys/dev/video.c b/sys/dev/video.c
+index c1dfac9c9985..c66b7c6119ba 100644
+--- a/sys/dev/video.c
++++ b/sys/dev/video.c
+@@ -2615,6 +2615,12 @@ video_stream_realloc_bufs(struct video_stream *vs, uint8_t nbufs)
+ 		buf->reserved2 = 0;
+ 		buf->reserved = 0;
+ 
++		/* busy is the read-side refcount; the allocation above does
++		 * not zero memory, so a leftover value parks every read in
++		 * the busy branch (blocking: forever; nonblocking: EAGAIN)
++		 * and the samples never return to the ingress queue */
++		vs->vs_buf[i]->busy = 0;
++
+ 		offset += buf->length;
+ 	}
+ 
+@@ -2635,6 +2641,8 @@ video_stream_enqueue(struct video_stream *vs, struct video_buffer *vb)
+ 	vb->vb_buf->flags &= ~V4L2_BUF_FLAG_DONE;
+ 
+ 	vb->vb_buf->bytesused = 0;
++	/* a sample handed back to the driver is not under userspace control */
++	vb->busy = 0;
+ 
+ 	SIMPLEQ_INSERT_TAIL(&vs->vs_ingress, vb, entries);
+ }

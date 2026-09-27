@@ -292,6 +292,7 @@ ifeq ($(UVC),1)
 LIBBSD_BSD_SRCS     += third-party/libbsd/sys/dev/video.c \
 	third-party/libbsd/sys/dev/usb/uvideo.c
 LIBBSD_ADAPTER_SRCS += port/adapters/libbsd/av_video.c \
+	port/adapters/libbsd/av_dump.c \
 	port/adapters/libbsd/uvc_cmds.c
 endif
 
@@ -606,6 +607,17 @@ $(BUILD)/port/adapters/libbsd/wlan_sdio_claim.o: port/adapters/libbsd/wlan_sdio_
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(LIBBSD_INC) \
 		$(SDMMC_INC) -MMD -MP -c $< -o $@
+
+# The raw A/V dump is lwIP-socket code, so it compiles in the lwip world
+# (the adapter's lwipopts.h plus the vendored lwip includes) and NOT with
+# LIBBSD_BSD_CFG: the BSD world force-includes endian.h, whose macros clash
+# with lwip's htons (same reason the lwip netif bridge keeps to this set).
+# An explicit rule is required because the longer libbsd pattern rule would
+# otherwise win the stem match and hand it the BSD config.
+$(BUILD)/port/adapters/libbsd/av_dump.o: port/adapters/libbsd/av_dump.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(INC_ADAPTER) $(LIBBSD_INC) \
+		$(LWIP_INC) -MMD -MP -c $< -o $@
 
 # fsl_sdmmc protocol layer: frozen NXP import, warnings silenced (-w); the
 # shadow SDK headers come first so they win over anything vendored.

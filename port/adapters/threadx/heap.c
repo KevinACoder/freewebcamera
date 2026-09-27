@@ -40,16 +40,57 @@ extern void board_early_print(const char *s);
 extern unsigned int _tx_thread_smp_protect(void);
 extern void _tx_thread_smp_unprotect(unsigned int save);
 
-/* The iwm line needs the headroom: its RX ring alone hands out 256
- * mbuf+cluster allocations (~1.1 MB) from this heap on top of the
- * USB/net80211 world (the first PCIe board run died silently in
- * m_gethdr at "could not allocate RX ring").  The linker script
- * reserves 4M for this region (bss is NOLOAD), so the reservation is
- * free in the image. */
-#define HEAP_BYTES	(4u * 1024u * 1024u)
+/* 100 MB, one shot: the working lines no longer fit in 4 MB and the
+ * failures are silent-until-fatal (iwm's RX ring ~1.1 MB, then the
+ * supplicant's association took the last ~100 KB and the UVC dump path
+ * had nothing left: "heap: alloc FAIL len=712 maxfree=152").
+ *
+ * The arena is NOT a .bss array: the port keeps fixed-address static
+ * regions (the USB DMA pool at 0x0a793000, the wlan mbuf pools, the iwm
+ * RX ring), and a 100 MB array inside .bss swallowed them - the first
+ * such boot came up with ehci_irq=0, no camera and no wlan, because the
+ * USB DMA structures sat inside the heap.  A fixed base far above the
+ * image (512 MB) and every fixed region keeps .bss at its old size; the
+ * MMU maps [0x0a000000, 0xc0000000) Normal cacheable (mmu.c: L1[0]'s
+ * 2 MiB blocks plus two 1 GiB Normal blocks), so the whole arena is
+ * ordinary cacheable RAM.  heap_ram_probe() proves it at boot. */
+#define HEAP_BASE	0x20000000ULL
+#define HEAP_BYTES	(100u * 1024u * 1024u)
 
-static uint8_t heap_region[HEAP_BYTES] __attribute__((aligned(32)));
+static uint8_t *const heap_region = (uint8_t *) (uintptr_t) HEAP_BASE;
 static tlsf_t heap_tlsf;
+
+/* One-shot RAM probe, run on the first allocation (i.e. during boot):
+ * write/read a pattern across the arena so a mapping or DDR hole shows up
+ * as a line in the boot log, not as a mysterious later fault. */
+static void
+heap_ram_probe(void)
+{
+	static const size_t offs[] = { 0u, 32u << 20, 64u << 20, 96u << 20 };
+	char msg[160];
+	unsigned i;
+
+	for (i = 0; i < sizeof(offs) / sizeof(offs[0]); i++) {
+		volatile uint32_t *p =
+		    (volatile uint32_t *) (void *) (heap_region + offs[i]);
+		uint32_t v = 0xa5a50000u | i;
+
+		*p = v;
+		if (*p != v) {
+			(void)snprintf(msg, sizeof(msg),
+			    "heap: RAM probe FAIL at +%uMB (%p): wrote %08x "
+			    "read %08x\n", (unsigned) (offs[i] >> 20),
+			    (void *) p, v, (unsigned) *p);
+			board_early_print(msg);
+			return;
+		}
+	}
+	(void)snprintf(msg, sizeof(msg),
+	    "heap: RAM probe OK, arena %uMB at %p..%p\n",
+	    (unsigned) (HEAP_BYTES >> 20), (void *) heap_region,
+	    (void *) (heap_region + HEAP_BYTES));
+	board_early_print(msg);
+}
 
 /* --- corruption forensics -------------------------------------------------- */
 
@@ -190,6 +231,7 @@ void *pvPortMalloc(size_t length)
 
 	save = _tx_thread_smp_protect();
 	if (heap_tlsf == (tlsf_t) 0) {
+		heap_ram_probe();
 		heap_tlsf = tlsf_create_with_pool(heap_region, HEAP_BYTES);
 	}
 	if (heap_tlsf != (tlsf_t) 0) {

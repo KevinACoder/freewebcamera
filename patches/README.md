@@ -32,7 +32,7 @@ Rules:
 
 Current state:
 
-- `libbsd/` — fifteen patches against the netbsd-11 pin (all local
+- `libbsd/` — seventeen patches against the netbsd-11 pin (all local
   deviations the port needs, registered in `IMPORT-INFO.md`):
   - `0001-compile-out-the-sysctl-tree.patch` — the sysctl configuration
     tree compiles out (`IEEE80211_PORT_NO_SYSCTL`); attach/detach keep
@@ -123,5 +123,27 @@ Current state:
     used; the soft reset (stop_device + init_hw) left the firmware's
     scan engine unready and the supplicant's immediate rescan asserted
     0x090A there.
+  - `0016-video-port-diag-dump.patch` — `UVC_PORT_DIAG`-gated one-shot
+    forensics for the video(4) read method: a shell-armed dump of the
+    ingress/egress heads, `vs_bytesread`/`vs_drop`/`vs_sequence`, the
+    condvar's waiter/token counts and every buffer's
+    flags/bytesused/length/next pointer, printed from the next
+    `video_stream_write`/`video_stream_sample_done` call.  It is the
+    instrument that produced the UVC bring-up evidence; the switch is a
+    build define, the pin stays untouched.
+  - `0017-video-init-buffer-busy.patch` — **the UVC data path fix**:
+    `struct video_buffer.busy` (the read-side refcount) is never
+    initialized — `video_buffer_alloc()` uses `kmem_alloc()` and
+    `video_stream_realloc_bufs()`'s init loop sets every other field but
+    this one, so the field carries whatever the allocator left there.
+    Native NetBSD gets zeroed fresh pages and never notices; on this port
+    the reused TLSF heap hands back garbage, so the first `videoread()`
+    bails in the `if (vb->busy)` branch (blocking: parks in the busy-wait
+    forever; `O_NONBLOCK`: silent `EAGAIN` on the head buffer), no sample
+    ever returns to the ingress queue, and the middle layer latches
+    `vs_drop` — the whole "drop-forever / lost wakeup" family one round
+    of forensics chased.  The patch zeroes `busy` at buffer init and
+    again in `video_stream_enqueue()` (a sample handed back to the driver
+    is by definition not under userspace control).
 - `threadx/`, `cherrysh/`, `cherryrb/`, `lwip/` — no patches; used
   byte-identical to their pins.

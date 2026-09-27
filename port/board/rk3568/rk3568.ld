@@ -19,7 +19,15 @@
 ENTRY(_start)
 
 RAM_BASE = 0x0a000000;
-RAM_SIZE = 96M;
+/* 3 GiB of the 4 GiB DDR: the port's MMU maps Normal cacheable RAM for
+ * all of [0x0a000000, 0xc0000000) (L1[0]'s 2 MiB blocks up to
+ * 0x40000000, then two 1 GiB Normal blocks), and 0xc0000000+ is the
+ * peripheral/Device window.  The guard used to be 96M - that only ever
+ * described the image's own footprint; the 100 MB system heap (heap.c)
+ * needs the window to be honest about what is mapped, and heap_ram_probe()
+ * checks the arena's pages at boot.  The image itself stays well under
+ * 0x11000000. */
+RAM_SIZE = 3072M;
 
 SECTIONS
 {

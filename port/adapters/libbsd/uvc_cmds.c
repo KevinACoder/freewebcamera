@@ -20,6 +20,7 @@
 #include <sys/videoio.h>
 
 #include "av_video.h"
+#include "av_dump.h"
 
 static uint32_t
 uvc_fourcc(const char *s)
@@ -159,6 +160,7 @@ cmd_uvc(int argc, char **argv)
 		 * Per-channel on purpose: the middle layer's write-path
 		 * prints fire per payload and will bury the console, so it
 		 * stays off unless asked for explicitly. */
+#if defined(UVIDEO_DEBUG)
 		extern int uvideodebug;
 		extern int videodebug;
 		int uv = argc > 2 ? atoi(argv[2]) : 1;
@@ -168,16 +170,25 @@ cmd_uvc(int argc, char **argv)
 		videodebug = vd;
 		printf("uvc: debug uvideo=%d video=%d\n", uvideodebug,
 		    videodebug);
+#else
+		printf("uvc: dbg needs the UVC_DEBUG=1 build "
+		    "(make clean; make UVC_DEBUG=1)\n");
+#endif
 		return 0;
 	}
 	if (argc >= 2 && strcmp(argv[1], "qdump") == 0) {
 		/* one-shot middle-layer snapshot (patches/libbsd/0016):
 		 * the next write/sample_done prints the ingress/egress
 		 * heads plus every buffer's flag/owner state */
+#if defined(UVC_PORT_DIAG)
 		extern int video_diag_dump_req;
 
 		video_diag_dump_req = 1;
 		printf("uvc: queue snapshot armed (next UVC event prints)\n");
+#else
+		printf("uvc: qdump needs the UVC_DEBUG=1 build "
+		    "(make clean; make UVC_DEBUG=1)\n");
+#endif
 		return 0;
 	}
 	if (argc >= 2 && strcmp(argv[1], "bufs") == 0) {
@@ -206,12 +217,43 @@ cmd_uvc(int argc, char **argv)
 		(void) av_video_read_probe(0, count);
 		return 0;
 	}
+	if (argc >= 2 && strcmp(argv[1], "dump") == 0) {
+		/* raw byte stream off the board; the host side is
+		 * tools/host/av_stream_recv.py.  Default direction is the
+		 * board listening (the host dials 192.168.0.249:<port>, no
+		 * Windows inbound rule needed); the client form is there for
+		 * the other lab path. */
+		if (argc >= 3 && strcmp(argv[2], "off") == 0) {
+			av_dump_stop(AV_DUMP_VIDEO);
+			return 0;
+		}
+		if (argc >= 4 && strcmp(argv[2], "listen") == 0) {
+			if (av_dump_start(AV_DUMP_VIDEO, AV_DUMP_SERVER,
+			    argv[3]) != 0) {
+				printf("uvc: dump listen failed (want a port, "
+				    "e.g. 9100)\n");
+			}
+			return 0;
+		}
+		if (argc >= 3) {
+			if (av_dump_start(AV_DUMP_VIDEO, AV_DUMP_CLIENT,
+			    argv[2]) != 0) {
+				printf("uvc: dump start failed (want <ip>:<port>, "
+				    "e.g. 192.168.0.18:9100)\n");
+			}
+			return 0;
+		}
+		printf("uvc: usage: uvc dump listen <port> | "
+		    "dump <ip>:<port> | dump off\n");
+		return 0;
+	}
 	printf("usage: uvc list | video on [WxH] [FCCC] [fps] | "
-	    "video off | stats | read [n] | bufs | qdump | dbg [uv] [vd]\n");
+	    "video off | stats | read [n] | bufs | dump [<ip>:<port>|off] | "
+	    "qdump | dbg [uv] [vd]\n");
 	return 0;
 }
 
 CSH_CMD_EXPORT_ALIAS_FULL(cmd_uvc, uvc,
-    "uvc list | video on [WxH] [FCCC] [fps] | video off | stats",
-    "UVC camera: enumerate Pro 9000 formats, pump the isoc stream, "
-    "print capture counters");
+    "uvc list | video on [WxH] [FCCC] [fps] | video off | stats | dump",
+    "UVC camera: enumerate Pro 9000 formats, pump the isoc stream, dump "
+    "the raw byte stream to the host, print capture counters");
