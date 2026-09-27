@@ -365,12 +365,27 @@ static int cmd_wlan(int argc, char **argv)
 #endif
 #endif
 
+#if CONFIG_USB_BACKEND_CHERRYUSB
+	/* The compat layer's submit/complete reconciliation: the probe that
+	 * answers "did the HCD lose a completion" when a data path stalls
+	 * (armed vs parked vs in-flight per device, plus the watchdog and
+	 * pipe-queue counters). */
+	if (argc >= 2 && strcmp(argv[1], "usbstats") == 0) {
+		extern void wlan_usbdi_stats_dump(void);
+
+		wlan_usbdi_stats_dump();
+		return 0;
+	}
+#endif
+
 #if WLAN_HAS_NETBSD_USB_DUMPS
 #if CONFIG_USB_DEBUG_DEFAULT
 #define USBBUG_TAIL " | usbdebug <n>"
 #else
 #define USBBUG_TAIL ""
 #endif
+#elif CONFIG_USB_BACKEND_CHERRYUSB
+#define USBBUG_TAIL " | usbstats"
 #else
 #define USBBUG_TAIL ""
 #endif
