@@ -1,9 +1,9 @@
 diff --git a/port/xhci/usb_hc_xhci.c b/port/xhci/usb_hc_xhci.c
 new file mode 100644
-index 00000000..e54e3b7f
+index 00000000..4459fef8
 --- /dev/null
 +++ b/port/xhci/usb_hc_xhci.c
-@@ -0,0 +1,2163 @@
+@@ -0,0 +1,2295 @@
 +/*
 + * @file   usb_hc_xhci.c
 + * @brief  DWC3 xHCI host controller driver for the RK3568 USB3 socket
@@ -354,7 +354,16 @@ index 00000000..e54e3b7f
 +
 +		if (ri == ring->num_trbs - 1U) {
 +			/* LINK TRB: back to the ring base, TC flips the
-+			 * consumer cycle */
++			 * consumer cycle.  This iteration's own TRB still
++			 * gets written past the link - the first cut skipped
++			 * it with a continue, and a control TD crossing the
++			 * link lost its STATUS TRB: the controller ran
++			 * SETUP+DATA, parked on the link target waiting for
++			 * the flipped cycle that the discarded STATUS was
++			 * supposed to carry, and every later transfer timed
++			 * out after the kill/reset re-armed cells with the
++			 * other cycle state (board evidence 2026-09-28,
++			 * efuse reads died at ep0 TRB 255) */
 +			ring->trbs[ri].dw0 = (uint32_t)(uintptr_t)ring->trbs;
 +			ring->trbs[ri].dw1 = 0U;
 +			ring->trbs[ri].dw2 = 0U;
@@ -362,7 +371,6 @@ index 00000000..e54e3b7f
 +				TRB3_TYPE_SET(TRB_TYPE_LINK) | TRB3_ENT | cs;
 +			ri = 0U;
 +			cs ^= 1U;
-+			continue;
 +		}
 +		if (first_slot == 0xFFFFFFFFU) {
 +			first_slot = ri;
@@ -409,6 +417,9 @@ index 00000000..e54e3b7f
 + * re-arm the ring). */
 +static struct xhci_dev *xhci_find_dev(struct xhci_hcd *hcd, uint8_t slot_id);
 +static void xhci_event_process(struct xhci_hcd *hcd);
++static void xhci_ep0_dbg_dump(struct xhci_hcd *hcd, struct xhci_dev *dev,
++			      struct xhci_ring *ring, struct usbh_urb *urb,
++			      uint32_t irq0, uint32_t tevt0, const char *why);
 +
 +static int xhci_do_command(struct xhci_hcd *hcd, const struct xhci_trb *trb,
 +			   uint32_t timeout_ms)
@@ -1487,12 +1498,39 @@ index 00000000..e54e3b7f
 +		return ret;
 +	}
 +
++	if (urb->ep == &hport->ep0) {
++		hcd->dbg_ctrl_n++;
++		if ((hcd->dbg_ctrl_n <= 4U) ||
++		    ((hcd->dbg_ctrl_n & 0xFFU) == 0U)) {
++			xhci_ep0_dbg_dump(hcd, dev, ring, urb, hcd->dbg_irq_n,
++					  hcd->dbg_tevt_n, "submit");
++		}
++	}
++
 +	if (urb->timeout > 0U) {
 +		/* the completion path gives the ring's waitsem (the ehci
 +		 * qh->waitsem shape) */
++		uint32_t irq0 = hcd->dbg_irq_n;
++		uint32_t tevt0 = hcd->dbg_tevt_n;
++
 +		ret = usb_osal_sem_take(ring->waitsem, urb->timeout);
 +		if (ret < 0) {
++			/* the event may already sit in the ring with the
++			 * level interrupt lost (board 2026-09-28: EINT set,
++			 * no IRQ for the whole 500 ms window): one
++			 * synchronous drain before concluding - the same
++			 * shape as the command timeout path below */
++			xhci_event_process(hcd);
++			ret = usb_osal_sem_take(ring->waitsem, 10U);
++		}
++		if (ret < 0) {
 +			urb->timeout = 0U;
++			hcd->dbg_tmo_n++;
++			if ((hcd->dbg_tmo_n <= 4U) ||
++			    ((hcd->dbg_tmo_n & 0x1FU) == 0U)) {
++				xhci_ep0_dbg_dump(hcd, dev, ring, urb, irq0,
++						  tevt0, "timeout");
++			}
 +			usbh_kill_urb(urb);
 +			return ret;
 +		}
@@ -1500,6 +1538,65 @@ index 00000000..e54e3b7f
 +		ret = urb->errorcode;
 +	}
 +	return ret;
++}
++
++/* forensics 2026-09-28: ep0 state at the two moments that discriminate the
++ * timeout hypotheses - right after a control TD was queued (the working
++ * enumeration baseline) and at the wait failure (the driver-path scene).
++ * The controller-owned device context is invalidated before the read; the
++ * event window shows the control words of the cells the next drain pass
++ * would evaluate; the irq/tevt snapshots bound what moved during the wait. */
++static void xhci_ep0_dbg_dump(struct xhci_hcd *hcd, struct xhci_dev *dev,
++			      struct xhci_ring *ring, struct usbh_urb *urb,
++			      uint32_t irq0, uint32_t tevt0, const char *why)
++{
++	uint32_t *octx = xhci_out_ctx(dev, 1U);
++
++	usbh_console_printf(
++		"xhci: ep0 %s: slot=%u urb=%p setup=%02x/%02x val=%04x len=%u buf=%p\n",
++		why, dev->slot_id, (void *)urb,
++		(urb->setup != NULL) ? urb->setup->bmRequestType : 0U,
++		(urb->setup != NULL) ? urb->setup->bRequest : 0U,
++		(urb->setup != NULL) ? urb->setup->wValue : 0U,
++		urb->transfer_buffer_length, (void *)urb->transfer_buffer);
++	usbh_console_printf(
++		"xhci: ep0 ring: enq=%u cs=%u dq=%u td.urb=%p td.st=%u killed=%u first=%u last=%u\n",
++		ring->ep, ring->cs, ring->dequeue, (void *)ring->td.urb,
++		ring->td.state, ring->td.killed, ring->td.first_idx,
++		ring->td.last_idx);
++	usbh_console_printf(
++		"xhci: ep0 regs: crcr=%08x cmd=%08x sts=%08x iman=%08x dnctrl=%08x\n",
++		xhci_r32(hcd, XHCI_CRCR_LO), xhci_r32(hcd, XHCI_USBCMD),
++		xhci_r32(hcd, XHCI_USBSTS), xhci_r32_rts(hcd, XHCI_IMAN(0)),
++		xhci_r32(hcd, XHCI_DNCTRL));
++	xhci_dcache_invalidate(dev->dev_ctx,
++			       dev->ctxsz * (1U + XHCI_MAX_DCI));
++	usbh_console_printf(
++		"xhci: ep0 ctx: st=%u mps=%u dqlo=%08x dqhi=%08x dcs=%u\n",
++		octx[0] & 0x7U, (octx[1] >> 16) & 0xFFFFU,
++		octx[2] & ~0xFU, octx[3], octx[2] & 0x1U);
++	usbh_console_printf(
++		"xhci: ep0 evwin: ep=%u cs=%u next4=%08x %08x %08x %08x\n",
++		hcd->event_ep, hcd->event_cs,
++		hcd->event_trbs[hcd->event_ep].dw3,
++		hcd->event_trbs[(hcd->event_ep + 1U) %
++				CONFIG_USBHOST_XHCI_EVENT_RING_SIZE].dw3,
++		hcd->event_trbs[(hcd->event_ep + 2U) %
++				CONFIG_USBHOST_XHCI_EVENT_RING_SIZE].dw3,
++		hcd->event_trbs[(hcd->event_ep + 3U) %
++				CONFIG_USBHOST_XHCI_EVENT_RING_SIZE].dw3);
++	if ((ring->td.urb != NULL) && (ring->td.last_idx < ring->num_trbs) &&
++	    (ring->td.first_idx < ring->num_trbs)) {
++		usbh_console_printf(
++			"xhci: ep0 tdtrb: first=%08x last=%08x\n",
++			ring->trbs[ring->td.first_idx].dw3,
++			ring->trbs[ring->td.last_idx].dw3);
++	}
++	usbh_console_printf(
++		"xhci: ep0 ctr: irq=%u->%u todo=%u tevt=%u->%u drop_urb=%u drop_dev=%u ctrl=%u tmo=%u\n",
++		irq0, hcd->dbg_irq_n, hcd->dbg_irq_todo_n, tevt0,
++		hcd->dbg_tevt_n, hcd->dbg_drop_urb, hcd->dbg_drop_dev,
++		hcd->dbg_ctrl_n, hcd->dbg_tmo_n);
 +}
 +
 +int usbh_submit_urb(struct usbh_urb *urb)
@@ -1558,11 +1655,27 @@ index 00000000..e54e3b7f
 +		(void)xhci_do_command(hcd, &trb, KILL_TIMEOUT_MS);
 +
 +		memset(&trb, 0, sizeof(trb));
-+		trb.dw0 = (uint32_t)(uintptr_t)ring->trbs;
++		/* DCS lives in dw0 bit0 (Set TR Dequeue Pointer, spec table
++		 * 131), not in the dw3 cycle bit - the base is 64B aligned so
++		 * a bare pointer re-arms the endpoint with DCS=0 while the
++		 * ring reset arms the producer with cs=1, and every later
++		 * transfer on this ring times out for good (board
++		 * 2026-09-28: the ctx read back dcs=0, td cycle=1, tmo storm)
++		 */
++		trb.dw0 = (uint32_t)(uintptr_t)ring->trbs | XHCI_CRCR_LO_RCS;
 +		trb.dw1 = (uint32_t)((uintptr_t)ring->trbs >> 32);
 +		trb.dw3 = TRB3_TYPE_SET(TRB_TYPE_SET_TR_DEQUEUE) |
-+			  TRB3_EP_ID(dci) | TRB3_SLOT_ID(slot_id) | TRB3_CYCLE;
++			  TRB3_EP_ID(dci) | TRB3_SLOT_ID(slot_id);
 +		(void)xhci_do_command(hcd, &trb, KILL_TIMEOUT_MS);
++
++		/* Set TR Dequeue leaves the endpoint in the Stopped state;
++		 * ring its doorbell so the controller resumes fetching at
++		 * the re-armed dequeue - without this the next submission
++		 * sits behind a stopped ep and times out forever (board
++		 * 2026-09-28: ctx st=2, dcs=1, dq already at the TD) */
++		*(volatile uint32_t *)(hcd->db +
++				       ((uint32_t)dev->slot_id << 2)) =
++			XHCI_DB_TARGET(dci);
 +	}
 +
 +	flags = usb_osal_enter_critical_section();
@@ -1674,6 +1787,12 @@ index 00000000..e54e3b7f
 +	} else {
 +		ring->td.actual = 0U;
 +		ring->td.error = -USB_ERR_IO;
++		/* the table-out code IS the first-cause datum: a Data Buffer
++		 * Error, Context State Error etc. all collapse into -IO here
++		 * and the submitter only sees -12 (board 2026-09-28: ep0
++		 * died with ep state Stopped and no name for the code) */
++		usbh_console_printf("xhci: xfer evt (code=%u) idx=%u\n",
++				    code, idx);
 +	}
 +
 +	ring->td.state = (ring->td.error == 0) ? 1U : 2U;
@@ -1695,6 +1814,8 @@ index 00000000..e54e3b7f
 +	struct xhci_ring *ring;
 +	uint32_t idx;
 +
++	hcd->dbg_tevt_n++;
++
 +	/* NetBSD: the underrun/overrun events carry no usable pointer */
 +	if ((code == TRB_CODE_RING_UNDERRUN) || (code == TRB_CODE_RING_OVERRUN)) {
 +		return;
@@ -1702,6 +1823,7 @@ index 00000000..e54e3b7f
 +	dev = xhci_find_dev(hcd, slot_id);
 +	if ((dev == NULL) || (dci == 0U) || (dci >= XHCI_MAX_DCI) ||
 +	    (dev->ep_rings[dci] == NULL)) {
++		hcd->dbg_drop_dev++;
 +		usbh_console_printf(
 +			"xhci: xfer evt (no dev/ring) slot=%u dci=%u code=%u\n",
 +			slot_id, dci, code);
@@ -1709,7 +1831,15 @@ index 00000000..e54e3b7f
 +	}
 +	ring = dev->ep_rings[dci];
 +	if (ring->td.urb == NULL) {
-+		/* a late event for an already-reaped TD (post-kill) */
++		/* a late event for an already-reaped TD (post-kill) - silent
++		 * by design, the counter keeps the forensics honest */
++		hcd->dbg_drop_urb++;
++		if ((hcd->dbg_drop_urb <= 4U) ||
++		    ((hcd->dbg_drop_urb & 0x3FU) == 0U)) {
++			usbh_console_printf(
++				"xhci: xfer evt (no td) slot=%u dci=%u code=%u n=%u\n",
++				slot_id, dci, code, hcd->dbg_drop_urb);
++		}
 +		return;
 +	}
 +	if (trb_ptr < (uint32_t)(uintptr_t)ring->trbs ||
@@ -1982,6 +2112,7 @@ index 00000000..e54e3b7f
 +	if (hcd->running == 0U) {
 +		return;
 +	}
++	hcd->dbg_irq_n++;
 +
 +	/* NetBSD xhci_intr1: bail on nothing-to-do.  The event's DMA write
 +	 * may still be in flight when the level interrupt lands (the
@@ -1995,6 +2126,7 @@ index 00000000..e54e3b7f
 +	if ((usbsts & (XHCI_STS_HSE | XHCI_STS_EINT | XHCI_STS_PCD)) == 0U) {
 +		return;
 +	}
++	hcd->dbg_irq_todo_n++;
 +	for (spin = 0U; spin < 10U; spin++) {
 +		xhci_event_process(hcd);
 +
@@ -2169,10 +2301,10 @@ index 00000000..e54e3b7f
 +#endif
 diff --git a/port/xhci/usb_hc_xhci.h b/port/xhci/usb_hc_xhci.h
 new file mode 100644
-index 00000000..2018fe85
+index 00000000..0ccb4958
 --- /dev/null
 +++ b/port/xhci/usb_hc_xhci.h
-@@ -0,0 +1,354 @@
+@@ -0,0 +1,365 @@
 +/*
 + * @file   usb_hc_xhci.h
 + * @brief  xHCI register/TRB/context definitions for the DWC3 xHCI port
@@ -2514,6 +2646,17 @@ index 00000000..2018fe85
 +	struct xhci_dev devs[CONFIG_USBHOST_XHCI_MAX_SLOTS];
 +	/* transfer rings */
 +	struct xhci_ring rings[CONFIG_USBHOST_XHCI_RINGS];
++	/* forensics 2026-09-28: driver-path ep0 control transfers time out
++	 * (-14) while the same-ring enumeration transfers pass; the counters
++	 * name the stage that swallows the completion, the timeout dump
++	 * prints the controller's view at the moment of the wait failure */
++	volatile uint32_t dbg_irq_n;	/* IRQ entries */
++	volatile uint32_t dbg_irq_todo_n; /* entries past the nothing-to-do bail */
++	volatile uint32_t dbg_tevt_n;	/* transfer events seen */
++	volatile uint32_t dbg_drop_urb;	/* events with td.urb == NULL */
++	volatile uint32_t dbg_drop_dev;	/* events with no dev/ring */
++	uint32_t dbg_ctrl_n;		/* ep0 control submissions */
++	uint32_t dbg_tmo_n;		/* ep0 wait timeouts */
 +};
 +
 +/* the multi-HC dispatcher reads this through usbh_register_hc_driver() */
