@@ -326,7 +326,8 @@ ADAPTER_SRCS += \
 	port/adapters/netutils/iperf3_port.c \
 	port/adapters/netutils/iperf3_cmd.c \
 	port/adapters/netutils/ntp_port.c \
-	port/adapters/netutils/telnet_port.c
+	port/adapters/netutils/telnet_port.c \
+	port/adapters/netutils/loopbench.c
 endif
 
 DRIVER_SRCS := drivers/uart_ns16550.c
@@ -422,7 +423,8 @@ LIBBSD_IMPL_CORE_SRCS := \
 LIBBSD_ADAPTER_CORE_SRCS := \
 	port/adapters/libbsd/wlan_adapter.c \
 	port/adapters/libbsd/wlan_console.c \
-	port/adapters/libbsd/wlan_cmds.c
+	port/adapters/libbsd/wlan_cmds.c \
+	port/adapters/libbsd/wlan_ap.c
 
 # One line, one driver TU set: the bus glue + platform + firmware blob of
 # each wireless line (the driver .c compiles inside the *_reg.c wrapper so

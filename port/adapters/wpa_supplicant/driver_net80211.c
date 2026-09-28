@@ -65,8 +65,10 @@
 
 /* the lwIP presentation (host world; the netif and the DHCP wiring
  * live there) */
-extern void wlan_lwip_assoc_notify(int assoc);
+extern void wlan_lwip_assoc_notify_adapter(
+    const struct wlan_port_adapter *adapter, int assoc);
 extern int wlan_lwip_ensure(void);
+struct wlan_port_adapter;
 
 struct wpa_net80211_drv_data {
 	void *ctx; /* wpa_s */
@@ -105,13 +107,17 @@ int wlan_supp_ensure_up(void)
 /*
  * Queue protocol notifications from the driver worker for the supplicant.
  */
-static void wpa_port_wireless_event(enum wlan_port_event event,
+static void wpa_port_wireless_event(
+    const struct wlan_port_adapter *adapter, enum wlan_port_event event,
     const uint8_t *addr, void *arg) {
 	struct wpa_net80211_drv_data *drv = arg;
 	union wpa_event_data data;
 
 	(void) addr;
-	if (drv->ctx == NULL) {
+	/* the two-NIC images: only our adapter's events - an AP-role
+	 * adapter notifies per station join/leave and must not disturb
+	 * this station's link */
+	if (drv->ctx == NULL || adapter == NULL || adapter->ic != drv->ic) {
 		return;
 	}
 	memset(&data, 0, sizeof(data));
@@ -124,13 +130,13 @@ static void wpa_port_wireless_event(enum wlan_port_event event,
 		break;
 	case WLAN_PORT_ASSOC:
 		drv->associated = 1;
-		wlan_lwip_assoc_notify(1);
+		wlan_lwip_assoc_notify_adapter(adapter, 1);
 		wpa_printf(MSG_DEBUG, "wpa: association complete");
 		wpa_send_event(drv->ctx, EVENT_ASSOC, NULL);
 		break;
 	case WLAN_PORT_DISASSOC:
 		drv->associated = 0;
-		wlan_lwip_assoc_notify(0);
+		wlan_lwip_assoc_notify_adapter(adapter, 0);
 		wpa_send_event(drv->ctx, EVENT_DISASSOC, NULL);
 		break;
 	}
@@ -158,12 +164,14 @@ static void wpa_port_scan_poll(void *eloop_ctx, void *timeout_ctx) {
 /* ------------------------------------------------------------------ */
 /* EAPOL delivery (usb worker context, copies only) */
 
-static void wpa_port_eapol_rx(const uint8_t src[6], const uint8_t *buf,
-    size_t len, void *arg) {
+static void wpa_port_eapol_rx(const struct wlan_port_adapter *adapter,
+    const uint8_t src[6], const uint8_t *buf, size_t len, void *arg) {
 	struct wpa_net80211_drv_data *drv = arg;
 	union wpa_event_data data;
 
-	if (drv->ctx == NULL) {
+	/* the two-NIC images: only our adapter's EAPOL (an AP-role
+	 * adapter has no supplicant) */
+	if (drv->ctx == NULL || adapter == NULL || adapter->ic != drv->ic) {
 		return;
 	}
 	memset(&data, 0, sizeof(data));

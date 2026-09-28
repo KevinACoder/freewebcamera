@@ -73,7 +73,6 @@ void wlan_port_set_event_handler(wlan_event_fn fn, void *arg) {
 void rt_ieee80211msg(struct ifnet *ifp, int what, const void *data, size_t len) {
 	enum wlan_port_event event;
 
-	(void) ifp;
 	if (wlan_event == NULL) {
 		return;
 	}
@@ -91,7 +90,8 @@ void rt_ieee80211msg(struct ifnet *ifp, int what, const void *data, size_t len) 
 	default:
 		return;
 	}
-	wlan_event(event, len >= ETHER_ADDR_LEN ? data : NULL, wlan_event_arg);
+	wlan_event(wlan_port_adapter_for_ifnet(ifp), event,
+	    len >= ETHER_ADDR_LEN ? data : NULL, wlan_event_arg);
 }
 
 void wlan_port_set_eapol_rx(wlan_eapol_rx_fn fn, void *arg) {
@@ -106,23 +106,26 @@ void wlan_port_set_data_rx(wlan_data_rx_fn fn, void *arg) {
 
 void if_percpuq_enqueue(void *pq, struct mbuf *m) {
 	const struct ether_header *eh;
-
-	(void) pq;
+	const struct wlan_port_adapter *adapter;
 
 	if (m == NULL) {
 		return;
 	}
 	eh = mtod(m, const struct ether_header *);
+	/* pq is the percpuq token, which is the ifnet itself - the frame's
+	 * origin for the per-adapter sinks */
+	adapter = wlan_port_adapter_for_ifnet(pq);
 
 	if (ntohs(eh->ether_type) == ETHERTYPE_PAE && wlan_eapol_rx != NULL) {
 		/* the payload follows the 14-byte ethernet header */
-		wlan_eapol_rx(eh->ether_shost, mtod(m, const uint8_t *) +
-		    sizeof(*eh), m->m_len - sizeof(*eh), wlan_eapol_rx_arg);
+		wlan_eapol_rx(adapter, eh->ether_shost,
+		    mtod(m, const uint8_t *) + sizeof(*eh),
+		    m->m_len - sizeof(*eh), wlan_eapol_rx_arg);
 		m_freem(m);
 		return;
 	}
 	if (wlan_data_rx != NULL) {
-		wlan_data_rx(mtod(m, const uint8_t *), m->m_len,
+		wlan_data_rx(adapter, mtod(m, const uint8_t *), m->m_len,
 		    wlan_data_rx_arg);
 	}
 	m_freem(m);

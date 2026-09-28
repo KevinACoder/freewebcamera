@@ -50,6 +50,12 @@ extern int wlan_urtwn_reg_write(unsigned addr, unsigned val);
 extern void wlan_urtwn_txq_dump(void);
 #endif
 
+/* HOSTAP entry points (wlan_ap.c) */
+extern int wlan_ap_start(const char *nic, const char *ssid,
+    unsigned ch, unsigned bintval);
+extern int wlan_ap_stop(const char *nic);
+extern void wlan_ap_status(const char *nic);
+
 /* callout diagnostic gate (osal layer, see "wlan calib") */
 extern volatile unsigned wlan_callout_fires;
 extern volatile unsigned wlan_callout_sched;
@@ -121,6 +127,55 @@ static int cmd_wlan(int argc, char **argv)
 		 * lock/unlock ring with caller addresses (nm the ELF to name
 		 * them); the same dump the unlock-by-non-owner panic prints */
 		wlan_ser_dump();
+		return 0;
+	}
+
+	/* adapter focus: the registry keeps every NIC that attached, the
+	 * scan/wpa surface (and the supplicant bridge) rides the active one */
+	if (argc >= 3 && strcmp(argv[1], "nic") == 0) {
+		if (wlan_port_select(argv[2]) != 0) {
+			csh_printf(csh, "wlan: no adapter '%s' "
+				   "(see: wlan status)\n", argv[2]);
+		}
+		return 0;
+	}
+
+	/* HOSTAP on a (named or active) adapter: open network, one shot.
+	 * The chip work lands on the driver worker; poll with
+	 * `wlan ap status`. */
+	if (argc >= 3 && strcmp(argv[1], "ap") == 0 &&
+	    strcmp(argv[2], "start") == 0) {
+		const char *ssid = argv[3];
+		int ch = argc > 4 ? atoi(argv[4]) : 11;
+		int bintval = argc > 5 ? atoi(argv[5]) : 100;
+		int ret;
+
+		if (argc < 4) {
+			csh_printf(csh, "usage: wlan ap start <ssid> [ch] "
+				   "[bintval]\n");
+			return 0;
+		}
+		ret = wlan_ap_start(NULL, ssid, (unsigned) ch,
+		    (unsigned) bintval);
+		if (ret == 0) {
+			csh_printf(csh, "wlan: ap starting ssid=\"%s\" ch=%d "
+				   "bintval=%d (poll: wlan ap status)\n",
+				   ssid, ch, bintval);
+		} else {
+			csh_printf(csh, "wlan: ap start failed (%d)\n", ret);
+		}
+		return 0;
+	}
+	if (argc >= 3 && strcmp(argv[1], "ap") == 0 &&
+	    strcmp(argv[2], "stop") == 0) {
+		int ret = wlan_ap_stop(NULL);
+
+		csh_printf(csh, "wlan: ap stop %s\n",
+			   ret == 0 ? "ok" : "(not running)");
+		return 0;
+	}
+	if (argc >= 2 && strcmp(argv[1], "ap") == 0) {
+		wlan_ap_status(NULL);
 		return 0;
 	}
 
@@ -426,9 +481,10 @@ static int cmd_wlan(int argc, char **argv)
 
 	csh_printf(csh,
 		   "usage: wlan start | scan [seconds] | status | nic <name>"
+		   " | ap start <ssid> [ch] [bintval] | ap stop | ap status"
 		   WLAN_CMD_TAIL "\n");
 	return 0;
 }
 
-CSH_CMD_EXPORT_ALIAS_FULL(cmd_wlan, wlan, "wlan start | scan [s] | status | hist",
-			  "net80211 over NetBSD usb: bring up the radio and scan");
+CSH_CMD_EXPORT_ALIAS_FULL(cmd_wlan, wlan, "wlan start | scan [s] | status | ap start/stop/status",
+			  "net80211 port: bring up the radio, scan, run hostap");

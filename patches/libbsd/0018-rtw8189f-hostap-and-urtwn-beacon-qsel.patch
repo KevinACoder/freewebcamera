@@ -1,0 +1,277 @@
+diff --git a/sys/dev/sdmmc/if_rtw8189f.c b/sys/dev/sdmmc/if_rtw8189f.c
+index 5c9d721a7521..c15bd242a836 100644
+--- a/sys/dev/sdmmc/if_rtw8189f.c
++++ b/sys/dev/sdmmc/if_rtw8189f.c
+@@ -240,6 +240,7 @@ rtw8189f_attachhook(device_t self)
+ 	ic->ic_state = IEEE80211_S_INIT;
+ 	ic->ic_caps =
+ 	    IEEE80211_C_MONITOR |
++	    IEEE80211_C_HOSTAP |
+ 	    IEEE80211_C_SHPREAMBLE |
+ 	    IEEE80211_C_SHSLOT |
+ 	    IEEE80211_C_WPA;		/* 802.11i (software crypto) */
+@@ -684,6 +685,12 @@ rtw8189f_newstate_cb(struct rtw8189f_softc *sc,
+ 
+ 	switch (nstate) {
+ 	case IEEE80211_S_SCAN:
++		/* The HOSTAP startup leg: net80211 runs ieee80211_create_ibss
++		 * from this transition (des_chan set by the shell) and comes
++		 * back through RUN.  No dwell machinery - the scan callout
++		 * would hop channels away from the BSS. */
++		if (ic->ic_opmode == IEEE80211_M_HOSTAP)
++			break;
+ 		/* One channel per pass; the callout moves to the next. */
+ 		rtw8189f_set_channel(sc,
+ 		    ieee80211_chan2ieee(ic, ic->ic_curchan));
+@@ -719,6 +726,12 @@ rtw8189f_newstate_cb(struct rtw8189f_softc *sc,
+ 			 * response must pass it (vendor joins with the
+ 			 * BSSID already written). */
+ 			rtw8189f_set_bssid(sc, ic->ic_bss->ni_bssid);
++			if (ic->ic_opmode == IEEE80211_M_HOSTAP &&
++			    nstate == IEEE80211_S_RUN) {
++				/* The BSS exists: own the nettype, the TSF
++				 * and the beacon template. */
++				rtw8189f_ap_enable(sc);
++			}
+ 		}
+ 		break;
+ 
+@@ -727,6 +740,9 @@ rtw8189f_newstate_cb(struct rtw8189f_softc *sc,
+ 			sc->sc_scanning = false;
+ 			rtw8189f_scan_rx_fltr(sc, false);
+ 		}
++		if (sc->sc_ap_beaconing) {
++			rtw8189f_ap_disable(sc);
++		}
+ 		break;
+ 	}
+ 
+diff --git a/sys/dev/sdmmc/rtw8189f_chip.c b/sys/dev/sdmmc/rtw8189f_chip.c
+index 497e2535a02d..60528d6b2330 100644
+--- a/sys/dev/sdmmc/rtw8189f_chip.c
++++ b/sys/dev/sdmmc/rtw8189f_chip.c
+@@ -1903,6 +1903,141 @@ out:
+ 	m_freem(m);
+ }
+ 
++/* ------------------------------------------------------------------ */
++/* HOSTAP                                                              */
++/* ------------------------------------------------------------------ */
++
++/*
++ * Upload the beacon template once: qsel BEACON parks the frame in the
++ * firmware's beacon queue and the firmware transmits it at every TBTT -
++ * the same one-shot contract urtwn keeps on the USB 88E.  Runs on the
++ * worker (sc_txbuf is shared with rtw8189f_tx_frame, and only the worker
++ * holds the serializer there).
++ */
++static int
++rtw8189f_tx_beacon(struct rtw8189f_softc *sc, struct mbuf *m)
++{
++	uint8_t *buf = sc->sc_txbuf;
++	uint32_t len, pages, free_queue, free_pub;
++	int tries;
++
++	len = (uint32_t)m->m_pkthdr.len;
++	if (len + RTW8189F_TXDESC_SIZE > RTW8189F_TXBUFSZ) {
++		m_freem(m);
++		return ENOBUFS;
++	}
++
++	memset(buf, 0, RTW8189F_TXDESC_SIZE);
++	m_copydata(m, 0, len, buf + RTW8189F_TXDESC_SIZE);
++
++	/* Fixed rate 1M, BEACON queue select; no BMC flag, no CCX report -
++	 * the firmware owns repetition, the retry limit is meaningless for
++	 * a template. */
++	le32enc(buf + 0, (len & RTW8189F_TXDW0_PKTLEN_M) |
++	    (RTW8189F_TXDESC_SIZE << RTW8189F_TXDW0_OFFSET_S));
++	le32enc(buf + 4, RTW8189F_TXDESC_QSEL_BEACON << RTW8189F_TXDW1_QSEL_S);
++	le32enc(buf + 12, RTW8189F_TXDW3_USE_RATE);
++	le32enc(buf + 16, RTW8189F_RATE_1M & RTW8189F_TXDW4_RATE_M);
++	le16enc(buf + 28, rtw8189f_txdesc_chksum(buf));
++
++	len = (len + RTW8189F_TXDESC_SIZE + 3) & ~3u;
++	pages = (len + 127) / 128;
++
++	/* Page credit from the high queue (qsel BEACON drains HIQ) plus
++	 * public pages, like the mgmt path. */
++	for (tries = 0;; tries++) {
++		free_queue = rtw8189f_sdiolocal_read_1(sc,
++		    RTW8189F_SDIO_REG_FREE_TXPG + 0);
++		free_pub = rtw8189f_sdiolocal_read_1(sc,
++		    RTW8189F_SDIO_REG_FREE_TXPG + 6);
++		if (free_queue + free_pub >= pages)
++			break;
++		if (tries >= 100 || sc->sc_dying) {
++			DPRINTF(sc, "beacon: no free pages (%u+%u < %u)\n",
++			    free_queue, free_pub, pages);
++			m_freem(m);
++			return ENOBUFS;
++		}
++		kpause("rtw8189fb", true, mstohz(50), NULL);
++	}
++
++	if (rtw8189f_fifo_write(sc, RTW8189F_WLAN_TX_HIQ_DEVICE_ID, buf,
++	    len) != 0) {
++		DPRINTF(sc, "beacon: fifo write failed\n");
++		m_freem(m);
++		return EIO;
++	}
++
++	sc->sc_tx_beacons++;
++	m_freem(m);
++	return 0;
++}
++
++/*
++ * Take the AP role at RUN: the BSS node exists, the channel and BSSID are
++ * programmed.  nettype AP, the receive filter opened to any BSSID (probe
++ * and auth requests arrive addressed to our BSSID but must not depend on
++ * the CBSSID compare), TSF restarted so beacons stamp a fresh clock, and
++ * the beacon template uploaded once.
++ */
++void
++rtw8189f_ap_enable(struct rtw8189f_softc *sc)
++{
++	struct ieee80211com *ic = &sc->sc_ic;
++	struct mbuf *m;
++	uint32_t v;
++
++	/* nettype AP (0 = no link, 1 = adhoc, 2 = infra STA, 3 = AP). */
++	v = rtw8189f_mac_read_4(sc, RTW8189F_REG_CR);
++	v = (v & ~RTW8189F_CR_NETTYPE_M) | RTW8189F_CR_NETTYPE(RTW8189F_NT_AP);
++	rtw8189f_mac_write_4(sc, RTW8189F_REG_CR, v);
++
++	/* Accept any BSSID for the AP lifetime (the STA default restores
++	 * these bits in chip_init). */
++	sc->sc_rcr &= ~(RTW8189F_RCR_CBSSID_BCN | RTW8189F_RCR_CBSSID_DATA);
++	rtw8189f_mac_write_4(sc, RTW8189F_REG_RCR, sc->sc_rcr);
++
++	/* Restart the TSF: the AP owns the clock its beacons are stamped
++	 * with (self-clearing strobe, toggled like the 88E MSR path). */
++	v = rtw8189f_mac_read_4(sc, RTW8189F_REG_TCR) & ~RTW8189F_TCR_TSFRST;
++	rtw8189f_mac_write_4(sc, RTW8189F_REG_TCR, v);
++	rtw8189f_mac_write_4(sc, RTW8189F_REG_TCR, v | RTW8189F_TCR_TSFRST);
++
++	rtw8189f_mac_write_2(sc, RTW8189F_REG_BCN_INTERVAL,
++	    ic->ic_bss->ni_intval);
++
++	/* One template upload; TIM/DTIM updates stay on the air-less path
++	 * (ieee80211_beacon_update is never called - the urtwn-shaped gap,
++	 * harmless while no station uses power save). */
++	m = ieee80211_beacon_alloc(ic, ic->ic_bss, &sc->sc_bo);
++	if (m == NULL) {
++		aprint_error_dev(sc->sc_dev, "beacon alloc failed\n");
++		return;
++	}
++	if (rtw8189f_tx_beacon(sc, m) != 0)
++		aprint_error_dev(sc->sc_dev, "beacon upload failed\n");
++	else
++		sc->sc_ap_beaconing = true;
++}
++
++/* Back to the STA shape (nettype infra, BSSID compare back on).  The
++ * firmware drops the beacon template once the nettype leaves AP. */
++void
++rtw8189f_ap_disable(struct rtw8189f_softc *sc)
++{
++	uint32_t v;
++
++	v = rtw8189f_mac_read_4(sc, RTW8189F_REG_CR);
++	v = (v & ~RTW8189F_CR_NETTYPE_M) |
++	    RTW8189F_CR_NETTYPE(RTW8189F_NT_LINK_AP);
++	rtw8189f_mac_write_4(sc, RTW8189F_REG_CR, v);
++
++	sc->sc_rcr |= RTW8189F_RCR_CBSSID_BCN | RTW8189F_RCR_CBSSID_DATA;
++	rtw8189f_mac_write_4(sc, RTW8189F_REG_RCR, sc->sc_rcr);
++
++	sc->sc_ap_beaconing = false;
++}
++
+ /* ------------------------------------------------------------------ */
+ /* RX                                                                  */
+ /* ------------------------------------------------------------------ */
+diff --git a/sys/dev/sdmmc/rtw8189f_reg.h b/sys/dev/sdmmc/rtw8189f_reg.h
+index c5215612c255..5286dcfa55b6 100644
+--- a/sys/dev/sdmmc/rtw8189f_reg.h
++++ b/sys/dev/sdmmc/rtw8189f_reg.h
+@@ -221,6 +221,7 @@
+ #define RTW8189F_REG_SIFS_CTX			0x0514
+ #define RTW8189F_REG_SIFS_TRX			0x0516
+ #define RTW8189F_REG_TBTT_PROHIBIT		0x0540
++#define RTW8189F_REG_BCN_INTERVAL		0x0554
+ #define RTW8189F_REG_BCN_CTRL			0x0550
+ #define RTW8189F_REG_DRVERLYINT			0x0558
+ #define RTW8189F_REG_BCNDMATIM			0x0559
+@@ -230,6 +231,8 @@
+ #define RTW8189F_BCN_EN_BCN_FUNCTION		__BIT(3)
+ 
+ /* WMAC configuration. */
++#define RTW8189F_REG_TCR			0x0604
++#define RTW8189F_TCR_TSFRST			__BIT(0)
+ #define RTW8189F_REG_RCR			0x0608
+ #define RTW8189F_REG_RX_DRVINFO_SZ		0x060f
+ #define RTW8189F_REG_MACID			0x0610
+@@ -272,6 +275,7 @@
+ #define RTW8189F_CR_NETTYPE_M			0x30000
+ #define RTW8189F_CR_NETTYPE(x)			(((x) & 0x3) << 16)
+ #define RTW8189F_NT_LINK_AP			0x2
++#define RTW8189F_NT_AP				0x3
+ 
+ /* BB register file and RF LSSI access (rtl8188f_phycfg.c). */
+ #define RTW8189F_BB_HSSI_P1			0x0820	/* rFPGA0_XA_HSSIParameter1 */
+@@ -362,6 +366,7 @@
+  */
+ #define RTW8189F_TXDESC_SIZE			40
+ #define RTW8189F_TXDESC_QSEL_BE			0x00
++#define RTW8189F_TXDESC_QSEL_BEACON		0x10
+ #define RTW8189F_TXDESC_QSEL_MGNT		0x12
+ 
+ /* dword0: [15:0] packet size, [23:16] offset (= descriptor size). */
+diff --git a/sys/dev/sdmmc/rtw8189fvar.h b/sys/dev/sdmmc/rtw8189fvar.h
+index 8aa55c737524..c0d9caf1ba49 100644
+--- a/sys/dev/sdmmc/rtw8189fvar.h
++++ b/sys/dev/sdmmc/rtw8189fvar.h
+@@ -102,6 +102,13 @@ struct rtw8189f_softc {
+ 				    enum ieee80211_state, int);
+ 	callout_t		sc_scan_to;
+ 
++	/* HOSTAP: the beacon template net80211 allocated.  One upload per
++	 * BSS - the firmware repeats it at TBTT, the same contract urtwn
++	 * keeps; ieee80211_beacon_update (TIM/DTIM) never reaches the air. */
++	struct ieee80211_beacon_offsets sc_bo;
++	bool			sc_ap_beaconing;
++	unsigned		sc_tx_beacons;	/* templates uploaded */
++
+ 	/* Worker thread: owns all sleeping chip/bus work at runtime. */
+ 	kmutex_t		sc_work_mtx;
+ 	kcondvar_t		sc_cv;
+@@ -178,6 +185,8 @@ void	rtw8189f_set_channel(struct rtw8189f_softc *, unsigned);
+ void	rtw8189f_scan_rx_fltr(struct rtw8189f_softc *, bool);
+ void	rtw8189f_set_bssid(struct rtw8189f_softc *, const uint8_t *);
+ void	rtw8189f_tx_frame(struct rtw8189f_softc *, struct mbuf *);
++void	rtw8189f_ap_enable(struct rtw8189f_softc *);
++void	rtw8189f_ap_disable(struct rtw8189f_softc *);
+ int	rtw8189f_data_rate_set(unsigned);
+ unsigned rtw8189f_data_rate_get(void);
+ void	rtw8189f_rx_drain(struct rtw8189f_softc *);
+diff --git a/sys/dev/usb/if_urtwn.c b/sys/dev/usb/if_urtwn.c
+index 4c0ee2aecd1e..a4b869eed089 100644
+--- a/sys/dev/usb/if_urtwn.c
++++ b/sys/dev/usb/if_urtwn.c
+@@ -2757,6 +2757,14 @@ urtwn_tx(struct urtwn_softc *sc, struct mbuf *m, struct ieee80211_node *ni,
+ 		tid = qwh->i_qos[0] & IEEE80211_QOS_TID;
+ 	} else if (type != IEEE80211_FC0_TYPE_DATA) {
+ 		tid = R92C_TXDW1_QSEL_MGNT;
++		if ((wh->i_fc[0] & IEEE80211_FC0_SUBTYPE_MASK) ==
++		    IEEE80211_FC0_SUBTYPE_BEACON) {
++			/* the firmware re-transmits a QSEL_BEACON frame at
++			 * every TBTT (the HOSTAP/IBSS template contract);
++			 * a QSEL_MGNT beacon is a one-shot that leaves the
++			 * BSS invisible on air */
++			tid = R92C_TXDW1_QSEL_BEACON;
++		}
+ 	}
+ 
+ 	if (((txd_len + m->m_pkthdr.len) % 64) == 0) /* XXX: 64 */

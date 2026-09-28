@@ -47,7 +47,9 @@ static int cmd_wpa(int argc, char **argv) {
 		}
 		return 0;
 	}
-	if (strcmp(argv[1], "connect") == 0 && (argc == 4 || argc == 5)) {
+	if (strcmp(argv[1], "connect") == 0 &&
+	    (argc == 3 || argc == 4 || argc == 5)) {
+		/* argc == 3: no psk - an open network (key_mgmt NONE) */
 		if (!wpa_port_started()) {
 			/* interface up happens on this (console) thread:
 			 * if_init blocks on the USB workers and must not
@@ -56,12 +58,12 @@ static int cmd_wpa(int argc, char **argv) {
 			wlan_supp_ensure_up();
 			wpa_port_start();
 		}
-		if (argc == 5) {
+		if (argc >= 5) {
 			unsigned int b[6];
 			unsigned char mac[6];
 			int i;
 
-			if (sscanf_bssid(argv[4], b) == 6) {
+			if (argc >= 5 && sscanf_bssid(argv[4], b) == 6) {
 				for (i = 0; i < 6; i++) {
 					mac[i] = (unsigned char) b[i];
 				}
@@ -73,7 +75,8 @@ static int cmd_wpa(int argc, char **argv) {
 				return 1;
 			}
 		} else {
-			ret = wpa_port_connect(argv[2], argv[3]);
+			ret = wpa_port_connect(argv[2],
+			    argc >= 4 ? argv[3] : NULL);
 		}
 		if (ret == 0) {
 			csh_printf(csh, "wpa: connecting to \"%s\"\n",

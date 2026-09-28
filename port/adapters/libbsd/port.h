@@ -75,20 +75,26 @@ struct wlan_port_ifops {
  * Frame delivery (presentation hooks)
  *
  * Data frames that pass the net80211 input path leave the library
- * through these hooks. The presentation layer registers handlers for
+ * through these hooks.  The presentation layer registers handlers for
  * the frames it wants; without a handler frames are dropped as before.
  * Both run in the USB worker context: the handlers must copy the frame
  * and return without blocking.
+ *
+ * Every hook receives the adapter the frame came from: a two-NIC image
+ * runs one net80211 instance per adapter and the sinks route per
+ * adapter (the lwIP bridge owns a netif per adapter).
  */
+
+struct wlan_port_adapter;
 
 /* EAPOL (ethertype 0x888e) frames; buf points at the payload behind
  * the 14-byte ethernet header, src is the ethernet source address. */
-typedef void (*wlan_eapol_rx_fn)(const uint8_t src[6],
-    const uint8_t *buf, size_t len, void *arg);
+typedef void (*wlan_eapol_rx_fn)(const struct wlan_port_adapter *adapter,
+    const uint8_t src[6], const uint8_t *buf, size_t len, void *arg);
 
 /* Every other delivered frame, as a full ethernet frame. */
-typedef void (*wlan_data_rx_fn)(const uint8_t *frame, size_t len,
-    void *arg);
+typedef void (*wlan_data_rx_fn)(const struct wlan_port_adapter *adapter,
+    const uint8_t *frame, size_t len, void *arg);
 
 void wlan_port_set_eapol_rx(wlan_eapol_rx_fn fn, void *arg);
 void wlan_port_set_data_rx(wlan_data_rx_fn fn, void *arg);
@@ -101,9 +107,26 @@ enum wlan_port_event {
 
 /* Borrowed address, valid only during the callback. Consumers copy and
  * queue notifications; they must not re-enter the protocol state machine. */
-typedef void (*wlan_event_fn)(enum wlan_port_event event,
-    const uint8_t *addr, void *arg);
+typedef void (*wlan_event_fn)(const struct wlan_port_adapter *adapter,
+    enum wlan_port_event event, const uint8_t *addr, void *arg);
 void wlan_port_set_event_handler(wlan_event_fn fn, void *arg);
+
+/* Resolve the adapter that owns an ifnet shell (NULL when the ifnet
+ * does not belong to any registered adapter).  The RX dispatch in the
+ * ifnet shell uses this to stamp frames with their origin. */
+const struct wlan_port_adapter *wlan_port_adapter_for_ifnet(void *ifp);
+
+/* The adapter's net80211 role; the lwIP bridge keys its link
+ * semantics on it (an AP netif stays up across station joins/leaves, a
+ * station netif follows association). */
+int wlan_port_adapter_is_hostap(const struct wlan_port_adapter *adapter);
+
+/* Attachment notification: called once per adapter that registers, in
+ * registration order, plus a replay of everything already registered
+ * when the presentation layer installs itself after wlan_start(). */
+typedef void (*wlan_port_attach_fn)(const struct wlan_port_adapter *adapter,
+    void *arg);
+void wlan_port_set_attach_notify(wlan_port_attach_fn fn, void *arg);
 
 /* Start one complete scan on the device worker, with no automatic join. */
 int wlan_port_scan(const uint8_t *ssid, size_t len);
@@ -128,6 +151,13 @@ void wlan_port_scan_dump(void);
  * attached; the port keeps a small registry of everything that did. */
 int wlan_port_select(const char *name);
 const char *wlan_port_active_name(void);
+
+/* Registry lookup without changing the active selection, and the
+ * per-adapter up (NULL = active).  The HOSTAP entry point drives a named
+ * adapter this way in two-NIC images. */
+struct wlan_port_adapter;
+const struct wlan_port_adapter *wlan_port_adapter_find(const char *name);
+int wlan_port_up_for(const char *name);
 
 /* How many NICs may attach at once (the registry bound). */
 #define WLAN_PORT_NIC_MAX 4

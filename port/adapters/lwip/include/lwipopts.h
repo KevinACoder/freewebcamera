@@ -61,6 +61,16 @@
 #define LWIP_SO_RCVTIMEO                1
 #define LWIP_NETIF_API                  1
 #define LWIP_TIMERS                     1
+/* Source-address routing (implemented in the wlan netif bridge): the
+ * board's own AP + station pair lives in ONE subnet, so destination
+ * matching alone would never send the loop traffic through the air.  A
+ * socket bound to one slot's address egresses through that slot. */
+#define LWIP_HOOK_IP4_ROUTE_SRC(src, dest) lwip_hook_ip4_route_src(src, dest)
+/* forward declarations only: this file is parsed before lwip's own
+ * types exist (struct tags are ABI-stable with the typedefs) */
+struct netif; struct ip4_addr;
+struct netif *lwip_hook_ip4_route_src(const struct ip4_addr *src,
+    const struct ip4_addr *dest);
 
 /* --- memory --------------------------------------------------------------- */
 
@@ -169,7 +179,10 @@
 #define LWIP_SINGLE_NETIF               0
 #define LWIP_HAVE_LOOPIF                0
 #define LWIP_NETIF_LOOPBACK             0
-#define LWIP_NETIF_STATUS_CALLBACK      0
+/* the bridge installs a status callback per netif: the first slot that
+ * gains an address becomes the default route (single-NIC images keep
+ * their off-subnet behaviour without hard-wiring one netif at boot) */
+#define LWIP_NETIF_STATUS_CALLBACK      1
 #define LWIP_NETIF_LINK_CALLBACK        0
 #define LWIP_NETIF_HOSTNAME             0
 #define LWIP_NETIF_EXT_STATUS_CALLBACK  0

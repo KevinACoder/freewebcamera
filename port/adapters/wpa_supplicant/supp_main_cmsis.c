@@ -349,17 +349,25 @@ static void wpa_do_connect(void *arg) {
 		os_memcpy(ssid->bssid, req->bssid, 6);
 		ssid->bssid_set = 1;
 	}
-	ssid->key_mgmt = WPA_KEY_MGMT_PSK;
-	ssid->proto = WPA_PROTO_RSN;
-	ssid->pairwise_cipher = WPA_CIPHER_CCMP;
-	ssid->group_cipher = WPA_CIPHER_CCMP;
-	ssid->passphrase = os_strdup(req->psk);
-	if (ssid->passphrase == NULL) {
-		wpa_printf(MSG_ERROR, "wpa: psk alloc failed");
-		wpa_supplicant_remove_network(wpa_wpa_s, ssid->id);
-		return;
+	if (req->psk[0] != '\0') {
+		ssid->key_mgmt = WPA_KEY_MGMT_PSK;
+		ssid->proto = WPA_PROTO_RSN;
+		ssid->pairwise_cipher = WPA_CIPHER_CCMP;
+		ssid->group_cipher = WPA_CIPHER_CCMP;
+		ssid->passphrase = os_strdup(req->psk);
+		if (ssid->passphrase == NULL) {
+			wpa_printf(MSG_ERROR, "wpa: psk alloc failed");
+			wpa_supplicant_remove_network(wpa_wpa_s, ssid->id);
+			return;
+		}
+		wpa_config_update_psk(ssid);
+	} else {
+		/* open network: no key management at all */
+		ssid->key_mgmt = WPA_KEY_MGMT_NONE;
+		ssid->proto = 0;
+		ssid->pairwise_cipher = WPA_CIPHER_NONE;
+		ssid->group_cipher = WPA_CIPHER_NONE;
 	}
-	wpa_config_update_psk(ssid);
 	ssid->disabled = 0;
 
 	wpa_config_update_prio_list(wpa_wpa_s->conf);
@@ -411,15 +419,18 @@ int wpa_port_connect_bssid(const char *ssid, const char *psk,
     const unsigned char *bssid) {
 	struct wpa_connect_req req;
 
-	if (wpa_wpa_s == NULL || ssid == NULL || psk == NULL ||
+	/* psk NULL/empty: open network (key_mgmt NONE in wpa_do_connect) */
+	if (wpa_wpa_s == NULL || ssid == NULL ||
 	    strlen(ssid) == 0 || strlen(ssid) >= sizeof(req.ssid) ||
-	    (strlen(psk) != 0 && strlen(psk) != 64 &&
+	    (psk != NULL && strlen(psk) != 0 && strlen(psk) != 64 &&
 		strlen(psk) < 8)) {
 		return -1;
 	}
 	memset(&req, 0, sizeof(req));
 	os_strlcpy(req.ssid, ssid, sizeof(req.ssid));
-	os_strlcpy(req.psk, psk, sizeof(req.psk));
+	if (psk != NULL) {
+		os_strlcpy(req.psk, psk, sizeof(req.psk));
+	}
 	if (bssid != NULL) {
 		os_memcpy(req.bssid, bssid, 6);
 		req.bssid_set = 1;

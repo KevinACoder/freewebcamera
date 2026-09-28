@@ -27,6 +27,23 @@
 
 #include "board.h"
 
+/* the net80211 prologue the driver adapters carry: wlan_port_adapter_
+ * for_ifnet/opmode read ic_ifp/ic_opmode out of the adapter's ic */
+#include <sys/queue.h>
+#include <sys/device.h>
+#include <sys/systm.h>
+#include <sys/kmem.h>
+#include <sys/mutex.h>
+#include <sys/mbuf.h>
+#include <net/if.h>
+#include <net/if_arp.h>
+#include <net/if_dl.h>
+#include <net/if_ether.h>
+#include <net/if_media.h>
+#include <net/if_types.h>
+#include <net80211/ieee80211_netbsd.h>
+#include <net80211/ieee80211_var.h>
+
 #include "port.h"
 #include "wlan_port_cmsis.h"
 #include "usb_platform.h"
@@ -104,6 +121,12 @@ static unsigned wlan_registered;
 static const struct wlan_port_adapter *wlan_active;
 static char wlan_nic_pref_name[16];
 static const char *wlan_nic_pref;
+
+/* attachment notification (the lwIP bridge creates a per-adapter netif
+ * here; NULL until the presentation layer installs itself) */
+static wlan_port_attach_fn wlan_attach_fn;
+static void *wlan_attach_arg;
+static void wlan_attach_notify(const struct wlan_port_adapter *adapter);
 
 /* ------------------------------------------------------------------ */
 
@@ -277,10 +300,53 @@ void wlan_port_adapter_register(const struct wlan_port_adapter *adapter) {
 			printf("wlan: adapter '%s' registered (inactive;"
 			    " preference is '%s')\n", adapter->name,
 			    wlan_nic_pref);
+			wlan_attach_notify(adapter);
 			return;
 		}
 	}
 	printf("wlan: adapter '%s' registered\n", adapter->name);
+	wlan_attach_notify(adapter);
+}
+
+static void wlan_attach_notify(const struct wlan_port_adapter *adapter) {
+	if (wlan_attach_fn != NULL) {
+		wlan_attach_fn(adapter, wlan_attach_arg);
+	}
+}
+
+void wlan_port_set_attach_notify(wlan_port_attach_fn fn, void *arg) {
+	unsigned i;
+
+	wlan_attach_fn = fn;
+	wlan_attach_arg = arg;
+	/* replay: the bridge installs itself from boot (net_start), the
+	 * adapters arrive later with wlan start - but a re-install after
+	 * wlan start must still see everything already registered */
+	for (i = 0; i < wlan_registered; i++) {
+		wlan_attach_fn(wlan_registry[i], wlan_attach_arg);
+	}
+}
+
+const struct wlan_port_adapter *wlan_port_adapter_for_ifnet(void *ifp) {
+	unsigned i;
+
+	if (ifp == NULL) {
+		return NULL;
+	}
+	for (i = 0; i < wlan_registered; i++) {
+		const struct ieee80211com *ic = wlan_registry[i]->ic;
+
+		if (ic != NULL && ic->ic_ifp == ifp) {
+			return wlan_registry[i];
+		}
+	}
+	return NULL;
+}
+
+int wlan_port_adapter_is_hostap(const struct wlan_port_adapter *adapter) {
+	const struct ieee80211com *ic = adapter != NULL ? adapter->ic : NULL;
+
+	return ic != NULL && ic->ic_opmode == IEEE80211_M_HOSTAP;
 }
 
 /* The effective active adapter.  A preference that nothing matched (typo, or
@@ -310,6 +376,26 @@ int wlan_port_select(const char *name) {
 		printf("wlan: adapter '%s' selected\n", a->name);
 	}
 	return 0;
+}
+
+/* Registry lookup without touching the active selection: the HOSTAP
+ * entry point (wlan_ap.c) drives a named adapter while the shell focus
+ * stays wherever the user left it. */
+const struct wlan_port_adapter *wlan_port_adapter_find(const char *name) {
+	return name != NULL ? wlan_registry_find(name) : NULL;
+}
+
+/* Bring a named adapter up (NULL = the active one).  The two-NIC images
+ * need this: the AP leg must not ride on whichever adapter happens to
+ * be active. */
+int wlan_port_up_for(const char *name) {
+	const struct wlan_port_adapter *a = name != NULL ?
+	    wlan_registry_find(name) : wlan_active_eff();
+
+	if (a == NULL || a->up == NULL) {
+		return -1;
+	}
+	return a->up();
 }
 
 const char *wlan_port_active_name(void) {
