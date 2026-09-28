@@ -73,6 +73,10 @@ struct wlan_port_adapter;
 struct wpa_net80211_drv_data {
 	void *ctx; /* wpa_s */
 	struct ieee80211com *ic;
+	/* the adapter ic was resolved from at bind time: scan and EAPOL TX
+	 * below go through it, so a shell `wlan nic` moving the focus to
+	 * the other NIC of a two-NIC image cannot reroute us */
+	const struct wlan_port_adapter *adapter;
 	struct wpa_driver_capa capa;
 	int associated;
 	int if_up;
@@ -88,6 +92,9 @@ extern const struct ieee80211_cipher ieee80211_cipher_ccmp;
 
 extern void *wlan_port_get_ic(void);
 extern int wlan_port_up(void);
+extern const struct wlan_port_adapter *wlan_port_adapter_active(void);
+extern int wlan_port_adapter_scan(const struct wlan_port_adapter *adapter,
+    const uint8_t *ssid, size_t len);
 
 /* bring the interface up on the calling (shell) thread; the chip init
  * can block on its workers, which must not run on the supplicant thread */
@@ -207,7 +214,14 @@ static void *freertos_init2(void *ctx, const char *ifname, void *global_priv) {
 		wpa_printf(MSG_ERROR, "wpa: no wlan device attached");
 		return NULL;
 	}
+	g_drv.adapter = wlan_port_adapter_active();
+	if (g_drv.adapter == NULL) {
+		wpa_printf(MSG_ERROR, "wpa: adapter vanished");
+		return NULL;
+	}
 	g_drv.ctx = ctx;
+	wpa_printf(MSG_INFO, "wpa: bound to adapter '%s'",
+	    g_drv.adapter->name);
 
 	ic = g_drv.ic;
 	ieee80211_crypto_register(&ieee80211_cipher_ccmp);
@@ -283,7 +297,7 @@ static int freertos_scan2(void *priv, struct wpa_driver_scan_params *params) {
 	}
 	eloop_cancel_timeout(wpa_port_scan_poll, NULL, NULL);
 	if (eloop_register_timeout(30, 0, wpa_port_scan_poll, NULL, NULL) < 0 ||
-	    wlan_port_scan(ssid, len) < 0) {
+	    wlan_port_adapter_scan(drv->adapter, ssid, len) < 0) {
 		__atomic_store_n(&drv->scan_pending, 0, __ATOMIC_RELEASE);
 		eloop_cancel_timeout(wpa_port_scan_poll, NULL, NULL);
 		return -1;

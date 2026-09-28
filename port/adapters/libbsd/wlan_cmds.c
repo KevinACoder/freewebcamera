@@ -140,27 +140,29 @@ static int cmd_wlan(int argc, char **argv)
 		return 0;
 	}
 
-	/* HOSTAP on a (named or active) adapter: open network, one shot.
-	 * The chip work lands on the driver worker; poll with
-	 * `wlan ap status`. */
+	/* HOSTAP on a named adapter: the nic argument keeps the shell focus
+	 * (and the supplicant riding it) wherever it was - start/stop act on
+	 * the radio you name, never on the active one. Poll with
+	 * `wlan ap status <nic>`. */
 	if (argc >= 3 && strcmp(argv[1], "ap") == 0 &&
 	    strcmp(argv[2], "start") == 0) {
-		const char *ssid = argv[3];
-		int ch = argc > 4 ? atoi(argv[4]) : 11;
-		int bintval = argc > 5 ? atoi(argv[5]) : 100;
+		const char *nic = argv[3];
+		const char *ssid = argv[4];
+		int ch = argc > 5 ? atoi(argv[5]) : 11;
+		int bintval = argc > 6 ? atoi(argv[6]) : 100;
 		int ret;
 
-		if (argc < 4) {
-			csh_printf(csh, "usage: wlan ap start <ssid> [ch] "
-				   "[bintval]\n");
+		if (argc < 5) {
+			csh_printf(csh, "usage: wlan ap start <nic> <ssid> "
+				   "[ch] [bintval]\n");
 			return 0;
 		}
-		ret = wlan_ap_start(NULL, ssid, (unsigned) ch,
+		ret = wlan_ap_start(nic, ssid, (unsigned) ch,
 		    (unsigned) bintval);
 		if (ret == 0) {
-			csh_printf(csh, "wlan: ap starting ssid=\"%s\" ch=%d "
-				   "bintval=%d (poll: wlan ap status)\n",
-				   ssid, ch, bintval);
+			csh_printf(csh, "wlan: ap starting %s ssid=\"%s\" "
+				   "ch=%d bintval=%d (poll: wlan ap status %s)\n",
+				   nic, ssid, ch, bintval, nic);
 		} else {
 			csh_printf(csh, "wlan: ap start failed (%d)\n", ret);
 		}
@@ -168,14 +170,29 @@ static int cmd_wlan(int argc, char **argv)
 	}
 	if (argc >= 3 && strcmp(argv[1], "ap") == 0 &&
 	    strcmp(argv[2], "stop") == 0) {
-		int ret = wlan_ap_stop(NULL);
+		int ret;
 
-		csh_printf(csh, "wlan: ap stop %s\n",
+		if (argc < 4) {
+			csh_printf(csh, "usage: wlan ap stop <nic>\n");
+			return 0;
+		}
+		ret = wlan_ap_stop(argv[3]);
+
+		csh_printf(csh, "wlan: ap stop %s %s\n", argv[3],
 			   ret == 0 ? "ok" : "(not running)");
 		return 0;
 	}
 	if (argc >= 2 && strcmp(argv[1], "ap") == 0) {
-		wlan_ap_status(NULL);
+		const char *nic = NULL;
+		int i = 2;
+
+		/* `wlan ap [status] [nic]`: a read, so the nic may default
+		 * to the active adapter without side effects */
+		if (i < argc && strcmp(argv[i], "status") == 0)
+			i++;
+		if (i < argc)
+			nic = argv[i];
+		wlan_ap_status(nic);
 		return 0;
 	}
 
@@ -481,10 +498,11 @@ static int cmd_wlan(int argc, char **argv)
 
 	csh_printf(csh,
 		   "usage: wlan start | scan [seconds] | status | nic <name>"
-		   " | ap start <ssid> [ch] [bintval] | ap stop | ap status"
+		   " | ap start <nic> <ssid> [ch] [bintval]"
+		   " | ap stop <nic> | ap status [nic]"
 		   WLAN_CMD_TAIL "\n");
 	return 0;
 }
 
-CSH_CMD_EXPORT_ALIAS_FULL(cmd_wlan, wlan, "wlan start | scan [s] | status | ap start/stop/status",
+CSH_CMD_EXPORT_ALIAS_FULL(cmd_wlan, wlan, "wlan start | scan [s] | status | ap start/stop/status <nic>",
 			  "net80211 port: bring up the radio, scan, run hostap");

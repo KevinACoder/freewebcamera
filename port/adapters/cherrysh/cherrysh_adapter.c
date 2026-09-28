@@ -498,15 +498,27 @@ static int cmd_uartint(int argc, char **argv)
 static int cmd_gicdiag(int argc, char **argv)
 {
 	chry_shell_t *csh = CSH_FROM_ARGV(argc, argv);
+	unsigned long spurious = 0;
+	unsigned long after_intid = 0;
 	uint32_t pmr = 0U;
 	uint32_t rpr = 0U;
 
+	(void)argc;
+	(void)argv;
+	/* tx_glue's spurious-ack forensics: the count plus which INTID the
+	 * latest spurious ack followed (130 = SDMMC1's DAT1 card interrupt,
+	 * the known re-pend source). */
+	extern void tx_glue_irq_spurious_stats(unsigned long *count,
+	    unsigned long *after_intid);
+
+	tx_glue_irq_spurious_stats(&spurious, &after_intid);
 	board_gicv3_diag(&pmr, &rpr);
 	csh_printf(csh,
-		   "gicdiag: PMR=%02x RPR=%02x console-intid=%u rx-down=%d\n",
+		   "gicdiag: PMR=%02x RPR=%02x console-intid=%u rx-down=%d"
+		   " spurious=%lu after-intid=%lu\n",
 		   (unsigned)pmr, (unsigned)rpr,
 		   (unsigned)BOARD_CONSOLE_INTID,
-		   uart_console_rx_down());
+		   uart_console_rx_down(), spurious, after_intid);
 	return 0;
 }
 

@@ -159,6 +159,19 @@ struct wlan_port_adapter;
 const struct wlan_port_adapter *wlan_port_adapter_find(const char *name);
 int wlan_port_up_for(const char *name);
 
+/* Adapter-scoped operations for consumers that pin one adapter at bind
+ * time (the supplicant bridge): the shell focus may move to the other
+ * NIC of a two-NIC image while these keep addressing the bound one.
+ * for_ic() resolves the adapter owning a given ieee80211com. */
+const struct wlan_port_adapter *wlan_port_adapter_active(void);
+const struct wlan_port_adapter *wlan_port_adapter_for_ic(const void *ic);
+int wlan_port_adapter_scan(const struct wlan_port_adapter *adapter,
+    const uint8_t *ssid, size_t len);
+int wlan_port_adapter_xmit(const struct wlan_port_adapter *adapter,
+    const uint8_t *frame, size_t len);
+int wlan_port_adapter_hwaddr(const struct wlan_port_adapter *adapter,
+    uint8_t addr[6]);
+
 /* How many NICs may attach at once (the registry bound). */
 #define WLAN_PORT_NIC_MAX 4
 

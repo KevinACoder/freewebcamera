@@ -398,6 +398,51 @@ int wlan_port_up_for(const char *name) {
 	return a->up();
 }
 
+/* Adapter-scoped operations: consumers that pin an adapter at bind time
+ * (the supplicant bridge) keep addressing it even after the shell focus
+ * moves to the other NIC of a two-NIC image. */
+const struct wlan_port_adapter *wlan_port_adapter_active(void) {
+	return wlan_active_eff();
+}
+
+const struct wlan_port_adapter *wlan_port_adapter_for_ic(const void *ic) {
+	int i;
+
+	if (ic == NULL) {
+		return NULL;
+	}
+	for (i = 0; i < wlan_registered; i++) {
+		if (wlan_registry[i]->ic == ic) {
+			return wlan_registry[i];
+		}
+	}
+	return NULL;
+}
+
+int wlan_port_adapter_scan(const struct wlan_port_adapter *a,
+    const uint8_t *ssid, size_t len) {
+	if (a == NULL || a->scan == NULL) {
+		return -1;
+	}
+	return a->scan(ssid, len);
+}
+
+int wlan_port_adapter_xmit(const struct wlan_port_adapter *a,
+    const uint8_t *frame, size_t len) {
+	if (a == NULL || a->xmit == NULL) {
+		return -1;
+	}
+	return a->xmit(frame, len);
+}
+
+int wlan_port_adapter_hwaddr(const struct wlan_port_adapter *a,
+    uint8_t addr[6]) {
+	if (a == NULL || a->get_hwaddr == NULL) {
+		return -1;
+	}
+	return a->get_hwaddr(addr);
+}
+
 const char *wlan_port_active_name(void) {
 	const struct wlan_port_adapter *a = wlan_active_eff();
 

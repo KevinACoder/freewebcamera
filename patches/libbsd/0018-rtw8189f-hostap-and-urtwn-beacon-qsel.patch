@@ -257,7 +257,7 @@ index 8aa55c737524..c0d9caf1ba49 100644
  unsigned rtw8189f_data_rate_get(void);
  void	rtw8189f_rx_drain(struct rtw8189f_softc *);
 diff --git a/sys/dev/usb/if_urtwn.c b/sys/dev/usb/if_urtwn.c
-index 4c0ee2aecd1e..a4b869eed089 100644
+index 4c0ee2aecd1e..d703d8574864 100644
 --- a/sys/dev/usb/if_urtwn.c
 +++ b/sys/dev/usb/if_urtwn.c
 @@ -2757,6 +2757,14 @@ urtwn_tx(struct urtwn_softc *sc, struct mbuf *m, struct ieee80211_node *ni,
@@ -275,3 +275,18 @@ index 4c0ee2aecd1e..a4b869eed089 100644
  	}
  
  	if (((txd_len + m->m_pkthdr.len) % 64) == 0) /* XXX: 64 */
+@@ -2839,9 +2847,13 @@ urtwn_tx(struct urtwn_softc *sc, struct mbuf *m, struct ieee80211_node *ni,
+ 			txd->txdw5 |= htole32(SM(R92C_TXDW5_DATARATE, 11));
+ 	} else if (type == IEEE80211_FC0_TYPE_MGT) {
+ 		DPRINTFN(DBG_TX, "mgmt packet", 0, 0, 0, 0);
++		/* tid carries the beacon/mgnt split picked above: the
++		 * descriptor, not the tid computation, is what the firmware
++		 * sees - a beacon programmed QSEL_MGNT here still goes out
++		 * as a one-shot and the BSS stays invisible on air */
+ 		txd->txdw1 |= htole32(
+ 		    SM(R92C_TXDW1_MACID, RTWN_MACID_BSS) |
+-		    SM(R92C_TXDW1_QSEL, R92C_TXDW1_QSEL_MGNT) |
++		    SM(R92C_TXDW1_QSEL, tid) |
+ 		    SM(R92C_TXDW1_RAID, R92C_RAID_11B));
+ 
+ 		/* Force CCK1. */

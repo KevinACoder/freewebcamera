@@ -115,6 +115,25 @@ static void vbar_install(void)
 
 /* --- interrupt dispatch ---------------------------------------------------- */
 
+/* Spurious-ack forensics, read by `gicdiag`: the INTID of the last real
+ * activation, plus the spurious-ack count and the INTID each spurious
+ * followed. Single-word volatile updates from the IRQ path, single-word
+ * reads from the shell - no locking needed. */
+static volatile uint32_t tx_irq_last_intid;
+static volatile uint32_t tx_irq_spurious_count;
+static volatile uint32_t tx_irq_spurious_after_intid;
+
+void tx_glue_irq_spurious_stats(unsigned long *count,
+    unsigned long *after_intid)
+{
+	if (count != NULL) {
+		*count = tx_irq_spurious_count;
+	}
+	if (after_intid != NULL) {
+		*after_intid = tx_irq_spurious_after_intid;
+	}
+}
+
 /* Called from tx_vectors.S with the frame already saved by
  * _tx_thread_context_save. This file acknowledges (EOI) - the port's entry
  * code does not touch the GIC. */
@@ -160,24 +179,27 @@ void tx_irq_handler(void)
 	} else if (id != 1023U) {
 		/* Everything else - and any SPI/LPI the board routed - goes
 		 * through the board's handler table. */
+		tx_irq_last_intid = id;
 		board_gicv3_dispatch(id);
 	} else {
-		/* Spurious (IAR=1023): same stamped raw marker as the
-		 * FreeRTOS glue, so both kernels produce comparable logs. No
-		 * EOI for a spurious ack.
+		/* Spurious (IAR=1023): no EOI below - the architecture's
+		 * answer for a pending that evaporated before activation.
 		 *
-		 * Known high-rate source (M11 r4, D55): the SDIO DAT1 line's
-		 * self-masking ISR produces one empty IAR per real interrupt
-		 * - harmless by design, but a scan-rate beacon stream still
-		 * floods the console at full rate, so the print is throttled
-		 * to every 100th occurrence. */
-		static uint32_t spurious_count;
-		static uint32_t spurious_last_print;
-
-		spurious_count++;
-		if ((spurious_count - spurious_last_print) >= 100u) {
-			spurious_last_print = spurious_count;
-			board_early_print_raw("irq: spurious (throttled, count)\n");
+		 * Identified source (matches D55 4b): the SDMMC1 card
+		 * interrupt (INTID 130, GIC_SPI 98 + 32) - a self-masking,
+		 * level-held DAT1 line. Its EOI races the line's slow fall:
+		 * the distributor re-pends while the level is still high,
+		 * the pend evaporates when DAT1 finally drops, and the next
+		 * IAR1 read returns 1023. One spurious ack per real card
+		 * interrupt, harmless by construction. Counted and named via
+		 * `gicdiag` (after-intid pinpoints the source); the console
+		 * gets one notice line when the first one lands, never the
+		 * full-rate flood. */
+		tx_irq_spurious_count++;
+		tx_irq_spurious_after_intid = tx_irq_last_intid;
+		if (tx_irq_spurious_count == 1u) {
+			board_early_print_raw(
+			    "irq: spurious acks started (see gicdiag)\n");
 		}
 	}
 

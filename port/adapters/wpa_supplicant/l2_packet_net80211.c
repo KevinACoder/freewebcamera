@@ -26,6 +26,9 @@
 
 struct l2_packet_data {
 	u8 own_addr[ETH_ALEN];
+	/* the adapter pinned when the supplicant bound its driver; EAPOL TX
+	 * below goes through it, never through the shell's active focus */
+	const struct wlan_port_adapter *adapter;
 	void (*rx_callback)(void *ctx, const u8 *src_addr, const u8 *buf,
 	    size_t len);
 	void *rx_callback_ctx;
@@ -34,7 +37,7 @@ struct l2_packet_data {
 struct l2_packet_data *l2_packet_init(const char *ifname,
     const u8 *own_addr, unsigned short protocol,
     void (*rx_callback)(void *ctx, const u8 *src_addr, const u8 *buf,
-	size_t len),
+    size_t len),
     void *rx_callback_ctx, int l2_hdr) {
 	struct l2_packet_data *l2;
 
@@ -46,9 +49,13 @@ struct l2_packet_data *l2_packet_init(const char *ifname,
 	if (l2 == NULL) {
 		return NULL;
 	}
+	/* the l2 socket is created right after the driver bind, inside the
+	 * same `wpa connect` shell command - the active adapter then still
+	 * is the one the driver pinned */
+	l2->adapter = wlan_port_adapter_active();
 	if (own_addr != NULL) {
 		os_memcpy(l2->own_addr, own_addr, ETH_ALEN);
-	} else if (wlan_port_get_hwaddr(l2->own_addr) != 0) {
+	} else if (wlan_port_adapter_hwaddr(l2->adapter, l2->own_addr) != 0) {
 		os_free(l2);
 		return NULL;
 	}
@@ -80,8 +87,8 @@ int l2_packet_send(struct l2_packet_data *l2, const u8 *dst_addr,
 	frame[2 * ETH_ALEN + 1] = (u8) proto;
 	os_memcpy(frame + 2 * ETH_ALEN + 2, buf, len);
 
-	return wlan_port_xmit(frame, len + 2 * ETH_ALEN + 2) >= 0 ?
-	    (int) len : -1;
+	return wlan_port_adapter_xmit(l2->adapter, frame,
+	    len + 2 * ETH_ALEN + 2) >= 0 ? (int) len : -1;
 }
 
 int l2_packet_get_ip_addr(struct l2_packet_data *l2, char *buf,
